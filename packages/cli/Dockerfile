@@ -1,4 +1,4 @@
-# Build stage
+# vaporRMM Agent Dockerfile
 FROM golang:1.23-alpine AS builder
 
 WORKDIR /build
@@ -8,33 +8,29 @@ RUN apk add --no-cache git
 
 # Copy go.mod and go.sum
 COPY go.mod go.sum ./
-
-# Download dependencies
 RUN go mod download
 
 # Copy source code
 COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo \
-    -ldflags="-w -s" \
-    -o vaporrmm-cli .
+# Build the agent
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o vaporrmm-agent .
 
 # Final stage
 FROM alpine:latest
 
 RUN apk --no-cache add ca-certificates
 
-WORKDIR /app
+WORKDIR /root/
 
-COPY --from=builder /build/vaporrmm-cli .
-COPY --from=builder /build/README.md .
+# Copy binary
+COPY --from=builder /build/vaporrmm-agent .
 
-EXPOSE 8080
+# Create non-root user
+RUN adduser -D -g '' appuser && \
+    chown -R appuser:appuser /root
+USER appuser
 
-ENTRYPOINT ["./vaporrmm-cli"]
-CMD ["--help"]
+EXPOSE 47990
 
-LABEL org.opencontainers.image.title="Vapor RMM CLI" \
-      org.opencontainers.image.description="Command-line interface for Vapor RMM" \
-      org.opencontainers.image.version="0.1.0"
+CMD ["./vaporrmm-agent"]

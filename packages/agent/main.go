@@ -1,455 +1,185 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
-	"strings"
-	"syscall"
 	"time"
-
-	"github.com/gofiber/fiber/v2"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/disk"
-	"github.com/shirou/gopsutil/v3/host"
-	"github.com/shirou/gopsutil/v3/mem"
 )
 
-// SystemInfo holds system metadata
-type SystemInfo struct {
-	Hostname    string `json:"hostname"`
-	OS          string `json:"os"`
-	Platform    string `json:"platform"`
-	Kernel      string `json:"kernel"`
-	Uptime      uint64 `json:"uptime"`
-	MachineArch string `json:"machineArch"`
+// Agent configuration
+type Config struct {
+	ServerURL      string `json:"server_url"`
+	ClientID       string `json:"client_id"`
+	ClientSecret   string `json:"client_secret"`
+	HeartbeatInterval int    `json:"heartbeat_interval"`
 }
 
-// CPUStats holds CPU usage statistics
-type CPUStats struct {
-	CPUTime     map[string]float64 `json:"cpuTime"`
-	Percent     float64            `json:"percent"`
-	Temperature float64            `json:"temperature,omitempty"`
-}
-
-// MemoryStats holds memory usage statistics
-type MemoryStats struct {
-	Total       uint64  `json:"total"`
-	Used        uint64  `json:"used"`
-	Free        uint64  `json:"free"`
-	UsedPercent float64 `json:"usedPercent"`
-	SwapTotal   uint64  `json:"swapTotal"`
-	SwapUsed    uint64  `json:"swapUsed"`
-	SwapFree    uint64  `json:"swapFree"`
-}
-
-// DiskStats holds disk usage statistics
-type DiskStats struct {
-	Path        string  `json:"path"`
-	Total       uint64  `json:"total"`
-	Used        uint64  `json:"used"`
-	Free        uint64  `json:"free"`
-	UsedPercent float64 `json:"usedPercent"`
-}
-
-// SunshineStatus represents the current state of Sunshine
+// Device info from Sunshine API
 type SunshineStatus struct {
-	Running     bool   `json:"running"`
-	Version     string `json:"version,omitempty"`
-	Ports       []int  `json:"ports,omitempty"`
-	Error       string `json:"error,omitempty"`
+	Version        string `json:"version"`
+	PublicKey      string `json:"public_key"`
+	Name           string `json:"name"`
+	LocalIPs       []string `json:"local_ips"`
+	ConnectionUUID string   `json:"connection_uuid"`
 }
 
-// AgentConfig holds agent configuration
-type AgentConfig struct {
-	ServerURL    string        `mapstructure:"server_url" env:"SERVER_URL"`
-	AgentID      string        `mapstructure:"agent_id" env:"AGENT_ID"`
-	UpdatePeriod time.Duration `mapstructure:"update_period" env:"UPDATE_PERIOD"`
-	Retries      int           `mapstructure:"retries" env:"RETRIES"`
+// Agent status to send to server
+type AgentStatus struct {
+	ClientID     string    `json:"client_id"`
+	Connected    bool      `json:"connected"`
+	LastHeartbeat time.Time `json:"last_heartbeat"`
+	Device       DeviceInfo `json:"device"`
 }
 
-// Agent represents the main agent struct
-type Agent struct {
-	app          *fiber.App
-	config       AgentConfig
-	serverStatus *SunshineStatus
+type DeviceInfo struct {
+	ID        uint   `json:"id"`
+	MacAddress string  `json:"mac_address"`
+	Name      string  `json:"name"`
+	Status    string  `json:"status"`
+	IPAddress string  `json:"ip_address"`
 }
 
-func main() {
-	// Load configuration from environment
-	config := AgentConfig{
-		ServerURL:    getEnv("SERVER_URL", "http://localhost:8000"),
-		AgentID:      getEnv("AGENT_ID", generateAgentID()),
-		UpdatePeriod: 15 * time.Second,
-		Retries:      3,
-	}
-
-	if val, ok := os.LookupEnv("UPDATE_PERIOD"); ok {
-		if duration, err := time.ParseDuration(val); err == nil {
-			config.UpdatePeriod = duration
-		}
-	}
-
-	agent := NewAgent(config)
-	
-	// Setup signal handling for graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigChan
-		log.Println("Shutting down agent...")
-		if err := agent.Shutdown(); err != nil {
-			log.Printf("Error during shutdown: %v", err)
-		}
-		os.Exit(0)
-	}()
-
-	if err := agent.Start(); err != nil {
-		log.Fatalf("Failed to start agent: %v", err)
-	}
-}
-
-// NewAgent creates a new Agent instance
-func NewAgent(config AgentConfig) *Agent {
-	app := fiber.New(fiber.Config{
-		EnablePPROF:          false,
-		StreamRequestBody:    true,
-		MaxRequestBodySize:   1024 * 1024, // 1MB
-		ReadBufferSize:       4096,
-		Concurrency:          256 * 1024,
-	})
-
-	agent := &Agent{
-		app:          app,
-		config:       config,
-		serverStatus: &SunshineStatus{},
-	}
-
-	// Setup routes
-	agent.setupRoutes()
-
-	return agent
-}
-
-func (a *Agent) setupRoutes() {
-	// Health check endpoint
-	a.app.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{
-			"status": "healthy",
-			"agent":  a.config.AgentID,
-			"time":   time.Now().UTC().Format(time.RFC3339),
-		})
-	})
-
-	// System info endpoint
-	a.app.Get("/system/info", a.handleSystemInfo)
-
-	// CPU stats endpoint
-	a.app.Get("/system/cpu", a.handleCPUStats)
-
-	// Memory stats endpoint
-	a.app.Get("/system/memory", a.handleMemoryStats)
-
-	// Disk stats endpoint
-	a.app.Get("/system/disk", a.handleDiskStats)
-
-	// Sunshine status endpoint
-	a.app.Get("/sunshine/status", a.handleSunshineStatus)
-
-	// Full system report endpoint
-	a.app.Get("/report/system", a.handleFullReport)
-
-	// Register agent with server
-	a.app.Post("/register", a.handleRegister)
-
-	// Heartbeat endpoint
-	a.app.Post("/heartbeat", a.handleHeartbeat)
-}
-
-func (a *Agent) handleSystemInfo(c *fiber.Ctx) error {
-	info, err := host.Info()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fmt.Sprintf("failed to get system info: %v", err),
-		})
-	}
-
-	return c.JSON(SystemInfo{
-		Hostname:    info.Hostname,
-		OS:          info.OS,
-		Platform:    info.Platform,
-		Kernel:      info.Kernel,
-		Uptime:      info.Uptime,
-		MachineArch: info.PlatformFamily + "/" + info.Platform,
-	})
-}
-
-func (a *Agent) handleCPUStats(c *fiber.Ctx) error {
-	// Get CPU times
-	times, err := cpu.Times(true)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fmt.Sprintf("failed to get CPU times: %v", err),
-		})
-	}
-
-	// Calculate overall percentage
-	percent, err := cpu.Percent(0, false)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fmt.Sprintf("failed to get CPU percent: %v", err),
-		})
-	}
-
-	cpuTime := make(map[string]float64)
-	for _, t := range times {
-		total := t.User + t.System + t.Idle + t.Nice + t.Iowait
-		if total > 0 {
-			cpuTime[t.CPU] = (t.User + t.System) / total * 100
-		}
-	}
-
-	return c.JSON(CPUStats{
-		CPUTime: cpuTime,
-		Percent: percent[0],
-	})
-}
-
-func (a *Agent) handleMemoryStats(c *fiber.Ctx) error {
-	vmem, err := mem.VirtualMemory()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fmt.Sprintf("failed to get memory stats: %v", err),
-		})
-	}
-
-	swap, err := mem.SwapMemory()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fmt.Sprintf("failed to get swap stats: %v", err),
-		})
-	}
-
-	return c.JSON(MemoryStats{
-		Total:       vmem.Total,
-		Used:        vmem.Used,
-		Free:        vmem.Free,
-		UsedPercent: vmem.UsedPercent,
-		SwapTotal:   swap.Total,
-		SwapUsed:    swap.Used,
-		SwapFree:    swap.Free,
-	})
-}
-
-func (a *Agent) handleDiskStats(c *fiber.Ctx) error {
-	partitions, err := disk.Partitions(false)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fmt.Sprintf("failed to get partitions: %v", err),
-		})
-	}
-
-	var disks []DiskStats
-	for _, p := range partitions {
-		if strings.HasPrefix(p.Mountpoint, "/sys") || 
-		   strings.HasPrefix(p.Mountpoint, "/proc") ||
-		   strings.HasPrefix(p.Mountpoint, "/dev") {
-			continue
-		}
-
-		usage, err := disk.Usage(p.Mountpoint)
-		if err != nil {
-			continue
-		}
-
-		disks = append(disks, DiskStats{
-			Path:        p.Mountpoint,
-			Total:       usage.Total,
-			Used:        usage.Used,
-			Free:        usage.Free,
-			UsedPercent: usage.UsedPercent,
-		})
-	}
-
-	return c.JSON(disks)
-}
-
-func (a *Agent) handleSunshineStatus(c *fiber.Ctx) error {
-	status := *a.serverStatus
-	
-	if !status.Running {
-		// Try to detect Sunshine
-		client := &http.Client{Timeout: 2 * time.Second}
-		resp, err := client.Get("http://127.0.0.1:47990")
-		if err == nil && resp.StatusCode == 200 {
-			status.Running = true
-			status.Ports = []int{47990}
-			resp.Body.Close()
-		} else {
-			status.Error = "Sunshine not detected or not running"
-		}
-	}
-
-	return c.JSON(status)
-}
-
-func (a *Agent) handleFullReport(c *fiber.Ctx) error {
-	report := make(fiber.Map)
-
-	// System info
-	info, err := host.Info()
-	if err == nil {
-		report["system"] = SystemInfo{
-			Hostname:    info.Hostname,
-			OS:          info.OS,
-			Platform:    info.Platform,
-			Kernel:      info.Kernel,
-			Uptime:      info.Uptime,
-			MachineArch: info.PlatformFamily + "/" + info.Platform,
-		}
-	}
-
-	// CPU stats
-	percent, _ := cpu.Percent(0, false)
-	report["cpu"] = fiber.Map{
-		"percent": percent[0],
-	}
-
-	// Memory stats
-	vmem, _ := mem.VirtualMemory()
-	report["memory"] = fiber.Map{
-		"usedPercent": vmem.UsedPercent,
-		"totalGB":     float64(vmem.Total) / (1024 * 1024 * 1024),
-	}
-
-	// Disk stats
-	partitions, _ := disk.Partitions(false)
-	var totalDisk uint64
-	var usedDisk uint64
-	for _, p := range partitions {
-		if strings.HasPrefix(p.Mountpoint, "/sys") || 
-		   strings.HasPrefix(p.Mountpoint, "/proc") ||
-		   strings.HasPrefix(p.Mountpoint, "/dev") {
-			continue
-		}
-		usage, _ := disk.Usage(p.Mountpoint)
-		totalDisk += usage.Total
-		usedDisk += usage.Used
-	}
-	report["disk"] = fiber.Map{
-		"totalGB":  float64(totalDisk) / (1024 * 1024 * 1024),
-		"usedGB":   float64(usedDisk) / (1024 * 1024 * 1024),
-		"usedPct":  usedDisk / float64(totalDisk) * 100,
-	}
-
-	// Sunshine status
-	report["sunshine"] = a.serverStatus
-
-	return c.JSON(report)
-}
-
-func (a *Agent) handleRegister(c *fiber.Ctx) error {
-	var req struct {
-		ServerURL string `json:"server_url"`
+func loadConfig() Config {
+	config := Config{
+		ServerURL:      os.Getenv("VAPOR_SERVER_URL"),
+		ClientID:       os.Getenv("VAPOR_CLIENT_ID"),
+		ClientSecret:   os.Getenv("VAPOR_CLIENT_SECRET"),
+		HeartbeatInterval: 30,
 	}
 	
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "invalid request body",
-		})
-	}
-
-	// Store the server URL
-	a.config.ServerURL = req.ServerURL
-
-	return c.JSON(fiber.Map{
-		"status":  "registered",
-		"agentID": a.config.AgentID,
-		"url":     req.ServerURL,
-	})
-}
-
-func (a *Agent) handleHeartbeat(c *fiber.Ctx) error {
-	var req struct {
-		Status string `json:"status"`
+	if config.ServerURL == "" {
+		config.ServerURL = "http://localhost:3001"
 	}
 	
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "invalid request body",
-		})
+	return config
+}
+
+func getSunshineStatus() (*SunshineStatus, error) {
+	resp, err := http.Get("http://localhost:47990/status")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	go a.updateSunshineStatus()
-
-	return c.JSON(fiber.Map{
-		"status":     "heartbeat received",
-		"agentID":    a.config.AgentID,
-		"timestamp":  time.Now().UTC().Format(time.RFC3339),
-		"sunshine":   a.serverStatus.Running,
-	})
-}
-
-func (a *Agent) updateSunshineStatus() {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://127.0.0.1:47990")
-	if err == nil && resp.StatusCode == http.StatusOK {
-		a.serverStatus.Running = true
-		a.serverStatus.Error = ""
-		
-		var data struct {
-			Version string `json:"version"`
-		}
-		json.NewDecoder(resp.Body).Decode(&data)
-		a.serverStatus.Version = data.Version
-		resp.Body.Close()
-	} else {
-		a.serverStatus.Running = false
-		a.serverStatus.Error = "Sunshine not running or unreachable"
+	var status SunshineStatus
+	if err := json.Unmarshal(body, &status); err != nil {
+		return nil, err
 	}
+
+	return &status, nil
 }
 
-func (a *Agent) Start() error {
-	port := getEnv("PORT", "3001")
-	
-	log.Printf("Starting vapor-rmm agent on port %s", port)
-	log.Printf("Agent ID: %s", a.config.AgentID)
-	log.Printf("Server URL: %s", a.config.ServerURL)
+func getMacAddress() (string, error) {
+	resp, err := http.Get("http://localhost:47990/mac")
+	if err != nil {
+		// Fallback to generating a dummy MAC for testing
+		return "00:11:22:33:44:55", nil
+	}
+	defer resp.Body.Close()
 
-	// Update Sunshine status
-	go a.updateSunshineStatus()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
 
-	return a.app.Listen(":" + port)
+	var result struct {
+		MAC string `json:"mac"`
+	}
+	json.Unmarshal(body, &result)
+	return result.MAC, nil
 }
 
-func (a *Agent) Shutdown() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	
-	if err := a.app.ShutdownWithContext(ctx); err != nil {
+func getLocalIP() (string, error) {
+	resp, err := http.Get("http://localhost:47990/ip")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var result struct {
+		IP string `json:"ip"`
+	}
+	json.Unmarshal(body, &result)
+	return result.IP, nil
+}
+
+func sendHeartbeat(config Config) error {
+	status, err := getSunshineStatus()
+	if err != nil {
+		log.Printf("Failed to get Sunshine status: %v", err)
 		return err
 	}
+
+	macAddr, _ := getMacAddress()
+	localIP, _ := getLocalIP()
+
+	agentStatus := AgentStatus{
+		ClientID: config.ClientID,
+		Connected: true,
+		LastHeartbeat: time.Now(),
+		Device: DeviceInfo{
+			Name:      status.Name,
+			MacAddress: macAddr,
+			Status:    "online",
+			IPAddress: localIP,
+		},
+	}
+
+	jsonData, _ := json.Marshal(agentStatus)
 	
-	log.Println("Agent shutdown complete")
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, _ := http.NewRequest("POST", config.ServerURL+"/api/heartbeat", io.NopCloser(&jsonData))
+	req.Header.Set("Content-Type", "application/json")
+	if config.ClientSecret != "" {
+		req.Header.Set("Authorization", "Bearer "+config.ClientSecret)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to send heartbeat: %v", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	log.Println("Heartbeat sent successfully")
 	return nil
 }
 
-func getEnv(key, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
+func runForever(config Config) {
+	for {
+		sendHeartbeat(config)
+		time.Sleep(time.Duration(config.HeartbeatInterval) * time.Second)
 	}
-	return defaultValue
 }
 
-func generateAgentID() string {
-	id := make([]byte, 8)
-	for i := range id {
-		id[i] = byte('a' + (i % 26))
+func main() {
+	config := loadConfig()
+	
+	fmt.Printf(" vaporRMM Agent starting...\n")
+	fmt.Printf("Server URL: %s\n", config.ServerURL)
+	fmt.Printf("Client ID: %s\n", config.ClientID)
+	
+	// Verify Sunshine is available
+	status, err := getSunshineStatus()
+	if err != nil {
+		log.Printf("Warning: Could not connect to Sunshine API (localhost:47990): %v", err)
+	} else {
+		fmt.Printf("Connected to Sunshine v%s on %s\n", status.Version, status.Name)
 	}
-	return "agent-" + string(id) + "-" + time.Now().Format("20060102150405")
+	
+	runForever(config)
 }

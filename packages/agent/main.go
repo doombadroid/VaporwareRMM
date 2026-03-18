@@ -66,6 +66,7 @@ func (a *Agent) Start() error {
 	http.HandleFunc("/agent/commands", a.handleCommands)
 	http.HandleFunc("/agent/results", a.handleResults)
 	http.HandleFunc("/agent/run", a.handleRunCommand)
+	http.HandleFunc("/metrics", a.handleMetrics)
 
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", a.port), nil); err != nil {
 		return fmt.Errorf("failed to start agent server: %w", err)
@@ -329,6 +330,55 @@ func getCPUName(info []cpu.InfoStat) string {
 func (a *Agent) SetDeviceID(id string) {
 	a.deviceID = id
 	log.Printf("Agent registered with device ID: %s", id)
+}
+
+func (a *Agent) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Get CPU metrics
+	cpuPercent, _ := cpu.Percent(0, false)
+	cpuInfo, _ := cpu.Info()
+
+	// Get memory metrics
+	memInfo, _ := mem.VirtualMemory()
+
+	// Get disk metrics
+	diskInfo, _ := disk.Usage("/")
+
+	// Get system load (1m, 5m, 15m)
+	loadAvg, _ := host.LoadAverage()
+
+	metrics := map[string]interface{}{
+		"timestamp": time.Now().Unix(),
+		"cpu": map[string]interface{}{
+			"percent":     cpuPercent[0],
+			"cores":       runtime.NumCPU(),
+			"model":       getCPUName(cpuInfo),
+		},
+		"memory": map[string]interface{}{
+			"total":       memInfo.Total,
+			"used":        memInfo.Used,
+			"free":        memInfo.Free,
+			"percent":     memInfo.Percent,
+		},
+		"disk": map[string]interface{}{
+			"total":       diskInfo.Total,
+			"used":        diskInfo.Used,
+			"free":        diskInfo.Free,
+			"percent":     diskInfo.Percent,
+		},
+		"load": map[string]interface{}{
+			"1m":  loadAvg[0],
+			"5m":  loadAvg[1],
+			"15m": loadAvg[2],
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
 }
 
 func main() {

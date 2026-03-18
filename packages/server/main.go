@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -290,6 +293,108 @@ func main() {
 		}
 		
 		return c.JSON(d)
+	})
+
+	// Send command to device
+	app.Post("/api/devices/:id/command", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		var cmdReq struct {
+			Type    string `json:"type"`
+			Command string `json:"command"`
+		}
+		if err := c.BodyParser(&cmdReq); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "Invalid request body"})
+		}
+
+		// Get device to find its hostname
+		var d Device
+		err := db.QueryRow("SELECT id, hostname FROM devices WHERE id = ?", id).Scan(&d.ID, &d.Hostname)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
+		}
+
+		// Create command record in database
+		cmdID := uuid.New().String()
+		cmdData, _ := json.Marshal(map[string]interface{}{
+			"id":        cmdID,
+			"type":      cmdReq.Type,
+			"payload":   map[string]string{"command": cmdReq.Command},
+			"created_at": time.Now(),
+		})
+
+		_, err = db.Exec(
+			`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			cmdID, id, cmdReq.Type, string(cmdData), "pending", time.Now().Unix(),
+		)
+		if err != nil {
+			// Try creating table if doesn't exist
+			db.Exec(`CREATE TABLE IF NOT EXISTS device_commands (
+				id TEXT PRIMARY KEY,
+				device_id TEXT,
+				type TEXT,
+				payload TEXT,
+				status TEXT,
+				output TEXT,
+				created_at INTEGER,
+				finished_at INTEGER
+			)`)
+			db.Exec(
+				`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+				cmdID, id, cmdReq.Type, string(cmdData), "pending", time.Now().Unix(),
+			)
+		}
+
+		// Try to send command directly to agent if online
+		if d.Hostname != "" {
+			go func() {
+				resp, err := http.Post(
+					fmt.Sprintf("http://localhost:47991/agent/run"),
+					"application/json",
+					bytes.NewBuffer(cmdData),
+				)
+				if err == nil && resp.StatusCode == 200 {
+					defer resp.Body.Close()
+					db.Exec(`UPDATE device_commands SET status = ?, finished_at = ? WHERE id = ?`, "completed", time.Now().Unix(), cmdID)
+				}
+			}()
+		}
+
+		return c.JSON(map[string]interface{}{
+			"message":    "Command sent",
+			"command_id": cmdID,
+		})
+	})
+
+	// Get pending commands for device
+	app.Get("/agent/:hostname/commands", func(c *fiber.Ctx) error {
+		hostname := c.Params("hostname")
+
+		// Get device ID by hostname
+		var d Device
+		err := db.QueryRow("SELECT id FROM devices WHERE hostname = ?", hostname).Scan(&d.ID)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
+		}
+
+		rows, err := db.Query(`SELECT payload FROM device_commands WHERE device_id = ? AND status = 'pending' ORDER BY created_at ASC`, d.ID)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "Failed to query commands"})
+		}
+		defer rows.Close()
+
+		var commands []map[string]interface{}
+		for rows.Next() {
+			var payload string
+			err := rows.Scan(&payload)
+			if err == nil {
+				var cmd map[string]interface{}
+				json.Unmarshal([]byte(payload), &cmd)
+				commands = append(commands, cmd)
+			}
+		}
+
+		return c.JSON(commands)
 	})
 
 	app.Listen(":3001")

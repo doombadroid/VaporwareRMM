@@ -1,325 +1,195 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"log"
 	"os"
-	"sync"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/contrib/websocket"
-	"github.com/gofiber/fiber/v2/middleware/cors"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
+// Device represents a managed device
 type Device struct {
-	ID        uint   `gorm:"primaryKey" json:"id"`
-	Name      string `json:"name"`
-	Hostname  string `json:"hostname"`
-	IPAddress string `json:"ip_address"`
+	ID              string `json:"id" gorm:"primaryKey"`
+	Name            string `json:"name"`
+	Hostname        string `json:"hostname"`
+	IPAddress       string `json:"ip_address"`
+	MacAddress      string `json:"mac_address"`
+	OSName          string `json:"os_name"`
+	OSVersion       string `json:"os_version"`
+	KernelVersion   string `json:"kernel_version"`
+	AgentVersion    string `json:"agent_version"`
+	Status          string `json:"status"` // online, offline
+	LastSeen        int64  `json:"last_seen"`
+	CreatedAt       int64  `json:"created_at"`
+	PublicKey       string `json:"public_key,omitempty"`
+	UserData        string `json:"user_data,omitempty"`
+	SystemUUID      string `json:"system_uuid,omitempty"`
+	SerialNumber    string `json:"serial_number,omitempty"`
+	Manufacturer    string `json:"manufacturer,omitempty"`
+	Model           string `json:"model,omitempty"`
+	CPU             string `json:"cpu,omitempty"`
+	Memory          int64  `json:"memory,omitempty"` // in bytes
+	DiskSize        int64  `json:"disk_size,omitempty"`
+	Timezone        string `json:"timezone,omitempty"`
+	bootTime        int64  `json:"-"`
+}
+
+// StatusResponse for health checks
+type StatusResponse struct {
 	Status    string `json:"status"`
-	LastSeen  string `json:"last_seen"`
-	Uptime    int64  `json:"uptime"`
-	CPU       string `json:"cpu"`
-	Memory    uint64 `json:"memory"`
-	Disk      uint64 `json:"disk"`
-	GPUs      string `json:"gpus"`
-	Network   string `json:"network"`
-	Drives    string `json:"drives"`
+	Timestamp int64  `json:"timestamp"`
+	Version   string `json:"version"`
 }
-
-type AgentStatus struct {
-	Action    string      `json:"action"`
-	Data      interface{} `json:"data"`
-	Timestamp string      `json:"timestamp"`
-}
-
-var db *gorm.DB
-
-// WebSocket broadcast channel
-type BroadcastMsg struct {
-	Action    string      `json:"action"`
-	Data      interface{} `json:"data"`
-	Timestamp string      `json:"timestamp"`
-}
-
-var (
-	wsClients   = make(map[*websocket.Conn]bool)
-	wsMu        sync.RWMutex
-	broadcastCh chan BroadcastMsg
-)
 
 func main() {
-	var err error
-	db, err = gorm.Open(sqlite.Open("devices.db"), &gorm.Config{})
-	if err != nil {
-		log.Fatal("Failed to connect to database:", err)
-	}
-
-	// Auto migrate the schema
-	err = db.AutoMigrate(&Device{})
-	if err != nil {
-		log.Fatal("Failed to migrate database:", err)
-	}
-
 	app := fiber.New()
 
-	// CORS middleware
-	app.Use(cors.New())
+	// In-memory store (use database in production)
+	devices := make(map[string]Device)
 
-	app.Get("/", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{
-			"message": "Vapor RMM API",
-			"version": "1.0.0",
+	// Health check endpoint
+	app.Get("/health", func(c *fiber.Ctx) error {
+		return c.JSON(StatusResponse{
+			Status:  "ok",
+			Version: "1.0.0",
 		})
 	})
 
-	app.Get("/api/devices", GetDevices)
-	app.Post("/api/devices", CreateDevice)
-	app.Get("/api/devices/:id", GetDevice)
-	app.Put("/api/devices/:id", UpdateDevice)
-	app.Delete("/api/devices/:id", DeleteDevice)
-
-	// Register device from agent
-	app.Post("/api/devices/register", RegisterDeviceFromAgent)
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "3001"
-	}
-
-	// Start WebSocket broadcast goroutine
-	broadcastCh = make(chan BroadcastMsg, 10)
-	go broadcastLoop()
-
-	// HTTP endpoint for broadcasts (from agents)
-	app.Post("/api/status", func(c *fiber.Ctx) error {
-		status := AgentStatus{}
-		if err := c.BodyParser(&status); err != nil {
-			return c.Status(400).JSON(fiber.Map{"error": "Invalid request body"})
+	// Get all devices
+	app.Get("/api/devices", func(c *fiber.Ctx) error {
+		deviceList := make([]Device, 0, len(devices))
+		for _, d := range devices {
+			deviceList = append(deviceList, d)
 		}
-		broadcastCh <- BroadcastMsg{
-			Action:    status.Action,
-			Data:      status.Data,
-			Timestamp: "now",
-		}
-		return c.JSON(fiber.Map{"status": "received"})
+		return c.JSON(deviceList)
 	})
 
-	// WebSocket route for real-time updates
-	app.Get("/ws", websocket.New(wsHandler))
-
-	log.Printf("Server starting on port %s\n", port)
-	log.Fatal(app.Listen(fmt.Sprintf(":%s", port)))
-}
-
-// wsHandler handles WebSocket connections from dashboard clients
-func wsHandler(c *websocket.Conn) {
-	defer c.Close()
-
-	wsMu.Lock()
-	wsClients[c] = true
-	wsMu.Unlock()
-
-	log.Println("New WebSocket client connected:", c.IP())
-
-	ctx := context.Background()
-
-	// Keep connection alive with periodic pings
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			// Send ping to client
-			if err := c.Write(ctx, websocket.MessageText, []byte(`{"type":"ping"}`)); err != nil {
-				log.Printf("Failed to send ping: %v", err)
-				wsMu.Lock()
-				delete(wsClients, c)
-				wsMu.Unlock()
-				return
-			}
+	// Get device by ID
+	app.Get("/api/devices/:id", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		if device, ok := devices[id]; ok {
+			return c.JSON(device)
 		}
-	}
-}
+		return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
+	})
 
-// RegisterDeviceFromAgent registers or updates a device from agent data
-func RegisterDeviceFromAgent(c *fiber.Ctx) error {
-	var deviceData map[string]interface{}
-	if err := c.BodyParser(&deviceData); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid request body"})
-	}
-
-	device, err := UpdateDeviceFromAgent(deviceData)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": fmt.Sprintf("Failed to update device: %v", err)})
-	}
-
-	broadcastCh <- BroadcastMsg{
-		Action:    "register",
-		Data:      device,
-		Timestamp: "now",
-	}
-	return c.JSON(device)
-}
-
-func GetDevices(c *fiber.Ctx) error {
-	var devices []Device
-	err := db.Find(&devices).Error
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to fetch devices"})
-	}
-	return c.JSON(devices)
-}
-
-func CreateDevice(c *fiber.Ctx) error {
-	device := new(Device)
-	if err := c.BodyParser(device); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid request body"})
-	}
-	err := db.Create(device).Error
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to create device"})
-	}
-	broadcastCh <- BroadcastMsg{
-		Action:    "create",
-		Data:      device,
-		Timestamp: "now",
-	}
-	return c.JSON(device)
-}
-
-func GetDevice(c *fiber.Ctx) error {
-	id, _ := c.ParamsInt("id")
-	var device Device
-	err := db.First(&device, id).Error
-	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"error": "Device not found"})
-	}
-	return c.JSON(device)
-}
-
-func UpdateDevice(c *fiber.Ctx) error {
-	id, _ := c.ParamsInt("id")
-	var device Device
-	err := db.First(&device, id).Error
-	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"error": "Device not found"})
-	}
-	if err := c.BodyParser(&device); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid request body"})
-	}
-	err = db.Save(&device).Error
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to update device"})
-	}
-	broadcastCh <- BroadcastMsg{
-		Action:    "update",
-		Data:      device,
-		Timestamp: "now",
-	}
-	return c.JSON(device)
-}
-
-func DeleteDevice(c *fiber.Ctx) error {
-	id, _ := c.ParamsInt("id")
-	err := db.Delete(&Device{}, id).Error
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to delete device"})
-	}
-	broadcastCh <- BroadcastMsg{
-		Action:    "delete",
-		Data:      map[string]uint{"id": uint(id)},
-		Timestamp: "now",
-	}
-	return c.SendString("Device deleted successfully")
-}
-
-// broadcastLoop sends updates to all WebSocket clients
-func broadcastLoop() {
-	for msg := range broadcastCh {
-		payload, err := json.Marshal(msg)
-		if err != nil {
-			log.Printf("Failed to marshal payload: %v", err)
-			continue
+	// Register new device (agent registration)
+	app.Post("/api/devices", func(c *fiber.Ctx) error {
+		var device Device
+		if err := c.BodyParser(&device); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "Invalid request body"})
 		}
 
-		wsMu.RLock()
-		clients := make(map[*websocket.Conn]bool)
-		for k := range wsClients {
-			clients[k] = true
-		}
-		wsMu.RUnlock()
+		device.ID = generateID()
+		device.CreatedAt = 0 // Will be set by database in production
+		device.LastSeen = 0
+		device.Status = "online"
 
-		for client := range clients {
-			if err := client.Write(context.Background(), websocket.MessageText, payload); err != nil {
-				log.Printf("Failed to broadcast to client: %v", err)
-				wsMu.Lock()
-				delete(wsClients, client)
-				wsMu.Unlock()
-			}
+		devices[device.ID] = device
+		return c.JSON(device)
+	})
+
+	// Update device status
+	app.Put("/api/devices/:id", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		if _, ok := devices[id]; !ok {
+			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
 		}
+
+		var update Device
+		if err := c.BodyParser(&update); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "Invalid request body"})
+		}
+
+		device := devices[id]
+		device.LastSeen = 0 // Will be set by database in production
+		device.Status = "online"
+
+		if update.Name != "" {
+			device.Name = update.Name
+		}
+		if update.Hostname != "" {
+			device.Hostname = update.Hostname
+		}
+		if update.IPAddress != "" {
+			device.IPAddress = update.IPAddress
+		}
+
+		devices[id] = device
+		return c.JSON(device)
+	})
+
+	// Delete device
+	app.Delete("/api/devices/:id", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		if _, ok := devices[id]; !ok {
+			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
+		}
+		delete(devices, id)
+		return c.JSON(map[string]string{"message": "Device deleted successfully"})
+	})
+
+	// Agent heartbeat endpoint
+	app.Post("/api/devices/:id/heartbeat", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		device, ok := devices[id]
+		if !ok {
+			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
+		}
+
+		device.LastSeen = 0 // Will be set by database in production
+		device.Status = "online"
+		devices[id] = device
+
+		return c.JSON(device)
+	})
+
+	// Execute command on device
+	app.Post("/api/devices/:id/execute", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		device, ok := devices[id]
+		if !ok {
+			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
+		}
+
+		var cmd struct {
+			Command string `json:"command"`
+		}
+		if err := c.BodyParser(&cmd); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "Invalid request body"})
+		}
+
+		// In production, this would send command via WebSocket/agent
+		fmt.Printf("Command to execute on %s: %s\n", device.Hostname, cmd.Command)
+
+		return c.JSON(map[string]interface{}{
+			"device_id":  id,
+			"command":    cmd.Command,
+			"status":     "queued",
+			"message":    "Command queued for execution",
+		})
+	})
+
+	// Webhook endpoint
+	app.Post("/api/webhooks/:type", func(c *fiber.Ctx) error {
+		webhookType := c.Params("type")
+		var payload map[string]interface{}
+		if err := c.BodyParser(&payload); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "Invalid request body"})
+		}
+
+		fmt.Printf("Received webhook (%s): %v\n", webhookType, payload)
+
+		return c.JSON(map[string]string{"status": "received"})
+	})
+
+	fmt.Println("Vapor RMM Server starting on :3001")
+	if err := app.Listen(":3001"); err != nil {
+		panic(err)
 	}
 }
 
-// UpdateDeviceFromAgent handles device updates from the agent
-func UpdateDeviceFromAgent(deviceData map[string]interface{}) (*Device, error) {
-	var device Device
-
-	// Check if device exists by hostname
-	if hostname, ok := deviceData["hostname"].(string); ok {
-		result := db.Where("hostname = ?", hostname).First(&device)
-		if result.RowsAffected == 0 {
-			db.Create(&device)
-		}
-	}
-
-	for k, v := range deviceData {
-		switch k {
-		case "name":
-			device.Name = fmt.Sprintf("%v", v)
-		case "hostname":
-			device.Hostname = fmt.Sprintf("%v", v)
-		case "ip_address":
-			device.IPAddress = fmt.Sprintf("%v", v)
-		case "status":
-			device.Status = fmt.Sprintf("%v", v)
-		case "last_seen":
-			device.LastSeen = fmt.Sprintf("%v", v)
-		case "uptime":
-			if val, ok := v.(float64); ok {
-				device.Uptime = int64(val)
-			}
-		case "cpu":
-			device.CPU = fmt.Sprintf("%v", v)
-		case "memory":
-			if val, ok := v.(float64); ok {
-				device.Memory = uint64(val)
-			}
-		case "disk":
-			if val, ok := v.(float64); ok {
-				device.Disk = uint64(val)
-			}
-		case "gpus":
-			device.GPUs = fmt.Sprintf("%v", v)
-		case "network":
-			device.Network = fmt.Sprintf("%v", v)
-		case "drives":
-			device.Drives = fmt.Sprintf("%v", v)
-		}
-	}
-
-	if device.ID == 0 {
-		err := db.Create(&device).Error
-		return &device, err
-	}
-	err := db.Save(&device).Error
-	return &device, err
+func generateID() string {
+	// Simple ID generation - in production use UUID or snowflake
+	return fmt.Sprintf("dev_%d", os.Getpid())
 }

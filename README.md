@@ -1,198 +1,124 @@
-# Vapor RMM - Remote Monitoring & Management System
+# VapoRMM - Remote Monitoring and Management Platform
 
-A full-stack monorepo for a remote monitoring and management system designed to work with Sunshine (VNC/remote desktop server). Built with Next.js 15, Go, and SQLite.
+A comprehensive RMM platform built with a monorepo architecture featuring:
 
-## Features
+- **Dashboard**: Next.js 15 web interface for device management
+- **Server**: Go/Fiber REST API server
+- **Agent**: Go agent that wraps Sunshine API
+- **CLI**: Installation and management CLI tool
 
-- **Dashboard**: Modern web interface built with Next.js 15 App Router
-- **Server**: FastAPI-compatible REST API with Go Fiber
-- **Agent**: Lightweight Go agent that wraps Sunshine API (localhost:47990)
-- **CLI**: Command-line tool for installing and managing the agent
-
-## Architecture
+## Project Structure
 
 ```
 vaporrmm/
 ├── apps/
-│   └── dashboard/          # Next.js 15 application
+│   └── dashboard/          # Next.js 15 Application Router app
 ├── packages/
-│   ├── server/            # Go Fiber REST API server
-│   ├── agent/             # Go Sunshine wrapper agent
-│   └── cli/               # Go CLI installation tool
-├── packages.json          # Monorepo root
-└── turbo.json             # Turborepo configuration
+│   ├── server/            # Go/Fiber REST API server
+│   ├── agent/             # Go Sunshine API wrapper agent
+│   └── cli/               # Go CLI for installation
+├── package.json           # Root pnpm workspace config
+├── turbo.json             # Turborepo configuration
+└── pnpm-workspace.yaml    # Workspace setup
 ```
 
-## Prerequisites
+## Getting Started
 
-- Node.js 18+ and npm/pnpm
-- Go 1.21+
-- Docker (optional, for containerized deployment)
-- Sunshine server running on localhost:47990
+### Prerequisites
 
-## Quick Start
+- [Go 1.21+](https://golang.org/doc/install)
+- [Node.js 18+](https://nodejs.org/)
+- [pnpm](https://pnpm.io/)
+- [Turborepo](https://turbo.build/repo)
 
-### 1. Install Dependencies
+### Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/yourusername/vaporrmm.git
+cd vaporrmm
+
+# Install dependencies
 pnpm install
+
+# Build all packages
+pnpm build
+
+# Start development servers
+pnpm dev:dashboard  # Next.js dashboard on :3000
+pnpm dev:server     # Go API server on :8080
 ```
 
-### 2. Start the Dashboard (Development)
+### Building Go Packages
 
 ```bash
-cd apps/dashboard
-pnpm dev
-```
+# Build the server
+cd packages/server && go build -o vaporrmm-server main.go
 
-The dashboard will be available at `http://localhost:3000`.
-
-### 3. Build and Run the Server
-
-```bash
-cd packages/server
-go build -o vaporrmm-server main.go
-./vaporrmm-server
-```
-
-Server runs on port `8080` by default.
-
-### 4. Install and Run the Agent
-
-```bash
 # Build the agent
-cd packages/agent
-go build -o vaporrmm-agent main.go
+cd packages/agent && go build -o vaporrmm-agent main.go
 
-# Run the agent
-./vaporrmm-agent
+# Build the CLI
+cd packages/cli && go build -o vaporrmm-cli main.go
 ```
 
-The agent connects to Sunshine at `http://localhost:47990`.
+## Components
 
-### 5. Use the CLI
+### Dashboard (`apps/dashboard`)
+
+Next.js 15 application with:
+- App Router architecture
+- TypeScript for type safety
+- Tailwind CSS for styling
+- TanStack Query for data fetching
+- WebSocket support for real-time updates
+- shadcn/ui components
+
+### Server (`packages/server`)
+
+Go/Fiber REST API server with:
+- SQLite database for persistence
+- RESTful endpoints for device management
+- Agent registration and heartbeat handling
+- Device configuration management
+
+### Agent (`packages/agent`)
+
+Go agent that wraps Sunshine API (localhost:47990):
+- System information collection
+- Remote command execution
+- File operations
+- Process management
+- Network status monitoring
+
+### CLI (`packages/cli`)
+
+Go CLI tool for:
+- Installation and uninstallation
+- Service management
+- Configuration updates
+- Health checks
+
+## Running Tests
 
 ```bash
-# Install the agent as a service
-cd packages/cli
-go build -o vaporrmm-cli main.go
-sudo ./vaporrmm-cli install
+# Run Go tests
+go test ./...
 
-# Check status
-./vaporrmm-cli status
-
-# Stop the agent
-./vaporrmm-cli stop
+# Run dashboard tests
+pnpm test
 ```
 
-## API Documentation
-
-### Server Endpoints
-
-- `GET /api/health` - Health check endpoint
-- `GET /api/sessions` - List active Sunshine sessions
-- `POST /api/sessions/{id}/start` - Start a session
-- `POST /api/sessions/{id}/stop` - Stop a session
-- `GET /api/devices` - List registered devices
-
-### Agent Endpoints
-
-The agent exposes the same Sunshine API at:
-- `http://localhost:47991/api/sessions`
-- `http://localhost:47991/app`
-
-## Configuration
-
-### Server Config (`packages/server/config.json`)
-
-```json
-{
-  "port": 8080,
-  "database": {
-    "path": "/var/lib/vaporrmm/db.sqlite"
-  },
-  "agent": {
-    "endpoint": "http://localhost:47990",
-    "interval": 30
-  }
-}
-```
-
-### Agent Config (`packages/agent/config.json`)
-
-```json
-{
-  "serverUrl": "http://localhost:8080",
-  "sunshineUrl": "http://localhost:47990",
-  "refreshInterval": 30,
-  "logLevel": "info"
-}
-```
-
-## Docker Deployment
-
-### Build Images
+## Docker
 
 ```bash
-# Build all images
-docker-compose build
+# Build the application
+docker build -t vaporrmm .
 
-# Or build individually
-cd packages/server && docker build -t vaporrmm-server .
-cd packages/agent && docker build -t vaporrmm-agent .
-cd packages/cli && docker build -t vaporrmm-cli .
-```
-
-### Run with Docker Compose
-
-```bash
+# Run with Docker Compose (when available)
 docker-compose up -d
 ```
 
-## Development
-
-### Running in Monorepo Mode
-
-```bash
-# Install turbo globally
-npm install -g turbo
-
-# Run dashboard and server together
-turbo run dev
-```
-
-### Code Structure
-
-#### apps/dashboard
-- `app/` - Next.js App Router pages
-- `components/` - React components
-- `lib/api.ts` - API client utilities
-- `styles/globals.css` - Global styles with Tailwind
-
-#### packages/server
-- `models/` - Database models
-- `handlers/` - HTTP handlers
-- `db/` - SQLite database setup
-
-#### packages/agent
-- `sunshine/` - Sunshine API wrappers
-- `client/` - Server communication client
-- `monitor/` - Session monitoring logic
-
 ## License
 
-MIT License
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## Support
-
-For support, please join our Discord server or open an issue on GitHub.
+MIT License - see LICENSE file for details.

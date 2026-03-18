@@ -4,36 +4,30 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
-
-var version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 	command := os.Args[1]
-	
+
 	switch command {
 	case "install":
-		handleInstall()
+		runInstall()
 	case "uninstall":
-		handleUninstall()
-	case "start":
-		handleStart()
+		runUninstall()
 	case "status":
-		handleStatus()
-	case "stop":
-		handleStop()
-	case "version":
-		fmt.Printf("vaporrmm-cli version %s\n", version)
-	case "--help", "-h":
+		runStatus()
+	case "help", "--help", "-h":
 		printUsage()
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
@@ -43,271 +37,184 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`Vapor RMM CLI - Remote Machine Management
-==========================================
-
-Usage: vaporrmm <command>
-
-Commands:
-  install     Install Vapor RMM agent service
-  uninstall   Remove Vapor RMM agent service
-  start       Start the agent service
-  stop        Stop the agent service
-  status      Show agent status
-  version     Show version information
-  --help, -h  Show this help message
-
-Examples:
-  vaporrmm install    Install as a system service
-  vaporrmm start      Start the agent
-  vaporrmm status     Check if agent is running
-`)
+	fmt.Println(" vaporrmm - Vapor RMM Agent CLI")
+	fmt.Println("")
+	fmt.Println("Usage:")
+	fmt.Println("  vaporrmm <command> [options]")
+	fmt.Println("")
+	fmt.Println("Commands:")
+	fmt.Println("  install    Install the Vapor RMM agent")
+	fmt.Println("  uninstall  Uninstall the Vapor RMM agent")
+	fmt.Println("  status     Show agent status")
+	fmt.Println("  help       Show this help message")
+	fmt.Println("")
+	fmt.Println("Examples:")
+	fmt.Println("  sudo vaporrmm install --server https://rmm.example.com")
 }
 
-func handleInstall() {
-	fmt.Println("Installing Vapor RMM Agent...")
+type Config struct {
+	ServerURL string `json:"server_url"`
+	AgentID   string `json:"agent_id"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+func runInstall() {
+	var serverURL string
 	
-	// Determine the installation path
-	installPath := "/opt/vaporrmm"
-	if runtimeOS() == "windows" {
-		installPath = filepath.Join(os.Getenv("ProgramFiles"), "VaporRMM")
+	if len(os.Args) > 2 {
+		for i := 2; i < len(os.Args); i++ {
+			if os.Args[i] == "--server" && i+1 < len(os.Args) {
+				serverURL = os.Args[i+1]
+				i++
+			} else if strings.HasPrefix(os.Args[i], "--server=") {
+				serverURL = strings.TrimPrefix(os.Args[i], "--server=")
+			}
+		}
 	}
 	
-	// Create directory
-	err := os.MkdirAll(installPath, 0755)
-	if err != nil {
-		fmt.Printf("Error creating directory: %v\n", err)
+	if serverURL == "" {
+		fmt.Print("Enter Vapor RMM Server URL: ")
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		serverURL = strings.TrimSpace(input)
+	}
+	
+	if serverURL == "" {
+		fmt.Println("Error: Server URL is required")
 		os.Exit(1)
 	}
-
+	
+	// Create config directory
+	configDir := "/etc/vaporrmm"
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		fmt.Printf("Error creating config directory: %v\n", err)
+		os.Exit(1)
+	}
+	
+	// Generate agent ID if not exists
+	agentID := generateAgentID()
+	
+	config := Config{
+		ServerURL: strings.TrimSuffix(serverURL, "/"),
+		AgentID:   agentID,
+		CreatedAt: time.Now().Unix(),
+	}
+	
+	// Save config
+	configPath := filepath.Join(configDir, "config.json")
+	configData, _ := json.MarshalIndent(config, "", "  ")
+	if err := os.WriteFile(configPath, configData, 0644); err != nil {
+		fmt.Printf("Error saving config: %v\n", err)
+		os.Exit(1)
+	}
+	
+	fmt.Println("✓ Configuration saved")
+	
 	// Copy agent binary
-	agentBin, err := getAgentBinary()
-	if err != nil {
-		fmt.Printf("Warning: Could not find agent binary: %v\n", err)
+	agentBin := "/usr/local/bin/vaporrmm-agent"
+	currentExe, _ := os.Executable()
+	if err := copyFile(currentExe, agentBin); err != nil {
+		fmt.Printf("Warning: Could not copy agent binary: %v\n", err)
 	} else {
-		target := filepath.Join(installPath, "agent")
-		err = copyFile(agentBin, target)
-		if err != nil {
-			fmt.Printf("Warning: Could not copy agent binary: %v\n", err)
-		} else {
-			fmt.Println("Agent binary installed")
-		}
-	}
-
-	// Create config file
-	config := map[string]string{
-		"server_url": "http://localhost:3001",
-	}
-	configPath := filepath.Join(installPath, "config.json")
-	configJSON, _ := json.MarshalIndent(config, "", "  ")
-	err = os.WriteFile(configPath, configJSON, 0644)
-	if err != nil {
-		fmt.Printf("Warning: Could not write config: %v\n", err)
-	} else {
-		fmt.Println("Config file created")
-	}
-
-	// Create service file (Linux systemd)
-	if runtimeOS() == "linux" {
-		createServiceFile(installPath)
-	}
-
-	fmt.Println("\nInstallation complete!")
-	fmt.Println("\nTo start the agent, run:")
-	fmt.Printf("  vaporrmm start\n")
-}
-
-func handleUninstall() {
-	fmt.Println("Uninstalling Vapor RMM Agent...")
-	
-	// Stop service if running
-	stopAgent()
-
-	installPath := "/opt/vaporrmm"
-	if runtimeOS() == "windows" {
-		installPath = filepath.Join(os.Getenv("ProgramFiles"), "VaporRMM")
-	}
-
-	// Remove service file (Linux)
-	if runtimeOS() == "linux" {
-		serviceFile := "/etc/systemd/system/vaporrmm-agent.service"
-		os.Remove(serviceFile)
-		fmt.Println("Service file removed")
-	}
-
-	// Remove directory
-	err := os.RemoveAll(installPath)
-	if err != nil {
-		fmt.Printf("Error removing installation: %v\n", err)
-	} else {
-		fmt.Println("Installation removed successfully")
-	}
-}
-
-func handleStart() {
-	if runtimeOS() == "linux" {
-		cmd := exec.Command("systemctl", "start", "vaporrmm-agent")
-		err := cmd.Run()
-		if err != nil {
-			fmt.Println("Starting agent directly...")
-			startAgentDirect()
-		} else {
-			fmt.Println("Agent service started via systemctl")
-		}
-	} else {
-		startAgentDirect()
-	}
-}
-
-func handleStop() {
-	stopAgent()
-	if runtimeOS() == "linux" {
-		cmd := exec.Command("systemctl", "stop", "vaporrmm-agent")
-		cmd.Run()
-		fmt.Println("Agent service stopped via systemctl")
-	}
-}
-
-func handleStatus() {
-	fmt.Println("Vapor RMM Agent Status:")
-	
-	// Check if process is running
-	if isProcessRunning("agent") || isProcessRunning("vaporrmm") {
-		fmt.Println("  Status: Running")
-	} else {
-		fmt.Println("  Status: Not running")
-	}
-
-	// Check config
-	configPath := "/opt/vaporrmm/config.json"
-	if runtimeOS() == "windows" {
-		configPath = filepath.Join(os.Getenv("ProgramFiles"), "VaporRMM", "config.json")
+		os.Chmod(agentBin, 0755)
+		fmt.Println("✓ Agent binary installed")
 	}
 	
-	if _, err := os.Stat(configPath); err == nil {
-		fmt.Println("  Config: Found")
-	} else {
-		fmt.Println("  Config: Not found")
+	// Setup systemd service if on Linux with systemctl
+	if _, err := exec.LookPath("systemctl"); err == nil && os.Getuid() == 0 {
+		setupSystemdService(config.ServerURL, agentID)
+	} else if os.Getuid() != 0 {
+		fmt.Println("\nNote: Run as root to install as a system service")
 	}
-
-	// Server status
-	fmt.Println("\nServer Status:")
-	cmd := exec.Command("curl", "-s", "--max-time", "2", "http://localhost:3001/api/health")
-	output, err := cmd.Output()
-	if err == nil {
-		fmt.Println("  Server: Online")
-	} else {
-		fmt.Println("  Server: Not reachable (is it running?)")
-	}
+	
+	fmt.Printf("\n✓ Installation complete! Agent ID: %s\n", agentID)
+	fmt.Printf("Server URL: %s\n", config.ServerURL)
 }
 
-func startAgentDirect() {
-	cmd := exec.Command("pkill", "-f", "vaporrmm.*agent")
-	cmd.Run()
-
-	args := []string{"-d"}
-	if runtimeOS() == "linux" {
-		args = append(args, "/opt/vaporrmm/agent")
-	} else {
-		// Try to find agent in PATH
-		args = append(args, "agent")
+func runUninstall() {
+	// Stop and disable systemd service
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		exec.Command("systemctl", "stop", "vaporrmm-agent").Run()
+		exec.Command("systemctl", "disable", "vaporrmm-agent").Run()
+		os.Remove("/etc/systemd/system/vaporrmm-agent.service")
 	}
-
-	cmd = exec.Command("nohup", args[0], args[1:]...)
-	cmd.Start()
-
-	fmt.Println("Agent started")
+	
+	// Remove config
+	os.RemoveAll("/etc/vaporrmm")
+	
+	// Remove binary
+	os.Remove("/usr/local/bin/vaporrmm-agent")
+	
+	fmt.Println("✓ Uninstallation complete!")
 }
 
-func stopAgent() {
-	if runtimeOS() == "windows" {
-		exec.Command("taskkill", "/F", "/IM", "agent.exe").Run()
-	} else {
-		exec.Command("pkill", "-f", "vaporrmm.*agent").Run()
+func runStatus() {
+	configPath := "/etc/vaporrmm/config.json"
+	
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Println("Agent is not installed")
+		return
 	}
-	fmt.Println("Agent stopped")
+	
+	data, _ := os.ReadFile(configPath)
+	var config Config
+	json.Unmarshal(data, &config)
+	
+	fmt.Printf("Agent ID: %s\n", config.AgentID)
+	fmt.Printf("Server URL: %s\n", config.ServerURL)
+	fmt.Println("Status: Installed")
 }
 
-func isProcessRunning(name string) bool {
-	cmd := exec.Command("pgrep", "-f", name)
-	err := cmd.Run()
-	return err == nil
-}
-
-func getAgentBinary() (string, error) {
-	// Look for agent binary in common locations
-	locations := []string{
-		"../../agent/agent",
-		"/opt/vaporrmm/agent",
-		"./agent",
+func generateAgentID() string {
+	id, err := exec.Command("uuidgen").Output()
+	if err != nil {
+		return fmt.Sprintf("agent-%d", time.Now().UnixNano())
 	}
-
-	for _, loc := range locations {
-		if _, err := os.Stat(loc); err == nil {
-			return loc, nil
-		}
-	}
-
-	return "", fmt.Errorf("agent binary not found")
+	return strings.TrimSpace(string(id))
 }
 
 func copyFile(src, dst string) error {
-	content, err := os.ReadFile(src)
+	source, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, content, 0755)
-}
-
-func runtimeOS() string {
-	if strings.HasPrefix(os.Getenv("GOOS"), "windows") || 
-	   (len(os.Args) > 0 && os.Args[0] == ".exe") {
-		return "windows"
-	}
+	defer source.Close()
 	
-	switch os := runtime.GOOS; os {
-	case "linux":
-		return "linux"
-	case "darwin":
-		return "darwin"
-	default:
-		return os
+	dest, err := os.Create(dst)
+	if err != nil {
+		return err
 	}
+	defer dest.Close()
+	
+	_, err = io.Copy(dest, source)
+	return err
 }
 
-func createServiceFile(installPath string) {
+func setupSystemdService(serverURL, agentID string) {
 	serviceContent := fmt.Sprintf(`[Unit]
 Description=Vapor RMM Agent
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=%s/agent
+ExecStart=/usr/local/bin/vaporrmm-agent --server %s --agent-id %s
 Restart=always
 RestartSec=5
-WorkingDirectory=%s
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=vaporrmm-agent
+User=root
 
 [Install]
 WantedBy=multi-user.target
-`, installPath, installPath)
-
-	serviceFile := "/etc/systemd/system/vaporrmm-agent.service"
-	err := os.WriteFile(serviceFile, []byte(serviceContent), 0644)
-	if err != nil {
-		fmt.Printf("Warning: Could not create service file: %v\n", err)
-	} else {
-		fmt.Println("Systemd service file created")
-		fmt.Println("\nTo enable and start the service:")
-		fmt.Println("  sudo systemctl daemon-reload")
-		fmt.Println("  sudo systemctl enable vaporrmm-agent")
-		fmt.Println("  sudo systemctl start vaporrmm-agent")
+`, serverURL, agentID)
+	
+	servicePath := "/etc/systemd/system/vaporrmm-agent.service"
+	if err := os.WriteFile(servicePath, []byte(serviceContent), 0644); err != nil {
+		fmt.Printf("Warning: Could not create systemd service: %v\n", err)
+		return
 	}
-}
-
-// Helper function to detect runtime GOOS
-func runtimeGOOS() string {
-	return runtime.GOOS
+	
+	exec.Command("systemctl", "daemon-reload").Run()
+	exec.Command("systemctl", "enable", "vaporrmm-agent").Run()
+	exec.Command("systemctl", "start", "vaporrmm-agent").Run()
+	
+	fmt.Println("✓ Systemd service created and started")
 }

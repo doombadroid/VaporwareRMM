@@ -1,323 +1,362 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
 const (
-	serverURL  = "http://localhost:3001"
-	sunshineURL = "http://localhost:3001/api/status"
+	DefaultServerURL = "http://localhost:8080"
+	DefaultAgentPort = 47991
 )
 
-// DeviceInfo holds system information gathered from Sunshine API
-type DeviceInfo struct {
-	Name      string `json:"name"`
-	Hostname  string `json:"hostname"`
-	IPAddress string `json:"ip_address"`
-	Status    string `json:"status"`
-	LastSeen  string `json:"last_seen"`
-	Uptime    int64  `json:"uptime"`
-	CPU       string `json:"cpu"`
-	Memory    uint64 `json:"memory"`
-	Disk      uint64 `json:"disk"`
-	GPUs      string `json:"gpus"`
-	Network   string `json:"network"`
-	Drives    string `json:"drives"`
-}
-
-// Agent manages the connection to the Vapor RMM server
 type Agent struct {
-	serverURL string
-	hostName  string
-	client    *http.Client
+	serverURL    string
+	port         int
+	hostname     string
+	deviceID     string
+	lastCommands []CommandResult
 }
 
-func NewAgent(serverURL string) *Agent {
+type CommandRequest struct {
+	ID        string                 `json:"id"`
+	Type      string                 `json:"type"` // shell, script, ping, reboot
+	Payload   map[string]interface{} `json:"payload"`
+	CreatedAt time.Time              `json:"created_at"`
+}
+
+type CommandResult struct {
+	CommandID string                 `json:"command_id"`
+	Success   bool                   `json:"success"`
+	Output    string                 `json:"output,omitempty"`
+	Error     string                 `json:"error,omitempty"`
+	Timestamp time.Time              `json:"timestamp"`
+}
+
+func NewAgent(serverURL string, port int) *Agent {
+	hostname, _ := os.Hostname()
 	return &Agent{
 		serverURL: serverURL,
-		hostName:  getHostname(),
-		client:    &http.Client{Timeout: 30 * time.Second},
+		port:      port,
+		hostname:  hostname,
 	}
 }
 
 func (a *Agent) Start() error {
-	log.Printf("Vapor RMM Agent starting...")
+	log.Printf("Starting Vapor RMM Agent on port %d", a.port)
 	log.Printf("Server URL: %s", a.serverURL)
-	log.Printf("Host Name: %s", a.hostName)
 
-	// Get system info
-	deviceInfo, err := a.GetDeviceInfo()
-	if err != nil {
-		log.Printf("Warning: Could not get device info: %v", err)
+	http.HandleFunc("/agent/register", a.handleRegister)
+	http.HandleFunc("/agent/heartbeat", a.handleHeartbeat)
+	http.HandleFunc("/agent/commands", a.handleCommands)
+	http.HandleFunc("/agent/results", a.handleResults)
+	http.HandleFunc("/agent/run", a.handleRunCommand)
+
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", a.port), nil); err != nil {
+		return fmt.Errorf("failed to start agent server: %w", err)
 	}
-
-	// Register with server
-	err = a.RegisterDevice(deviceInfo)
-	if err != nil {
-		log.Printf("Warning: Could not register device: %v", err)
-	}
-
-	// Start heartbeat loop
-	go a.heartbeatLoop()
-
 	return nil
 }
 
-func (a *Agent) GetDeviceInfo() (*DeviceInfo, error) {
-	info := &DeviceInfo{
-		Name:      a.hostName,
-		Hostname:  a.hostName,
-		Status:    "online",
-		LastSeen:  time.Now().Format(time.RFC3339),
-		Uptime:    getUptime(),
-		CPU:       getCPUInfo(),
-		Memory:    getMemoryInfo(),
-		Disk:      getDiskInfo(),
-		GPUs:      getGPUInfo(),
-		Network:   getNetworkInfo(),
-		Drives:    getDriveInfo(),
+func (a *Agent) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	// Get IP address
-	ip, err := getPublicIP()
+	registration := a.getRegistrationInfo()
+	data, _ := json.Marshal(registration)
+
+	req, err := http.NewRequest("POST", a.serverURL+"/agent/register", bytes.NewBuffer(data))
 	if err != nil {
-		log.Printf("Warning: Could not get public IP: %v", err)
-		ip = "unknown"
+		http.Error(w, fmt.Sprintf("Failed to register: %v", err), http.StatusInternalServerError)
+		return
 	}
-	info.IPAddress = ip
+	req.Header.Set("Content-Type", "application/json")
 
-	return info, nil
-}
-
-func (a *Agent) RegisterDevice(info *DeviceInfo) error {
-	payload, err := json.Marshal(info)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to marshal device info: %w", err)
-	}
-
-	resp, err := a.client.Post(
-		fmt.Sprintf("%s/api/devices/register", a.serverURL),
-		"application/json",
-		strings.NewReader(string(payload)),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to register device: %w", err)
+		http.Error(w, fmt.Sprintf("Server not reachable: %v", err), http.StatusServiceUnavailable)
+		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("server returned status %d", resp.StatusCode)
-	}
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
 
-	log.Printf("Device registered successfully")
-	return nil
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
-func (a *Agent) UpdateStatus(action string, data interface{}) error {
-	status := map[string]interface{}{
-		"action":    action,
-		"data":      data,
-		"timestamp": time.Now().Format(time.RFC3339),
+func (a *Agent) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	payload, err := json.Marshal(status)
-	if err != nil {
-		return fmt.Errorf("failed to marshal status: %w", err)
-	}
+	status := a.getStatus()
+	data, _ := json.Marshal(status)
 
-	resp, err := a.client.Post(
-		fmt.Sprintf("%s/api/status", a.serverURL),
-		"application/json",
-		strings.NewReader(string(payload)),
-	)
+	req, err := http.NewRequest("POST", a.serverURL+"/agent/heartbeat", bytes.NewBuffer(data))
 	if err != nil {
-		return fmt.Errorf("failed to update status: %w", err)
+		http.Error(w, fmt.Sprintf("Failed heartbeat: %v", err), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Server not reachable: %v", err), http.StatusServiceUnavailable)
+		return
 	}
 	defer resp.Body.Close()
 
-	return nil
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
-func (a *Agent) heartbeatLoop() {
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		err := a.UpdateStatus("heartbeat", map[string]string{
-			"hostname": a.hostName,
-		})
-		if err != nil {
-			log.Printf("Heartbeat failed: %v", err)
-		}
-	}
-}
-
-// System Info Functions
-
-func getHostname() string {
-	hostname, _ := os.Hostname()
-	return hostname
-}
-
-func getUptime() int64 {
-	// Try to read from /proc/uptime (Linux)
-	if runtime.GOOS == "linux" {
-		content, err := os.ReadFile("/proc/uptime")
-		if err == nil {
-			var uptime float64
-			fmt.Sscanf(string(content), "%f", &uptime)
-			return int64(uptime)
-		}
+func (a *Agent) handleCommands(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 
-	// Fallback: use system command
-	cmd := exec.Command("uptime", "-p")
-	output, _ := cmd.Output()
-	// Parse uptime string (e.g., "up 2 hours, 30 minutes")
-	return time.Now().Unix() - getBootTime()
-}
-
-func getBootTime() int64 {
-	if runtime.GOOS == "linux" {
-		content, err := os.ReadFile("/proc/stat")
-		if err == nil {
-			for _, line := range strings.Split(string(content), "\n") {
-				if strings.HasPrefix(line, "btime ") {
-					var btime int64
-					fmt.Sscanf(line, "btime %d", &btime)
-					return btime
-				}
-			}
-		}
-	}
-
-	cmd := exec.Command("who", "-b")
-	output, _ := cmd.Output()
-	// Parse last boot time from output
-	return time.Now().Unix() - 3600 // Fallback to 1 hour ago
-}
-
-func getCPUInfo() string {
-	if runtime.GOOS == "linux" {
-		content, err := os.ReadFile("/proc/cpuinfo")
-		if err == nil {
-			for _, line := range strings.Split(string(content), "\n") {
-				if strings.HasPrefix(line, "model name") || strings.HasPrefix(line, "processor") {
-					return strings.TrimSpace(strings.TrimPrefix(line, "model name:"))
-				}
-			}
-		}
-	}
-
-	cmd := exec.Command("uname", "-m")
-	output, _ := cmd.Output()
-	return string(output)
-}
-
-func getMemoryInfo() uint64 {
-	if runtime.GOOS == "linux" {
-		content, err := os.ReadFile("/proc/meminfo")
-		if err == nil {
-			for _, line := range strings.Split(string(content), "\n") {
-				if strings.HasPrefix(line, "MemTotal:") {
-					var memKB uint64
-					fmt.Sscanf(line, "MemTotal: %d kB", &memKB)
-					return memKB * 1024
-				}
-			}
-		}
-	}
-
-	cmd := exec.Command("free", "-b")
-	output, _ := cmd.Output()
-	// Parse free command output
-	return 8 * 1024 * 1024 * 1024 // Fallback to 8GB
-}
-
-func getDiskInfo() uint64 {
-	if runtime.GOOS == "linux" {
-		cmd := exec.Command("df", "--output=size", "/")
-		output, _ := cmd.Output()
-		var size int64
-		fmt.Sscanf(string(output), "%d", &size)
-		return uint64(size * 1024) // Convert KB to bytes
-	}
-
-	return 500 * 1024 * 1024 * 1024 // Fallback to 500GB
-}
-
-func getGPUInfo() string {
-	if runtime.GOOS == "linux" {
-		cmd := exec.Command("lspci")
-		output, _ := cmd.Output()
-		gpus := []string{}
-		for _, line := range strings.Split(string(output), "\n") {
-			if strings.Contains(line, "VGA") || strings.Contains(line, "3D") || strings.Contains(line, "Display") {
-				gpus = append(gpus, strings.TrimSpace(strings.TrimPrefix(line, "00:")))
-			}
-		}
-		return strings.Join(gpus, "; ")
-	}
-
-	return "Unknown GPU"
-}
-
-func getNetworkInfo() string {
-	cmd := exec.Command("hostname", "-I")
-	output, _ := cmd.Output()
-	ipStr := strings.TrimSpace(string(output))
-
-	if ipStr == "" {
-		ipStr = "127.0.0.1"
-	}
-	return ipStr
-}
-
-func getDriveInfo() string {
-	if runtime.GOOS == "linux" {
-		cmd := exec.Command("lsblk", "-o", "NAME,SIZE,MOUNTPOINT,FSTYPE")
-		output, _ := cmd.Output()
-		return strings.TrimSpace(string(output))
-	}
-	return "Unknown drives"
-}
-
-func getPublicIP() (string, error) {
-	resp, err := http.Get("https://api.ipify.org?format=text")
+	req, err := http.Get(a.serverURL + fmt.Sprintf("/agent/%s/commands", a.hostname))
 	if err != nil {
-		return "", err
+		http.Error(w, fmt.Sprintf("Failed to fetch commands: %v", err), http.StatusInternalServerError)
+		return
 	}
-	defer resp.Body.Close()
+	defer req.Body.Close()
 
-	ip, _ := os.ReadFile("/proc/sys/net/ipv4/conf/all/shared_media")
-	content, _ := os.ReadFile("/sys/class/net/eth0/address")
-	
-	resp2, err2 := http.Get("https://ifconfig.me")
-	if err2 != nil {
-		return "127.0.0.1", nil
+	var commands []CommandRequest
+	json.NewDecoder(req.Body).Decode(&commands)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(commands)
+}
+
+func (a *Agent) handleResults(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	defer resp2.Body.Close()
 
-	body, _ := os.ReadAll(resp2.Body)
-	return strings.TrimSpace(string(body)), nil
+	results := a.lastCommands
+	a.lastCommands = nil // Clear after sending
+
+	data, _ := json.Marshal(map[string]interface{}{
+		"results": results,
+	})
+
+	req, err := http.Post(a.serverURL+fmt.Sprintf("/agent/%s/results", a.hostname), "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		log.Printf("Failed to send results: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to send results: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer req.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (a *Agent) handleRunCommand(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var cmdReq struct {
+		Type    string `json:"type"`
+		Command string `json:"command"`
+	}
+	json.NewDecoder(r.Body).Decode(&cmdReq)
+
+	output := ""
+	success := true
+
+	switch strings.ToLower(cmdReq.Type) {
+	case "shell":
+		if runtime.GOOS == "windows" {
+			cmd := exec.Command("cmd.exe", "/C", cmdReq.Command)
+			outputBytes, err := cmd.CombinedOutput()
+			output = string(outputBytes)
+			if err != nil {
+				success = false
+			}
+		} else {
+			cmd := exec.Command("/bin/sh", "-c", cmdReq.Command)
+			outputBytes, err := cmd.CombinedOutput()
+			output = string(outputBytes)
+			if err != nil {
+				success = false
+			}
+		}
+	case "script":
+		if runtime.GOOS == "windows" {
+			cmd := exec.Command("cmd.exe", "/C", cmdReq.Command)
+			outputBytes, err := cmd.CombinedOutput()
+			output = string(outputBytes)
+			if err != nil {
+				success = false
+			}
+		} else {
+			cmd := exec.Command("/bin/sh", "-c", cmdReq.Command)
+			outputBytes, err := cmd.CombinedOutput()
+			output = string(outputBytes)
+			if err != nil {
+				success = false
+			}
+		}
+	default:
+		success = false
+		output = "Unknown command type"
+	}
+
+	result := CommandResult{
+		CommandID: fmt.Sprintf("cmd_%d", time.Now().Unix()),
+		Success:   success,
+		Output:    output,
+		Timestamp: time.Now(),
+	}
+
+	a.lastCommands = append(a.lastCommands, result)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func (a *Agent) getRegistrationInfo() map[string]interface{} {
+	cpuInfo, _ := cpu.Info()
+	memInfo, _ := mem.VirtualMemory()
+	diskInfo, _ := disk.Usage("/")
+	hostInfo, _ := host.Info()
+
+	var localIPs []string
+
+	ips, err := net.Interfaces()
+	if err != nil {
+		log.Printf("Warning: Could not get network interfaces: %v", err)
+	}
+
+	for _, iface := range ips {
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+				localIPs = append(localIPs, ipNet.IP.String())
+			}
+		}
+	}
+
+	var publicIP string
+	if len(localIPs) > 0 {
+		publicIP = localIPs[0]
+	}
+
+	var mac string
+	for _, iface := range ips {
+		if len(iface.HardwareAddr) > 0 {
+			mac = iface.HardwareAddr.String()
+			break
+		}
+	}
+
+	return map[string]interface{}{
+		"hostname":      a.hostname,
+		"os":            hostInfo.OS,
+		"os_version":    hostInfo.PlatformVersion,
+		"public_ip":     publicIP,
+		"local_ips":     localIPs,
+		"mac_address":   mac,
+		"cpu":           getCPUName(cpuInfo),
+		"ram":           memInfo.Total,
+		"storage":       diskInfo.Total,
+		"uptime":        hostInfo.Uptime,
+		"agent_version": "1.0.0",
+	}
+}
+
+func (a *Agent) getStatus() map[string]interface{} {
+	cpuPercent, _ := cpu.Percent(0, false)
+	memInfo, _ := mem.VirtualMemory()
+	diskInfo, _ := disk.Usage("/")
+	hostInfo, _ := host.Info()
+
+	deviceID := a.deviceID
+	if deviceID == "" {
+		deviceID = a.hostname
+	}
+
+	return map[string]interface{}{
+		"id":        deviceID,
+		"hostname":  a.hostname,
+		"status":    "online",
+		"cpu":       cpuPercent[0],
+		"ram":       memInfo.Used,
+		"storage":   diskInfo.Used,
+		"uptime":    hostInfo.Uptime,
+		"timestamp": time.Now().Unix(),
+	}
+}
+
+func getCPUName(info []cpu.InfoStat) string {
+	if len(info) == 0 {
+		return "Unknown"
+	}
+	return info[0].ModelName
+}
+
+func (a *Agent) SetDeviceID(id string) {
+	a.deviceID = id
+	log.Printf("Agent registered with device ID: %s", id)
 }
 
 func main() {
-	log.Println("Starting Vapor RMM Agent...")
-	
-	agent := NewAgent(serverURL)
-	if err := agent.Start(); err != nil {
-		log.Fatalf("Agent failed to start: %v", err)
+	serverURL := os.Getenv("VAPOR_SERVER_URL")
+	if serverURL == "" {
+		serverURL = DefaultServerURL
 	}
 
-	log.Println("Agent running. Press Ctrl+C to stop.")
-	select {}
+	port := 47991 // Default agent port
+	if p, ok := os.LookupEnv("VAPOR_AGENT_PORT"); ok {
+		if parsedPort, err := strconv.Atoi(p); err == nil {
+			port = parsedPort
+		}
+	}
+
+	agent := NewAgent(serverURL, port)
+
+	// Register with server first
+	resp, err := http.Get(fmt.Sprintf("%s/health", serverURL))
+	if err == nil {
+		defer resp.Body.Close()
+		log.Println("Server is reachable")
+	} else {
+		log.Printf("Warning: Cannot connect to server at %s: %v", serverURL, err)
+	}
+
+	// Start agent server
+	if err := agent.Start(); err != nil {
+		log.Fatalf("Agent failed: %v", err)
+	}
 }

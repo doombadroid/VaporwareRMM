@@ -2,12 +2,15 @@
   "name": "vaporrmm",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@9.0.0",
   "description": "Vapor RMM - Remote Monitoring and Management System",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
     "build:dashboard": "turbo run build --filter=@vaporrmm/dashboard",
     "dev:dashboard": "turbo run dev --filter=@vaporrmm/dashboard",
     "dev:server": "cd packages/server && go run main.go",

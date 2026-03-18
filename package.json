@@ -1,0 +1,27 @@
+{
+  "name": "vaporrmm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vapor RMM - Remote Monitoring and Management System",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build:dashboard": "turbo run build --filter=@vaporrmm/dashboard",
+    "dev:dashboard": "turbo run dev --filter=@vaporrmm/dashboard",
+    "dev:server": "cd packages/server && go run main.go",
+    "dev:agent": "cd packages/agent && go run main.go",
+    "dev:cli": "cd packages/cli && go run main.go",
+    "build:server": "cd packages/server && go build -o ../../bin/server main.go",
+    "build:agent": "cd packages/agent && go build -o ../../bin/agent main.go",
+    "build:cli": "cd packages/cli && go build -o ../../bin/vaporrmm main.go",
+    "lint": "turbo run lint"
+  },
+  "devDependencies": {
+    "@turbo/gen": "^2.3.3",
+    "prettier": "^3.4.1",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2"
+  }
+}

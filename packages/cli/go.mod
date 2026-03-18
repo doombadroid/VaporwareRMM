@@ -1,7 +1,7 @@
-module vapor-rmm/packages/cli
+module github.com/vaporrmm/cli
 
 go 1.23
 
 require (
-	github.com/spf13/cobra v1.8.1
+	github.com/urfave/cli/v2 v2.27.5
 )

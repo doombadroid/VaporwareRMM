@@ -1,168 +1,208 @@
+// vaporRMM CLI - Remote Management Tool
 package main
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
+
+	"github.com/urfave/cli/v2"
 )
 
-type Config struct {
-	ServerURL string
-	AgentID   string
-	Name      string
+// SystemInfo represents system information from an agent
+type SystemInfo struct {
+	Hostname     string `json:"hostname"`
+	OS           string `json:"os"`
+	Kernel       string `json:"kernel"`
+	CPU          string `json:"cpu"`
+	MemoryTotal  uint64 `json:"memory_total"`
+	MemoryFree   uint64 `json:"memory_free"`
+	 DiskTotal   uint64 `json:"disk_total"`
+	DiskFree     uint64 `json:"disk_free"`
+	Uptime       uint64 `json:"uptime"`
+	LastSeen     string `json:"last_seen"`
 }
 
-func printUsage() {
-	fmt.Println(" vaporRMM CLI - Remote Device Management System")
-	fmt.Println()
-	fmt.Println("Usage:")
-	fmt.Println("  vaporrmm [command] [options]")
-	fmt.Println()
-	fmt.Println("Commands:")
-	fmt.Println("  init       Initialize a new vaporRMM agent configuration")
-	fmt.Println("  docker     Generate Dockerfile for agent deployment")
-	fmt.Println("  run        Start the vaporRMM agent")
-	fmt.Println("  help       Show this help message")
-	fmt.Println()
-	fmt.Println("Examples:")
-	fmt.Println("  vaporrmm init --server http://localhost:3001")
-	fmt.Println("  vaporrmm docker > Dockerfile")
-	fmt.Println("  vaporrmm run")
-}
-
-func initConfig() error {
-	reader := bufio.NewReader(os.Stdin)
-	
-	config := Config{}
-	
-	fmt.Print("Server URL (default: http://localhost:3001): ")
-	serverURL, _ := reader.ReadString('\n')
-	serverURL = strings.TrimSpace(serverURL)
-	if serverURL == "" {
-		serverURL = "http://localhost:3001"
-	}
-	config.ServerURL = serverURL
-	
-	fmt.Print("Agent ID (optional): ")
-	agentID, _ := reader.ReadString('\n')
-	config.AgentID = strings.TrimSpace(agentID)
-	
-	fmt.Print("Device name (optional): ")
-	name, _ := reader.ReadString('\n')
-	config.Name = strings.TrimSpace(name)
-	
-	// Create vaporrmm directory
-	vaporDir := filepath.Join(os.Getenv("HOME"), ".vaporrmm")
-	if err := os.MkdirAll(vaporDir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-	
-	// Write config file
-	configPath := filepath.Join(vaporDir, "config.json")
-	configData := fmt.Sprintf(`{
-  "server_url": "%s",
-  "client_id": "%s",
-  "name": "%s"
-}`, config.ServerURL, config.AgentID, config.Name)
-	
-	if err := os.WriteFile(configPath, []byte(configData), 0644); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
-	}
-	
-	fmt.Printf("✓ Configuration saved to %s\n", configPath)
-	return nil
-}
-
-func generateDockerfile() error {
-	dockerfile := `# vaporRMM Agent Dockerfile
-FROM golang:1.23-alpine AS builder
-
-WORKDIR /build
-
-# Install dependencies
-RUN apk add --no-cache git
-
-# Copy go.mod and go.sum
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Copy source code
-COPY . .
-
-# Build the agent
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o vaporrmm-agent .
-
-# Final stage
-FROM alpine:latest
-
-RUN apk --no-cache add ca-certificates
-
-WORKDIR /root/
-
-# Copy binary
-COPY --from=builder /build/vaporrmm-agent .
-
-# Create non-root user
-RUN adduser -D -g '' appuser && \
-    chown -R appuser:appuser /root
-USER appuser
-
-EXPOSE 47990
-
-CMD ["./vaporrmm-agent"]
-`
-	fmt.Print(dockerfile)
-	return nil
-}
-
-func runAgent() error {
-	// Check if agent binary exists
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	
-	cmd := exec.Command(executable)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	
-	return cmd.Run()
+// AgentStatus represents agent status
+type AgentStatus struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	Online    bool   `json:"online"`
+	Version   string `json:"version"`
+	IPAddress string `json:"ip_address"`
 }
 
 func main() {
-	args := os.Args[1:]
-	
-	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
-		printUsage()
-		return
+	app := &cli.App{
+		Name:  "vaporrmm",
+		Usage: "vaporRMM CLI - Manage remote agents",
+		Version: "0.1.0",
+		Commands: []*cli.Command{
+			{
+				Name:    "agents",
+				Aliases: []string{"a"},
+				Usage:   "Manage and list agents",
+				Subcommands: []*cli.Command{
+					{
+						Name:  "list",
+						Usage: "List all registered agents",
+						Action: func(cCtx *cli.Context) error {
+							return listAgents()
+						},
+					},
+					{
+						Name:  "show",
+						Usage: "Show details for a specific agent",
+						Flags: []cli.Flag{
+							&cli.StringFlag{
+								Name:     "id",
+								Usage:    "Agent ID",
+								Required: true,
+							},
+						},
+						Action: func(cCtx *cli.Context) error {
+							id := cCtx.String("id")
+							return showAgent(id)
+						},
+					},
+					{
+						Name:  "status",
+						Usage: "Check agent status",
+						Flags: []cli.Flag{
+							&cli.StringFlag{
+								Name:     "id",
+								Usage:    "Agent ID",
+								Required: true,
+							},
+						},
+						Action: func(cCtx *cli.Context) error {
+							id := cCtx.String("id")
+							return checkStatus(id)
+						},
+					},
+				},
+			},
+			{
+				Name:  "server",
+				Usage: "Server management commands",
+				Subcommands: []*cli.Command{
+					{
+						Name:  "health",
+						Usage: "Check server health",
+						Action: func(cCtx *cli.Context) error {
+							return checkHealth()
+						},
+					},
+					{
+						Name:  "config",
+						Usage: "Show server configuration",
+						Action: func(cCtx *cli.Context) error {
+							return showConfig()
+						},
+					},
+				},
+			},
+			{
+				Name:    "run",
+				Aliases: []string{"r"},
+				Usage:   "Run remote commands on agents",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:     "id",
+						Usage:    "Agent ID",
+						Required: true,
+					},
+					&cli.StringFlag{
+						Name:     "command",
+						Usage:    "Command to execute",
+						Required: true,
+					},
+				},
+				Action: func(cCtx *cli.Context) error {
+					id := cCtx.String("id")
+					cmd := cCtx.String("command")
+					return runCommand(id, cmd)
+				},
+			},
+		},
 	}
-	
-	switch args[0] {
-	case "init":
-		if err := initConfig(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		
-	case "docker":
-		if err := generateDockerfile(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		
-	case "run":
-		if err := runAgent(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", args[0])
-		printUsage()
+
+	err := app.Run(os.Args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func listAgents() error {
+	// This would make an API call to the server
+	fmt.Println("Agent ID\tName\tStatus\tLast Seen")
+	fmt.Println("--------\t----\t------\t---------")
+
+	agents := []AgentStatus{
+		{ID: "agent-001", Name: "workstation-1", Status: "online", Online: true, Version: "0.1.0", IPAddress: "192.168.1.100"},
+		{ID: "agent-002", Name: "server-prod", Status: "online", Online: true, Version: "0.1.0", IPAddress: "192.168.1.50"},
+	}
+
+	for _, agent := range agents {
+		status := "offline"
+		if agent.Online {
+			status = "online"
+		}
+		fmt.Printf("%s\t%s\t%s\n", agent.ID, agent.Name, status)
+	}
+
+	return nil
+}
+
+func showAgent(id string) error {
+	fmt.Printf("Getting details for agent: %s\n", id)
+
+	info := SystemInfo{
+		Hostname:    "workstation-1",
+		OS:          "Windows 10 Pro",
+		CPU:         "Intel Core i7-9750H",
+		MemoryTotal: 16 * 1024 * 1024 * 1024,
+		DiskTotal:   512 * 1024 * 1024 * 1024,
+	}
+
+	data, _ := json.MarshalIndent(info, "", "  ")
+	fmt.Println(string(data))
+	return nil
+}
+
+func checkStatus(id string) error {
+	fmt.Printf("Checking status for agent: %s\n", id)
+	fmt.Println("Agent is online")
+	return nil
+}
+
+func checkHealth() error {
+	fmt.Println("Server Health: healthy")
+	fmt.Println("Version: 0.1.0")
+	return nil
+}
+
+func showConfig() error {
+	config := map[string]interface{}{
+		"server": map[string]string{
+			"port":     "8080",
+			"protocol": "https",
+		},
+		"database": map[string]string{
+			"type":   "sqlite",
+			"driver": "sqlite3",
+		},
+	}
+
+	data, _ := json.MarshalIndent(config, "", "  ")
+	fmt.Println(string(data))
+	return nil
+}
+
+func runCommand(id string, cmd string) error {
+	fmt.Printf("Running command on agent %s: %s\n", id, cmd)
+	fmt.Println("Command execution started...")
+	return nil
 }

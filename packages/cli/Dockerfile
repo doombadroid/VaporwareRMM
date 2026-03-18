@@ -1,36 +1,31 @@
-# vaporRMM Agent Dockerfile
+# Build stage
 FROM golang:1.23-alpine AS builder
 
 WORKDIR /build
 
-# Install dependencies
-RUN apk add --no-cache git
-
-# Copy go.mod and go.sum
+# Copy go.mod and download dependencies
 COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code
 COPY . .
 
-# Build the agent
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o vaporrmm-agent .
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o vaporcli .
 
 # Final stage
 FROM alpine:latest
 
+WORKDIR /app
+
+# Install ca-certificates for HTTPS requests
 RUN apk --no-cache add ca-certificates
 
-WORKDIR /root/
+# Copy binary from builder
+COPY --from=builder /build/vaporcli .
 
-# Copy binary
-COPY --from=builder /build/vaporrmm-agent .
+# Expose no ports (CLI doesn't need to expose ports)
+EXPOSE 8080
 
-# Create non-root user
-RUN adduser -D -g '' appuser && \
-    chown -R appuser:appuser /root
-USER appuser
-
-EXPOSE 47990
-
-CMD ["./vaporrmm-agent"]
+ENTRYPOINT ["./vaporcli"]
+CMD ["--help"]

@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: vaporrmm-server
+    ports:
+      - "8080:8080"
+    environment:
+      - JWT_SECRET=${JWT_SECRET:-change-me-to-a-random-string}
+      - DATABASE_PATH=/app/data/vapor_rmm.db
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-ChangeMe123!}
+      - SERVER_PORT=8080
+      - SERVER_HOST=0.0.0.0
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - MOONLIGHT_WEB_URL=${MOONLIGHT_WEB_URL:-http://localhost:8081}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  dashboard:
+    build:
+      context: ./dashboard-files
+      dockerfile: Dockerfile
+    container_name: vaporrmm-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://localhost:8080/api
+    restart: unless-stopped
+    depends_on:
+      - server
+
+  moonlight-web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.moonlight-web
+    container_name: vaporrmm-moonlight-web
+    ports:
+      - "8081:8080"
+      - "40000-40100:40000-40100/udp"
+    environment:
+      - WEBRTC_NAT_1TO1_HOST=${WEBRTC_NAT_1TO1_HOST:-}
+    restart: unless-stopped

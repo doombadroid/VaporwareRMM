@@ -1,0 +1,174 @@
+version: '3.8'
+
+services:
+  # === vaporRMM Server ===
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: vaporrmm-server
+    hostname: vaporrmm-server
+    ports:
+      - "8080:8080"
+    environment:
+      - JWT_SECRET=${JWT_SECRET}
+      - DATABASE_PATH=/app/data/vapor_rmm.db
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-ChangeMe123!}
+      - SERVER_PORT=8080
+      - SERVER_HOST=0.0.0.0
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://server:8080
+      - TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY:-}
+      - MOONLIGHT_WEB_URL=${MOONLIGHT_WEB_URL:-http://localhost:8081}
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - vaporrmm
+
+  # === Dashboard ===
+  dashboard:
+    build:
+      context: ./dashboard-files
+      dockerfile: Dockerfile
+    container_name: vaporrmm-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://localhost:8080/api
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - vaporrmm
+
+  # === Moonlight Web Stream (security-hardened local build) ===
+  # Built from third_party/moonlight-web source
+  moonlight-web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.moonlight-web
+    container_name: vaporrmm-moonlight-web
+    ports:
+      - "8081:8080"
+      - "40000-40100:40000-40100/udp"
+    environment:
+      - WEBRTC_NAT_1TO1_HOST=${WEBRTC_NAT_1TO1_HOST:-}
+    restart: unless-stopped
+    networks:
+      - vaporrmm
+
+  # === Test Agent 1 (Ubuntu-like) ===
+  agent-ubuntu:
+    image: debian:bookworm-slim
+    container_name: vaporrmm-agent-ubuntu
+    hostname: test-ubuntu
+    command: >
+      sh -c "
+        apt-get update -qq && apt-get install -y -qq ca-certificates curl wget procps iproute2 > /dev/null 2>&1 &&
+        echo 'Installing vaporRMM agent...' &&
+        curl -fsSL http://server:8080/api/branding/agent-install?format=script | bash -s -- --server http://server:8080 &&
+        echo 'Agent installed. Monitoring...' &&
+        sleep 5 &&
+        while true; do
+          ps aux | grep vaporrmm-agent | grep -v grep || {
+            echo 'Agent not running, restarting...' &&
+            /usr/local/bin/vaporrmm-agent --server-url=http://server:8080 > /dev/null 2>&1 &
+          }
+          sleep 10
+        done
+      "
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - vaporrmm
+
+  # === Test Agent 2 (Alpine) ===
+  agent-alpine:
+    image: alpine:latest
+    container_name: vaporrmm-agent-alpine
+    hostname: test-alpine
+    command: >
+      sh -c "
+        apk add --no-cache ca-certificates curl wget procps iproute2 > /dev/null 2>&1 &&
+        echo 'Installing vaporRMM agent...' &&
+        curl -fsSL http://server:8080/api/branding/agent-install?format=script | bash -s -- --server http://server:8080 &&
+        echo 'Agent installed. Monitoring...' &&
+        sleep 5 &&
+        while true; do
+          ps | grep vaporrmm-agent | grep -v grep || {
+            echo 'Agent not running, restarting...' &&
+            /usr/local/bin/vaporrmm-agent --server-url=http://server:8080 > /dev/null 2>&1 &
+          }
+          sleep 10
+        done
+      "
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - vaporrmm
+
+  # === Tailscale Test Container ===
+  # This container is NOT the server — it's a separate node on the tailnet
+  # you can use to test Tailscale connectivity from the dashboard
+  tailscale-node:
+    image: tailscale/tailscale:latest
+    container_name: vaporrmm-tailscale-node
+    hostname: test-tailscale-node
+    environment:
+      - TS_AUTH_KEY=${TAILSCALE_AUTH_KEY:-}
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    networks:
+      - vaporrmm
+
+  # === PostgreSQL (optional — uncomment to test PG support) ===
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: vaporrmm-postgres
+  #   environment:
+  #     - POSTGRES_USER=vaporrmm
+  #     - POSTGRES_PASSWORD=vaporrmm
+  #     - POSTGRES_DB=vaporrmm
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+  #   restart: unless-stopped
+  #   networks:
+  #     - vaporrmm
+
+volumes:
+  tailscale-state:
+  # postgres-data:
+
+networks:
+  vaporrmm:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

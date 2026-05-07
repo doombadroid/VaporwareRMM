@@ -1,0 +1,87 @@
+{
+  "dashboard": {
+    "title": "Vapor RMM Dashboard",
+    "tags": ["vaporrmm", "rmm", "monitoring"],
+    "timezone": "browser",
+    "schemaVersion": 36,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "HTTP Requests Total",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total[5m]))",
+            "legendFormat": "req/s"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Request Duration (p99)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+            "legendFormat": "p99"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Online Devices",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "active_devices",
+            "legendFormat": "online"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0}
+      },
+      {
+        "id": 4,
+        "title": "Total Devices",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "registered_devices_total",
+            "legendFormat": "total"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0}
+      },
+      {
+        "id": 5,
+        "title": "Requests by Status",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total[5m])) by (status)",
+            "legendFormat": "{{status}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 6,
+        "title": "Device Status Over Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "active_devices",
+            "legendFormat": "online"
+          },
+          {
+            "expr": "registered_devices_total - active_devices",
+            "legendFormat": "offline"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      }
+    ]
+  }
+}

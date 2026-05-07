@@ -1,0 +1,24 @@
+# Docker Compose Override
+# Copy this file to docker-compose.override.yml and customize
+# It will be automatically picked up by docker compose
+
+# Example: Change ports
+# services:
+#   server:
+#     ports:
+#       - "8888:8080"
+#   dashboard:
+#     ports:
+#       - "8081:3000"
+
+# Example: Add persistent volumes
+# services:
+#   server:
+#     volumes:
+#       - /mnt/bigdisk/vaporrmm-data:/app/data
+
+# Example: Use Tailscale
+# services:
+#   server:
+#     environment:
+#       - TAILSCALE_AUTH_KEY=tskey-auth-...

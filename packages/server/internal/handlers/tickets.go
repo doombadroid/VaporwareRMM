@@ -1,0 +1,127 @@
+package handlers
+
+import (
+	"database/sql"
+	"log/slog"
+	"time"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"vaporrmm/server/internal/auth"
+	"vaporrmm/server/internal/db"
+)
+
+func RegisterTicketRoutes(api fiber.Router, cfg Config) {
+	// List tickets
+	api.Get("/tickets", func(c *fiber.Ctx) error {
+		rows, err := db.DB.Query(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets ORDER BY created_at DESC`)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query tickets"})
+		}
+		defer rows.Close()
+
+		tickets := []fiber.Map{}
+		for rows.Next() {
+			var id, title, status, priority, category string
+			var description, deviceID, assignedTo sql.NullString
+			var createdAt, updatedAt int64
+			var dueDate sql.NullInt64
+			if err := rows.Scan(&id, &title, &description, &status, &priority, &deviceID, &assignedTo, &createdAt, &updatedAt, &dueDate, &category); err != nil {
+				slog.Warn("ticket scan failed", "error", err)
+				continue
+			}
+			tickets = append(tickets, fiber.Map{
+				"id": id, "title": title, "description": description.String, "status": status,
+				"priority": priority, "device_id": deviceID.String, "assigned_to": assignedTo.String,
+				"created_at": createdAt, "updated_at": updatedAt, "due_date": dueDate.Int64, "category": category,
+			})
+		}
+		if err := rows.Err(); err != nil {
+			slog.Warn("rows iteration error", "error", err)
+		}
+		return c.JSON(fiber.Map{"tickets": tickets})
+	})
+
+	// Create ticket
+	api.Post("/tickets", func(c *fiber.Ctx) error {
+		var req struct {
+			Title       string `json:"title"`
+			Description string `json:"description"`
+			Priority    string `json:"priority"`
+			DeviceID    string `json:"device_id,omitempty"`
+			Category    string `json:"category,omitempty"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+		if req.Title == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Title is required"})
+		}
+		if req.Priority == "" {
+			req.Priority = "medium"
+		}
+		if req.Category == "" {
+			req.Category = "general"
+		}
+		id := uuid.New().String()
+		now := time.Now().Unix()
+		_, err := db.DB.Exec(`INSERT INTO tickets (id, title, description, status, priority, device_id, created_at, updated_at, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, req.Title, req.Description, "open", req.Priority, req.DeviceID, now, now, req.Category)
+		if err != nil {
+			slog.Error("ticket insert failed", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create ticket"})
+		}
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "message": "Ticket created"})
+	})
+
+	// Get ticket by ID
+	api.Get("/tickets/:id", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		var title, status, priority, category string
+		var description, deviceID, assignedTo sql.NullString
+		var createdAt, updatedAt int64
+		var dueDate sql.NullInt64
+		err := db.DB.QueryRow(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets WHERE id = ?`, id).
+			Scan(&id, &title, &description, &status, &priority, &deviceID, &assignedTo, &createdAt, &updatedAt, &dueDate, &category)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Ticket not found"})
+		}
+		return c.JSON(fiber.Map{
+			"id": id, "title": title, "description": description.String, "status": status,
+			"priority": priority, "device_id": deviceID.String, "assigned_to": assignedTo.String,
+			"created_at": createdAt, "updated_at": updatedAt, "due_date": dueDate.Int64, "category": category,
+		})
+	})
+
+	// Update ticket
+	api.Put("/tickets/:id", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		var req struct {
+			Title       string `json:"title,omitempty"`
+			Description string `json:"description,omitempty"`
+			Status      string `json:"status,omitempty"`
+			Priority    string `json:"priority,omitempty"`
+			AssignedTo  string `json:"assigned_to,omitempty"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+		now := time.Now().Unix()
+		_, err := db.DB.Exec(`UPDATE tickets SET title = COALESCE(NULLIF(?, ''), title), description = COALESCE(NULLIF(?, ''), description), status = COALESCE(NULLIF(?, ''), status), priority = COALESCE(NULLIF(?, ''), priority), assigned_to = COALESCE(NULLIF(?, ''), assigned_to), updated_at = ? WHERE id = ?`,
+			req.Title, req.Description, req.Status, req.Priority, req.AssignedTo, now, id)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update ticket"})
+		}
+		return c.JSON(fiber.Map{"message": "Ticket updated"})
+	})
+
+	// Delete ticket
+	api.Delete("/tickets/:id", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		_, err := db.DB.Exec(`DELETE FROM tickets WHERE id = ?`, id)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete ticket"})
+		}
+		return c.JSON(fiber.Map{"message": "Ticket deleted"})
+	})
+}

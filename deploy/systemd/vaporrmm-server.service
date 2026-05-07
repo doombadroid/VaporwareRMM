@@ -1,0 +1,24 @@
+[Unit]
+Description=vaporRMM Server
+After=network.target
+
+[Service]
+Type=simple
+User=vaporrmm
+Group=vaporrmm
+WorkingDirectory=/opt/vaporrmm/server
+ExecStart=/opt/vaporrmm/server/vaporrmm-server
+Restart=always
+RestartSec=5
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-/etc/vaporrmm/server.env
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/vaporrmm/data /opt/vaporrmm/backups
+
+[Install]
+WantedBy=multi-user.target

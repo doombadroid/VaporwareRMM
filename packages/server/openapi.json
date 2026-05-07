@@ -1,0 +1,458 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Vapor RMM API",
+    "description": "API for managing devices, commands, and monitoring through the Vapor RMM platform.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Vapor RMM Support",
+      "url": "https://github.com/vapor-rmm/vapor-rmm"
+    }
+  },
+  "servers": [
+    {
+      "url": "/api",
+      "description": "Current server"
+    }
+  ],
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ],
+  "paths": {
+    "/version": {
+      "get": {
+        "summary": "Get API version",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "API version information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "version": { "type": "string" },
+                    "build": { "type": "string" },
+                    "api_base": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "healthy" },
+                    "database": { "type": "string", "example": "connected" },
+                    "timestamp": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "summary": "Authenticate user",
+        "tags": ["Authentication"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "password"],
+                "properties": {
+                  "email": { "type": "string", "format": "email" },
+                  "password": { "type": "string", "format": "password" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Login successful",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "token": { "type": "string" },
+                    "user_id": { "type": "string" },
+                    "email": { "type": "string" },
+                    "name": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Invalid credentials" },
+          "429": { "description": "Too many login attempts" }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "summary": "Logout user",
+        "tags": ["Authentication"],
+        "responses": {
+          "200": {
+            "description": "Logged out successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/branding": {
+      "get": {
+        "summary": "Get branding configuration",
+        "tags": ["Branding"],
+        "responses": {
+          "200": {
+            "description": "Branding configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "app_name": { "type": "string" },
+                    "icon_url": { "type": "string" },
+                    "company_name": { "type": "string" },
+                    "primary_color": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Update branding configuration",
+        "tags": ["Branding"],
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "app_name": { "type": "string" },
+                  "icon_url": { "type": "string" },
+                  "company_name": { "type": "string" },
+                  "primary_color": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Branding updated" }
+        }
+      }
+    },
+    "/devices": {
+      "get": {
+        "summary": "List all devices",
+        "tags": ["Devices"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "os", "in": "query", "schema": { "type": "string" } },
+          { "name": "search", "in": "query", "schema": { "type": "string" } },
+          { "name": "sort_by", "in": "query", "schema": { "type": "string" } },
+          { "name": "sort_order", "in": "query", "schema": { "type": "string", "enum": ["asc", "desc"] } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of devices",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "devices": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Device" }
+                    },
+                    "total": { "type": "integer" },
+                    "has_more": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a new device",
+        "tags": ["Devices"],
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DeviceInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Device created" }
+        }
+      }
+    },
+    "/devices/bulk-delete": {
+      "post": {
+        "summary": "Delete multiple devices",
+        "tags": ["Devices"],
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["ids"],
+                "properties": {
+                  "ids": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Devices deleted" }
+        }
+      }
+    },
+    "/devices/export": {
+      "get": {
+        "summary": "Export devices as CSV",
+        "tags": ["Devices"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["csv"] } }
+        ],
+        "responses": {
+          "200": { "description": "CSV file" }
+        }
+      }
+    },
+    "/devices/{id}": {
+      "get": {
+        "summary": "Get device by ID",
+        "tags": ["Devices"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Device details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Device" }
+              }
+            }
+          },
+          "404": { "description": "Device not found" }
+        }
+      },
+      "put": {
+        "summary": "Update device",
+        "tags": ["Devices"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DeviceUpdate" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Device updated" }
+        }
+      },
+      "delete": {
+        "summary": "Delete device",
+        "tags": ["Devices"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Device deleted" }
+        }
+      }
+    },
+    "/devices/{id}/command": {
+      "post": {
+        "summary": "Send command to device",
+        "tags": ["Devices"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "type": { "type": "string" },
+                  "command": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Command sent" }
+        }
+      }
+    },
+    "/devices/{id}/sunshine": {
+      "get": {
+        "summary": "Get Sunshine status",
+        "tags": ["Sunshine"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Sunshine status" }
+        }
+      },
+      "post": {
+        "summary": "Install Sunshine",
+        "tags": ["Sunshine"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Installation command sent" }
+        }
+      }
+    },
+    "/devices/{id}/tailscale": {
+      "get": {
+        "summary": "Get Tailscale status",
+        "tags": ["Tailscale"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Tailscale status" }
+        }
+      },
+      "post": {
+        "summary": "Install Tailscale",
+        "tags": ["Tailscale"],
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Installation command sent" }
+        }
+      }
+    },
+    "/dashboard/overview": {
+      "get": {
+        "summary": "Get dashboard overview",
+        "tags": ["Dashboard"],
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": { "description": "Dashboard data" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Device": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "hostname": { "type": "string" },
+          "ip_address": { "type": "string" },
+          "mac_address": { "type": "string" },
+          "os_name": { "type": "string" },
+          "os_version": { "type": "string" },
+          "agent_version": { "type": "string" },
+          "status": { "type": "string", "enum": ["online", "offline", "maintenance"] },
+          "last_seen": { "type": "integer" },
+          "created_at": { "type": "integer" },
+          "cpu": { "type": "string" },
+          "memory": { "type": "integer" },
+          "disk_size": { "type": "integer" },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "DeviceInput": {
+        "type": "object",
+        "required": ["name", "hostname"],
+        "properties": {
+          "name": { "type": "string" },
+          "hostname": { "type": "string" },
+          "ip_address": { "type": "string" },
+          "mac_address": { "type": "string" },
+          "os_name": { "type": "string" },
+          "os_version": { "type": "string" }
+        }
+      },
+      "DeviceUpdate": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "hostname": { "type": "string" },
+          "status": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  }
+}

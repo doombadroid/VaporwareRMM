@@ -1,44 +1,43 @@
-# Build stage
 FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
-# Install SQLite dependencies
-RUN apk add --no-cache sqlite-dev
+# SQLite needs gcc + musl headers for CGO; lib/pq is pure Go (no extra deps)
+RUN apk add --no-cache gcc musl-dev sqlite-libs sqlite-dev git
 
-# Copy go.mod and go.sum
-COPY packages/server/go.* ./
+# Cache dependency downloads before copying source
+COPY packages/models/go.mod ./packages/models/
+COPY packages/server/go.mod packages/server/go.sum ./packages/server/
 
-# Download dependencies
-RUN go mod download
+RUN cd packages/models && go mod download
+RUN cd packages/server && go mod download
 
-# Copy source code
+# Copy source
 COPY packages/server/ ./packages/server/
 COPY packages/models/ ./packages/models/
 
-# Build the application
-RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo \
-    -o server \
-    ./packages/server/main.go
+RUN cd packages/server && \
+    CGO_ENABLED=1 GOOS=linux \
+    go build -a -trimpath -ldflags="-s -w -X main.buildVersion=$(git describe --tags --always 2>/dev/null || echo unknown)" -o /app/server .
 
-# Production stage
-FROM alpine:latest
+# ── Runtime image ────────────────────────────────────────────
+FROM alpine:3.21
 
 WORKDIR /app
 
-# Install SQLite runtime and ca-certificates
-RUN apk --no-cache add sqlite-libs ca-certificates
+# sqlite + TLS roots; wget for healthcheck
+RUN apk --no-cache add sqlite-libs ca-certificates wget
 
-# Create non-root user
 RUN addgroup -g 1001 -S vapor && \
-    adduser -S vapor -u 1001 -G vapor
+    adduser  -S vapor -u 1001 -G vapor
 
-# Copy binary
 COPY --from=builder --chown=vapor:vapor /app/server ./server
-COPY --from=builder --chown=vapor:vapor /app/packages/server/db/ ./db/
 
 EXPOSE 8080
 
 USER vapor
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 
 CMD ["./server"]

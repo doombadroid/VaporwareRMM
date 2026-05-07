@@ -1,0 +1,186 @@
+version: '3.8'
+
+# ─────────────────────────────────────────────────────────────
+# vaporRMM — complete stack
+#
+# Quick start:
+#   cp .env.example .env          # fill in required values
+#   docker compose up -d
+#   docker compose logs server    # grab admin password on first run
+#
+# For production with real TLS:
+#   DOMAIN=rmm.yourdomain.com docker compose up -d
+# ─────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Database ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: vaporrmm-postgres
+    environment:
+      POSTGRES_DB:       vaporrmm
+      POSTGRES_USER:     vaporrmm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - vaporrmm-pgdata:/var/lib/postgresql/data
+    networks:
+      - vaporrmm-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaporrmm -d vaporrmm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # ── API server ────────────────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    container_name: vaporrmm-server
+    environment:
+      DATABASE_URL:  postgres://vaporrmm:${POSTGRES_PASSWORD}@postgres:5432/vaporrmm?sslmode=disable
+      JWT_SECRET:    ${JWT_SECRET:?set JWT_SECRET in .env}
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      SERVER_PORT:   8080
+      CORS_ORIGINS:  ${CORS_ORIGINS:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    secrets:
+      - jwt_secret
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - vaporrmm-internal
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # ── Dashboard ─────────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+      args:
+        # /api is a relative path — works because Caddy serves both
+        # dashboard and API on the same domain.
+        NEXT_PUBLIC_API_URL: /api
+    container_name: vaporrmm-dashboard
+    environment:
+      NODE_ENV: production
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - vaporrmm-internal
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # ── Reverse proxy + TLS ───────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: vaporrmm-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      DOMAIN:     ${DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - vaporrmm-caddy-data:/data
+      - vaporrmm-caddy-config:/config
+    depends_on:
+      dashboard:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    networks:
+      - vaporrmm-internal
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  # ── Agent (example / dev only) ────────────────────────────
+  # Real agents run on managed endpoints, not in this compose.
+  # This service is useful for local testing.
+  # Start with: docker compose --profile dev up
+  agent-example:
+    profiles: [dev]
+    build:
+      context: .
+      dockerfile: packages/agent/Dockerfile
+    container_name: vaporrmm-agent-example
+    environment:
+      VAPOR_SERVER_URL:  http://server:8080
+      VAPOR_AGENT_TOKEN: ${AGENT_TOKEN:?set AGENT_TOKEN in .env when using dev profile}
+      VAPOR_AGENT_PORT:  47991
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - vaporrmm-internal
+    ports:
+      - "47991:47991"
+    restart: unless-stopped
+
+# ─────────────────────────────────────────────────────────────
+secrets:
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+
+volumes:
+  vaporrmm-pgdata:
+  vaporrmm-caddy-data:
+  vaporrmm-caddy-config:
+
+networks:
+  # Internal network — nothing exposed to host except through Caddy
+  vaporrmm-internal:
+    driver: bridge

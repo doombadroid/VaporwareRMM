@@ -1,401 +1,319 @@
 package main
 
 import (
-	"bytes"
-	"database/sql"
-	"encoding/json"
 	"fmt"
-	"log"
-	"net/http"
+	"log/slog"
 	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
-	"github.com/google/uuid"
+	_ "embed"
+
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/fiber/v2/middleware/recover"
+	"vaporrmm/server/internal/auth"
+	"vaporrmm/server/internal/db"
+	"vaporrmm/server/internal/events"
+	"vaporrmm/server/internal/handlers"
+	"vaporrmm/server/internal/metrics"
+	"vaporrmm/server/internal/redis"
+	"vaporrmm/server/internal/utils"
 )
 
-// Device represents a managed device
-type Device struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Hostname        string `json:"hostname"`
-	IPAddress       string `json:"ip_address"`
-	MacAddress      string `json:"mac_address"`
-	OSName          string `json:"os_name"`
-	OSVersion       string `json:"os_version"`
-	KernelVersion   string `json:"kernel_version"`
-	AgentVersion    string `json:"agent_version"`
-	Status          string `json:"status"` // online, offline
-	LastSeen        int64  `json:"last_seen"`
-	CreatedAt       int64  `json:"created_at"`
-	PublicKey       string `json:"public_key,omitempty"`
-	UserData        string `json:"user_data,omitempty"`
-	SystemUUID      string `json:"system_uuid,omitempty"`
-	SerialNumber    string `json:"serial_number,omitempty"`
-	Manufacturer    string `json:"manufacturer,omitempty"`
-	Model           string `json:"model,omitempty"`
-	CPU             string `json:"cpu,omitempty"`
-	Memory          int64  `json:"memory,omitempty"` // in bytes
-	DiskSize        int64  `json:"disk_size,omitempty"`
-	Timezone        string `json:"timezone,omitempty"`
-}
+//go:embed openapi.json
+var openAPISpec []byte
 
-// StatusResponse for health checks
-type StatusResponse struct {
-	Status    string `json:"status"`
-	Timestamp int64  `json:"timestamp"`
-	Version   string `json:"version"`
-}
+var (
+	buildVersion = "dev"
+)
 
-var db *sql.DB
-
-func initDB() error {
-	var err error
-	dbPath := os.Getenv("DATABASE_PATH")
-	if dbPath == "" {
-		dbPath = "./data/vapor_rmm.db"
-	}
-	
-	os.MkdirAll("./data", 0755)
-	db, err = sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return err
-	}
-
-	createTableSQL := `
-	CREATE TABLE IF NOT EXISTS devices (
-		id TEXT PRIMARY KEY,
-		name TEXT,
-		hostname TEXT,
-		ip_address TEXT,
-		mac_address TEXT,
-		os_name TEXT,
-		os_version TEXT,
-		kernel_version TEXT,
-		agent_version TEXT,
-		status TEXT DEFAULT 'offline',
-		last_seen INTEGER,
-		created_at INTEGER,
-		public_key TEXT,
-		user_data TEXT,
-		system_uuid TEXT,
-		serial_number TEXT,
-		manufacturer TEXT,
-		model TEXT,
-		cpu TEXT,
-		memory INTEGER,
-		disk_size INTEGER,
-		timezone TEXT
-	);`
-
-	_, err = db.Exec(createTableSQL)
-	return err
-}
-
-// Helper function for dynamic UPDATE queries
-func joinStrings(strings []string, sep string) string {
-	if len(strings) == 0 {
-		return ""
-	}
-	result := strings[0]
-	for i := 1; i < len(strings); i++ {
-		result += sep + strings[i]
-	}
-	return result
-}
+const (
+	defaultServerPort       = 8080
+	defaultAgentWSPort      = 47991
+	defaultOfflineThreshold = 120
+	defaultBodyLimit        = 4 * 1024 * 1024
+	defaultReadTimeout      = 30 * time.Second
+	defaultWriteTimeout     = 30 * time.Second
+	defaultIdleTimeout      = 120 * time.Second
+	defaultCookieMaxAge     = 86400
+	defaultAgentPort        = 47991
+	defaultSunshinePort     = 47990
+	maxDevicesLimit         = 500
+	maxCommandLimit         = 200
+	maxAuditLimit           = 1000
+	metricsRetentionDefault = 86400
+	defaultTickerInterval   = 60 * time.Second
+	defaultHSTSMaxAge       = 31536000
+)
 
 func main() {
-	if err := initDB(); err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+	// Load configuration from environment / Docker secrets
+	auth.JWTSecret = utils.ReadSecret("JWT_SECRET", "JWT_SECRET_FILE")
+	if auth.JWTSecret == "" {
+		auth.JWTSecret = utils.GenerateSecureKey()
+		slog.Info("Warning: JWT_SECRET not set, using generated key (will not persist across restarts)")
 	}
-	defer db.Close()
 
-	app := fiber.New()
+	utils.ServerPort = defaultServerPort
+	if p := os.Getenv("SERVER_PORT"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			utils.ServerPort = parsed
+		}
+	}
 
-	// Health check endpoint
-	app.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(StatusResponse{
-			Status:  "ok",
-			Version: "1.0.0",
-		})
+	utils.AgentWSPort = defaultAgentWSPort
+	if p := os.Getenv("AGENT_WS_PORT"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			utils.AgentWSPort = parsed
+		}
+	}
+
+	moonlightWebURL := os.Getenv("MOONLIGHT_WEB_URL")
+
+	if err := db.Init(); err != nil {
+		slog.Error("failed to initialize database", "error", err)
+		os.Exit(1)
+	}
+	defer db.DB.Close()
+
+	redis.Init()
+	defer redis.Close()
+
+	events.StartWSRedisSubscriber()
+
+	auth.LoadAgentTokens()
+	auth.CreateDefaultAdmin()
+
+	app := fiber.New(fiber.Config{
+		BodyLimit:             defaultBodyLimit,
+		ReadTimeout:           defaultReadTimeout,
+		WriteTimeout:          defaultWriteTimeout,
+		IdleTimeout:           defaultIdleTimeout,
+		DisableStartupMessage: false,
 	})
 
-	// Get all devices
-	app.Get("/api/devices", func(c *fiber.Ctx) error {
-		rows, err := db.Query("SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version, status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model, cpu, memory, disk_size, timezone FROM devices")
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "Failed to query devices"})
-		}
-		defer rows.Close()
+	app.Use(recover.New())
+	app.Use(logger.New(logger.Config{
+		Format: "${time} ${status} ${method} ${path} ${latency}\n",
+	}))
 
-		var devices []Device
-		for rows.Next() {
-			var d Device
-			err := rows.Scan(
-				&d.ID, &d.Name, &d.Hostname, &d.IPAddress, &d.MacAddress,
-				&d.OSName, &d.OSVersion, &d.KernelVersion, &d.AgentVersion,
-				&d.Status, &d.LastSeen, &d.CreatedAt, &d.PublicKey, &d.UserData,
-				&d.SystemUUID, &d.SerialNumber, &d.Manufacturer, &d.Model,
-				&d.CPU, &d.Memory, &d.DiskSize, &d.Timezone,
-			)
-			if err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "Failed to scan device"})
+	// Request ID / trace context middleware
+	app.Use(func(c *fiber.Ctx) error {
+		traceID := c.Get("X-Trace-ID")
+		if traceID == "" {
+			traceID = utils.GenerateSecureKey()[:16]
+		}
+		c.Set("X-Trace-ID", traceID)
+		c.Locals("trace_id", traceID)
+		return c.Next()
+	})
+
+	// Security headers middleware
+	app.Use(func(c *fiber.Ctx) error {
+		c.Set("X-Content-Type-Options", "nosniff")
+		c.Set("X-Frame-Options", "DENY")
+		c.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Set("Content-Security-Policy", "default-src 'self'")
+		return c.Next()
+	})
+
+	// HTTPS redirect + HSTS when TLS_CERT is set
+	if os.Getenv("SERVER_CERT") != "" {
+		app.Use(func(c *fiber.Ctx) error {
+			if c.Protocol() == "http" {
+				return c.Redirect("https://"+c.Hostname()+c.OriginalURL(), fiber.StatusMovedPermanently)
 			}
-			devices = append(devices, d)
-		}
-
-		return c.JSON(devices)
-	})
-
-	// Get device by ID
-	app.Get("/api/devices/:id", func(c *fiber.Ctx) error {
-		id := c.Params("id")
-		var d Device
-		err := db.QueryRow("SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version, status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model, cpu, memory, disk_size, timezone FROM devices WHERE id = ?", id).Scan(
-			&d.ID, &d.Name, &d.Hostname, &d.IPAddress, &d.MacAddress,
-			&d.OSName, &d.OSVersion, &d.KernelVersion, &d.AgentVersion,
-			&d.Status, &d.LastSeen, &d.CreatedAt, &d.PublicKey, &d.UserData,
-			&d.SystemUUID, &d.SerialNumber, &d.Manufacturer, &d.Model,
-			&d.CPU, &d.Memory, &d.DiskSize, &d.Timezone,
-		)
-		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
-		}
-		return c.JSON(d)
-	})
-
-	// Register new device (agent registration)
-	app.Post("/api/devices", func(c *fiber.Ctx) error {
-		var device Device
-		if err := c.BodyParser(&device); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "Invalid request body"})
-		}
-
-		device.ID = uuid.New().String()
-		device.CreatedAt = time.Now().Unix()
-		device.LastSeen = time.Now().Unix()
-		device.Status = "online"
-
-		_, err := db.Exec(
-			`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version, status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model, cpu, memory, disk_size, timezone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			device.ID, device.Name, device.Hostname, device.IPAddress, device.MacAddress,
-			device.OSName, device.OSVersion, device.KernelVersion, device.AgentVersion,
-			device.Status, device.LastSeen, device.CreatedAt, device.PublicKey, device.UserData,
-			device.SystemUUID, device.SerialNumber, device.Manufacturer, device.Model,
-			device.CPU, device.Memory, device.DiskSize, device.Timezone,
-		)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "Failed to insert device"})
-		}
-
-		return c.JSON(device)
-	})
-
-	// Update device status
-	app.Put("/api/devices/:id", func(c *fiber.Ctx) error {
-		id := c.Params("id")
-		
-		var update Device
-		if err := c.BodyParser(&update); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "Invalid request body"})
-		}
-
-		device := Device{LastSeen: time.Now().Unix(), Status: "online"}
-		
-		fields := []string{"last_seen = ?", "status = ?"}
-		args := []interface{}{device.LastSeen, device.Status}
-		
-		if update.Name != "" {
-			fields = append(fields, "name = ?")
-			args = append(args, update.Name)
-		}
-		if update.Hostname != "" {
-			fields = append(fields, "hostname = ?")
-			args = append(args, update.Hostname)
-		}
-		if update.IPAddress != "" {
-			fields = append(fields, "ip_address = ?")
-			args = append(args, update.IPAddress)
-		}
-
-		args = append(args, id)
-
-		query := fmt.Sprintf("UPDATE devices SET %s WHERE id = ?", joinStrings(fields, ", "))
-		
-		result, err := db.Exec(query, args...)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "Failed to update device"})
-		}
-		
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected == 0 {
-			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
-		}
-
-		// Fetch updated device
-		var d Device
-		err = db.QueryRow("SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version, status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model, cpu, memory, disk_size, timezone FROM devices WHERE id = ?", id).Scan(
-			&d.ID, &d.Name, &d.Hostname, &d.IPAddress, &d.MacAddress,
-			&d.OSName, &d.OSVersion, &d.KernelVersion, &d.AgentVersion,
-			&d.Status, &d.LastSeen, &d.CreatedAt, &d.PublicKey, &d.UserData,
-			&d.SystemUUID, &d.SerialNumber, &d.Manufacturer, &d.Model,
-			&d.CPU, &d.Memory, &d.DiskSize, &d.Timezone,
-		)
-		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
-		}
-		
-		return c.JSON(d)
-	})
-
-	// Delete device
-	app.Delete("/api/devices/:id", func(c *fiber.Ctx) error {
-		id := c.Params("id")
-		
-		result, err := db.Exec("DELETE FROM devices WHERE id = ?", id)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "Failed to delete device"})
-		}
-		
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected == 0 {
-			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
-		}
-		
-		return c.JSON(map[string]string{"message": "Device deleted successfully"})
-	})
-
-	// Agent heartbeat endpoint
-	app.Post("/api/devices/:id/heartbeat", func(c *fiber.Ctx) error {
-		id := c.Params("id")
-		
-		result, err := db.Exec("UPDATE devices SET last_seen = ?, status = ? WHERE id = ?", time.Now().Unix(), "online", id)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "Failed to update heartbeat"})
-		}
-		
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected == 0 {
-			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
-		}
-
-		var d Device
-		err = db.QueryRow("SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version, status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model, cpu, memory, disk_size, timezone FROM devices WHERE id = ?", id).Scan(
-			&d.ID, &d.Name, &d.Hostname, &d.IPAddress, &d.MacAddress,
-			&d.OSName, &d.OSVersion, &d.KernelVersion, &d.AgentVersion,
-			&d.Status, &d.LastSeen, &d.CreatedAt, &d.PublicKey, &d.UserData,
-			&d.SystemUUID, &d.SerialNumber, &d.Manufacturer, &d.Model,
-			&d.CPU, &d.Memory, &d.DiskSize, &d.Timezone,
-		)
-		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
-		}
-		
-		return c.JSON(d)
-	})
-
-	// Send command to device
-	app.Post("/api/devices/:id/command", func(c *fiber.Ctx) error {
-		id := c.Params("id")
-
-		var cmdReq struct {
-			Type    string `json:"type"`
-			Command string `json:"command"`
-		}
-		if err := c.BodyParser(&cmdReq); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(map[string]string{"error": "Invalid request body"})
-		}
-
-		// Get device to find its hostname
-		var d Device
-		err := db.QueryRow("SELECT id, hostname FROM devices WHERE id = ?", id).Scan(&d.ID, &d.Hostname)
-		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
-		}
-
-		// Create command record in database
-		cmdID := uuid.New().String()
-		cmdData, _ := json.Marshal(map[string]interface{}{
-			"id":        cmdID,
-			"type":      cmdReq.Type,
-			"payload":   map[string]string{"command": cmdReq.Command},
-			"created_at": time.Now(),
+			c.Set("Strict-Transport-Security", fmt.Sprintf("max-age=%d; includeSubDomains; preload", defaultHSTSMaxAge))
+			return c.Next()
 		})
+	}
 
-		_, err = db.Exec(
-			`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			cmdID, id, cmdReq.Type, string(cmdData), "pending", time.Now().Unix(),
-		)
-		if err != nil {
-			// Try creating table if doesn't exist
-			db.Exec(`CREATE TABLE IF NOT EXISTS device_commands (
-				id TEXT PRIMARY KEY,
-				device_id TEXT,
-				type TEXT,
-				payload TEXT,
-				status TEXT,
-				output TEXT,
-				created_at INTEGER,
-				finished_at INTEGER
-			)`)
-			db.Exec(
-				`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-				cmdID, id, cmdReq.Type, string(cmdData), "pending", time.Now().Unix(),
-			)
+	// CORS
+	corsOrigins := os.Getenv("CORS_ORIGINS")
+	if corsOrigins == "" {
+		corsOrigins = "http://localhost:3000"
+	}
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     corsOrigins,
+		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
+		AllowHeaders:     "Origin,Content-Type,Authorization,X-CSRF-Token",
+		AllowCredentials: true,
+	}))
+
+	// Prometheus metrics middleware
+	app.Use(func(c *fiber.Ctx) error {
+		start := time.Now()
+		err := c.Next()
+		duration := time.Since(start).Seconds()
+		status := strconv.Itoa(c.Response().StatusCode())
+		path := c.Route().Path
+		if path == "" {
+			path = c.Path()
 		}
+		metrics.HTTPRequestsTotal.WithLabelValues(c.Method(), path, status).Inc()
+		metrics.HTTPRequestDuration.WithLabelValues(c.Method(), path).Observe(duration)
+		return err
+	})
 
-		// Try to send command directly to agent if online
-		if d.Hostname != "" {
-			go func() {
-				resp, err := http.Post(
-					fmt.Sprintf("http://localhost:47991/agent/run"),
-					"application/json",
-					bytes.NewBuffer(cmdData),
-				)
-				if err == nil && resp.StatusCode == 200 {
-					defer resp.Body.Close()
-					db.Exec(`UPDATE device_commands SET status = ?, finished_at = ? WHERE id = ?`, "completed", time.Now().Unix(), cmdID)
+	cfg := handlers.Config{
+		BuildVersion:            buildVersion,
+		DefaultOfflineThreshold: defaultOfflineThreshold,
+		DefaultAgentWSPort:      defaultAgentWSPort,
+		DefaultSunshinePort:     defaultSunshinePort,
+		DefaultCookieMaxAge:     defaultCookieMaxAge,
+		MaxDevicesLimit:         maxDevicesLimit,
+		MaxCommandLimit:         maxCommandLimit,
+		MaxAuditLimit:           maxAuditLimit,
+		MoonlightWebURL:         moonlightWebURL,
+	}
+
+	// System routes
+	handlers.RegisterSystemRoutes(app, cfg, openAPISpec)
+
+	// Agent routes
+	handlers.RegisterAgentRoutes(app, cfg)
+
+	// Public API group
+	publicAPI := app.Group("/api", auth.RateLimiter(60, time.Minute))
+
+	// API v1 routes
+	api := app.Group("/api/v1", auth.AuthMiddleware(), auth.CSRFMiddleware())
+
+	// Backward compatibility: redirect legacy /api/* paths to /api/v1/*
+	// Uses 308 (Permanent Redirect) to preserve HTTP method (POST, PUT, etc.)
+	// Public endpoints (/api/auth/*, /api/branding/*) are excluded because they
+	// must remain accessible without CSRF / auth middleware.
+	app.Use(func(c *fiber.Ctx) error {
+		path := c.Path()
+		if strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/api/v1/") &&
+			path != "/api/version" && path != "/api/openapi.json" &&
+			!strings.HasPrefix(path, "/api/auth/") &&
+			!strings.HasPrefix(path, "/api/branding/") {
+			return c.Redirect("/api/v1"+strings.TrimPrefix(path, "/api"), fiber.StatusPermanentRedirect)
+		}
+		return c.Next()
+	})
+
+	// Auth routes
+	handlers.RegisterAuthRoutes(publicAPI, api, cfg)
+
+	// Branding routes
+	handlers.RegisterBrandingRoutes(app, api)
+
+	// Device routes
+	devices := api.Group("/devices")
+	handlers.RegisterDeviceRoutes(api, devices, cfg)
+
+	// Dashboard routes
+	handlers.RegisterDashboardRoutes(api, cfg)
+
+	// Script routes
+	handlers.RegisterScriptRoutes(api, cfg)
+
+	// Compliance routes
+	handlers.RegisterComplianceRoutes(api, cfg)
+
+	// Webhook routes
+	handlers.RegisterWebhookRoutes(api)
+
+	// Audit routes
+	handlers.RegisterAuditRoutes(api, cfg)
+
+	// Alert routes
+	handlers.RegisterAlertRoutes(api)
+
+	// Admin routes
+	handlers.RegisterAdminRoutes(api)
+
+	// Ticket routes
+	handlers.RegisterTicketRoutes(api, cfg)
+
+	// ============================================================
+	// Background goroutines
+	// ============================================================
+	offlineSec := defaultOfflineThreshold
+	if o := os.Getenv("OFFLINE_THRESHOLD_SECONDS"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed > 0 {
+			offlineSec = parsed
+		}
+	}
+	slog.Info("offline threshold configured", "seconds", offlineSec)
+
+	offlineDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(defaultTickerInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				threshold := time.Now().Unix() - int64(offlineSec)
+				res, err := db.DB.Exec(`UPDATE devices SET status = 'offline' WHERE last_seen < ? AND status != 'offline'`, threshold)
+				if err != nil {
+					slog.Warn("offline detection query failed", "error", err)
+					continue
 				}
-			}()
-		}
-
-		return c.JSON(map[string]interface{}{
-			"message":    "Command sent",
-			"command_id": cmdID,
-		})
-	})
-
-	// Get pending commands for device
-	app.Get("/agent/:hostname/commands", func(c *fiber.Ctx) error {
-		hostname := c.Params("hostname")
-
-		// Get device ID by hostname
-		var d Device
-		err := db.QueryRow("SELECT id FROM devices WHERE hostname = ?", hostname).Scan(&d.ID)
-		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(map[string]string{"error": "Device not found"})
-		}
-
-		rows, err := db.Query(`SELECT payload FROM device_commands WHERE device_id = ? AND status = 'pending' ORDER BY created_at ASC`, d.ID)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(map[string]string{"error": "Failed to query commands"})
-		}
-		defer rows.Close()
-
-		var commands []map[string]interface{}
-		for rows.Next() {
-			var payload string
-			err := rows.Scan(&payload)
-			if err == nil {
-				var cmd map[string]interface{}
-				json.Unmarshal([]byte(payload), &cmd)
-				commands = append(commands, cmd)
+				if n, _ := res.RowsAffected(); n > 0 {
+					slog.Info("marked devices offline", "count", n)
+					rows, _ := db.DB.Query(`SELECT id, hostname FROM devices WHERE last_seen < ? AND status = 'offline' LIMIT ?`, threshold, n)
+					if rows != nil {
+						for rows.Next() {
+							var did, hostname string
+							_ = rows.Scan(&did, &hostname)
+							events.TriggerWebhooks("device.offline", map[string]interface{}{"device_id": did, "hostname": hostname, "timestamp": time.Now().Unix()})
+							events.WSBroadcastMessage(map[string]interface{}{"type": "device.offline", "device_id": did, "hostname": hostname, "timestamp": time.Now().Unix()})
+						}
+						rows.Close()
+					}
+				}
+			case <-offlineDone:
+				return
 			}
 		}
+	}()
 
-		return c.JSON(commands)
-	})
+	go func() {
+		ticker := time.NewTicker(defaultTickerInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				var total, online int64
+				_ = db.DB.QueryRow(`SELECT COUNT(*) FROM devices`).Scan(&total)
+				_ = db.DB.QueryRow(`SELECT COUNT(*) FROM devices WHERE status = 'online'`).Scan(&online)
+				metrics.RegisteredDevicesGauge.Set(float64(total))
+				metrics.ActiveDevicesGauge.Set(float64(online))
+				if db.DB != nil && db.DB.DB != nil {
+					stats := db.DB.DB.Stats()
+					metrics.DBOpenConnsGauge.Set(float64(stats.OpenConnections))
+					metrics.DBInUseConnsGauge.Set(float64(stats.InUse))
+					metrics.DBIdleConnsGauge.Set(float64(stats.Idle))
+				}
+			case <-offlineDone:
+				return
+			}
+		}
+	}()
 
-	app.Listen(":3001")
+	// Graceful shutdown on SIGINT/SIGTERM
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-quit
+		slog.Info("shutting down server...")
+		close(offlineDone)
+		if err := app.Shutdown(); err != nil {
+			slog.Error("server shutdown error", "error", err)
+		}
+	}()
+
+	// Start server
+	slog.Info("starting server", "port", utils.ServerPort)
+	if err := app.Listen(fmt.Sprintf(":%d", utils.ServerPort)); err != nil {
+		slog.Error("failed to start server", "error", err)
+	}
 }

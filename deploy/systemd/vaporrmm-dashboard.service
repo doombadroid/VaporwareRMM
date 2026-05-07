@@ -1,0 +1,19 @@
+[Unit]
+Description=vaporRMM Dashboard
+After=network.target vaporrmm-server.service
+Wants=vaporrmm-server.service
+
+[Service]
+Type=simple
+User=vaporrmm
+Group=vaporrmm
+WorkingDirectory=/opt/vaporrmm/dashboard
+ExecStart=/usr/bin/npm run start -- -p 3000
+Restart=always
+RestartSec=5
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="NODE_ENV=production"
+EnvironmentFile=-/etc/vaporrmm/dashboard.env
+
+[Install]
+WantedBy=multi-user.target

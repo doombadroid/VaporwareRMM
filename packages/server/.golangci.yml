@@ -1,0 +1,65 @@
+run:
+  timeout: 5m
+  go: "1.22"
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - dupl
+    - gocritic
+    - gofmt
+    - goimports
+    - misspell
+    - prealloc
+    - revive
+    - unconvert
+    - unparam
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  govet:
+    enable-all: true
+    disable:
+      - shadow
+  gocritic:
+    enabled-tags:
+      - performance
+      - style
+      - experimental
+    disabled-checks:
+      - wrapperFunc
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+        disabled: false
+      - name: var-naming
+        severity: warning
+        disabled: false
+      - name: indent-error-flow
+        severity: warning
+        disabled: false
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - dupl
+        - gocritic
+    - path: internal/db/db\.go
+      linters:
+        - errcheck
+      text: "Error return value of `rows.Close` is not checked"
+    - linters:
+        - errcheck
+      text: "Error return value of `c.Next` is not checked"
+  max-issues-per-linter: 0
+  max-same-issues: 0

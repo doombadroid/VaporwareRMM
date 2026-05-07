@@ -1,191 +1,391 @@
-import Link from 'next/link'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+'use client'
+
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { Monitor, Ticket, AlertTriangle, Zap, Cpu, Globe } from 'lucide-react'
+import { toast } from 'sonner'
 import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-} from 'recharts'
-
-// Mock data for charts
-const systemData = [
-  { time: '10:00', cpu: 45, memory: 62 },
-  { time: '10:05', cpu: 52, memory: 65 },
-  { time: '10:10', cpu: 38, memory: 60 },
-  { time: '10:15', cpu: 67, memory: 71 },
-  { time: '10:20', cpu: 43, memory: 64 },
-  { time: '10:25', cpu: 58, memory: 68 },
-  { time: '10:30', cpu: 49, memory: 63 },
-]
-
-const devicesData = [
-  { name: 'Online', value: 87 },
-  { name: 'Offline', value: 12 },
-  { name: 'Maintenance', value: 1 },
-]
+  type DashboardOverview,
+  type Device,
+  type InstallLinks,
+  devices as devicesApi,
+  branding as brandingApi,
+} from '@/lib/api'
+import AuthGuard from '@/components/AuthGuard'
+import { useBranding } from '@/components/BrandingProvider'
+import DashboardShell from '@/components/layout/DashboardShell'
+import StatCard from '@/components/dashboard/StatCard'
+import HealthScore from '@/components/dashboard/HealthScore'
+import DeviceFleetTable from '@/components/dashboard/DeviceFleetTable'
+import AlertsPanel from '@/components/dashboard/AlertsPanel'
+import TicketsPanel from '@/components/dashboard/TicketsPanel'
+import RemoteControlModal from '@/components/dashboard/RemoteControlModal'
+import TailscaleModal from '@/components/dashboard/TailscaleModal'
+import BrandingModal from '@/components/dashboard/BrandingModal'
+import InstallLinksModal from '@/components/dashboard/InstallLinksModal'
+import ResourceChart from '@/components/dashboard/ResourceChart'
+import DeviceStatusChart from '@/components/dashboard/DeviceStatusChart'
+import QuickActionsPanel from '@/components/dashboard/QuickActionsPanel'
+import RecentActivityPanel from '@/components/dashboard/RecentActivityPanel'
+import SlaCard from '@/components/dashboard/SlaCard'
+import DashboardLoading from '@/components/dashboard/DashboardLoading'
+import CreateTicketModal from '@/components/dashboard/CreateTicketModal'
+import SetupWizard from '@/components/dashboard/SetupWizard'
 
 export default function DashboardPage() {
+  const router = useRouter()
+  const [overview, setOverview] = useState<DashboardOverview | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [remoteControlModal, setRemoteControlModal] = useState<{
+    open: boolean
+    device: Device | null
+  }>({ open: false, device: null })
+  const [tailscaleModal, setTailscaleModal] = useState<{
+    open: boolean
+    device: Device | null
+  }>({ open: false, device: null })
+  const { branding, setBranding } = useBranding()
+  const [brandingModal, setBrandingModal] = useState(false)
+  const [installLinksModal, setInstallLinksModal] = useState(false)
+  const [installLinks, setInstallLinks] = useState<InstallLinks | null>(null)
+  const [realDevices, setRealDevices] = useState<Device[]>([])
+  const [selectedDevices, setSelectedDevices] = useState<Set<string>>(
+    new Set()
+  )
+  const [createTicketModal, setCreateTicketModal] = useState(false)
+  const [setupWizard, setSetupWizard] = useState(false)
+
+  const loadData = async () => {
+    setLoading(true)
+    try {
+      const overviewData = await import('@/lib/api').then((m) =>
+        m.dashboard.getOverview()
+      )
+      setOverview(overviewData)
+      try {
+        const deviceList = await devicesApi.getAll()
+        setRealDevices(deviceList)
+      } catch {
+        toast.error('Failed to load devices')
+      }
+    } catch (err) {
+      console.error('Failed to load overview:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadData()
+    const interval = setInterval(loadData, 30000)
+    return () => clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    const completed = localStorage.getItem('setup_completed')
+    if (completed !== 'true') {
+      const timer = setTimeout(() => setSetupWizard(true), 800)
+      return () => clearTimeout(timer)
+    }
+  }, [])
+
+  const handleLoadInstallLinks = async () => {
+    try {
+      const links = await brandingApi.getInstallLinks()
+      setInstallLinks(links)
+      setInstallLinksModal(true)
+    } catch {
+      toast.error('Failed to load install links')
+    }
+  }
+
+  const totalDevices = overview?.system_health?.total_devices || 0
+  const onlineDevices = overview?.system_health?.online_devices || 0
+  const cpuUsage = overview?.system_health?.cpu_usage || 0
+  const memUsage = overview?.system_health?.memory_usage || 0
+  const critAlerts =
+    (overview?.active_alerts?.filter((a) => a.severity === 'critical') || [])
+      .length || 0
+
+  const healthScore = overview
+    ? totalDevices > 0
+      ? Math.round(
+          (onlineDevices / totalDevices) * 40 +
+            Math.max(0, (100 - cpuUsage) / 100) * 20 +
+            Math.max(0, (100 - memUsage) / 100) * 20 +
+            Math.max(0, (100 - critAlerts * 20) / 100) * 20
+        )
+      : 100
+    : 0
+
+  const deviceStatusData = overview
+    ? [
+        {
+          name: 'Online',
+          value: overview.system_health.online_devices,
+          color: '#10b981',
+        },
+        {
+          name: 'Offline',
+          value: overview.system_health.offline_devices,
+          color: '#f43f5e',
+        },
+        {
+          name: 'Maintenance',
+          value: overview.device_stats.maintenance,
+          color: '#f59e0b',
+        },
+      ]
+    : []
+
+  const handleBulkDelete = async () => {
+    if (!confirm(`Delete ${selectedDevices.size} devices?`)) return
+    try {
+      await devicesApi.bulkDelete(Array.from(selectedDevices))
+      toast.success(`Deleted ${selectedDevices.size} devices`)
+      setSelectedDevices(new Set())
+      loadData()
+    } catch {
+      toast.error('Failed to delete devices')
+    }
+  }
+
+  const handleExportCSV = async () => {
+    try {
+      const blob = await devicesApi.exportCSV()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'devices.csv'
+      a.click()
+      window.URL.revokeObjectURL(url)
+      toast.success('Exported devices.csv')
+    } catch {
+      toast.error('Failed to export devices')
+    }
+  }
+
+  const handleToggleAll = (checked: boolean) => {
+    if (checked) setSelectedDevices(new Set(realDevices.map((d) => d.id)))
+    else setSelectedDevices(new Set())
+  }
+
+  const handleToggleDevice = (id: string, checked: boolean) => {
+    const next = new Set(selectedDevices)
+    if (checked) next.add(id)
+    else next.delete(id)
+    setSelectedDevices(next)
+  }
+
+  // Quick Actions handlers
+  const handleRemoteControl = () => {
+    if (realDevices.length === 0) {
+      toast.info('No devices registered yet. Install an agent first.')
+      return
+    }
+    setRemoteControlModal({ open: true, device: realDevices[0] })
+  }
+
+  const handleDeployUpdates = async () => {
+    if (realDevices.length === 0) {
+      toast.info('No devices to update')
+      return
+    }
+    try {
+      const token = localStorage.getItem('auth_token')
+      const res = await fetch('/api/v1/compliance/scan', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (res.ok) {
+        toast.success('Security scan started')
+      } else {
+        toast.error('Failed to start scan')
+      }
+    } catch {
+      toast.error('Failed to start scan')
+    }
+  }
+
+  const handleScanSecurity = async () => {
+    try {
+      const token = localStorage.getItem('auth_token')
+      const res = await fetch('/api/v1/compliance/scan', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (res.ok) {
+        const data = await res.json()
+        toast.success(`Scan complete: ${data.issues || 0} issues found`)
+        loadData()
+      } else {
+        toast.error('Failed to run security scan')
+      }
+    } catch {
+      toast.error('Failed to run security scan')
+    }
+  }
+
+  const handleRunReport = () => {
+    handleExportCSV()
+  }
+
+  const handleAddDevice = () => {
+    handleLoadInstallLinks()
+  }
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white">
-      {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-950/50 backdrop-blur-md sticky top-0 z-50">
-        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
-          <Link href="/dashboard" className="flex items-center gap-2 font-bold text-xl">
-            <span className="text-blue-500"> Vapor</span>
-            RMM
-          </Link>
-          <nav className="hidden md:flex items-center gap-6">
-            <Link href="/dashboard" className="text-sm font-medium text-blue-400">
-              Dashboard
-            </Link>
-            <Link href="/agents" className="text-sm text-slate-300 hover:text-white transition-colors">
-              Agents
-            </Link>
-            <Link href="/settings" className="text-sm text-slate-300 hover:text-white transition-colors">
-              Settings
-            </Link>
-          </nav>
-          <div className="flex items-center gap-4">
-            <Button variant="outline" size="sm">Logout</Button>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="container mx-auto px-6 py-8">
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-          {[
-            { title: 'Total Devices', value: '98', change: '+2 this week', color: 'text-blue-400' },
-            { title: 'Online', value: '87', change: '95% uptime', color: 'text-green-400' },
-            { title: 'Pending Updates', value: '12', change: 'Needs attention', color: 'text-yellow-400' },
-            { title: 'Security Alerts', value: '0', change: 'All clear', color: 'text-purple-400' },
-          ].map((stat, idx) => (
-            <Card key={idx} className="bg-slate-900/50 border-slate-800 backdrop-blur-sm">
-              <CardContent className="pt-6">
-                <p className="text-sm text-slate-400 mb-1">{stat.title}</p>
-                <div className="flex items-baseline gap-2">
-                  <span className="text-3xl font-bold text-white">{stat.value}</span>
-                </div>
-                <p className={`text-xs mt-2 ${stat.color}`}>{stat.change}</p>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-
-        {/* Charts Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-          {/* CPU/Memory Usage Chart */}
-          <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm">
-            <CardHeader>
-              <CardTitle>System Resources</CardTitle>
-              <CardDescription>Real-time CPU and memory usage across managed devices</CardDescription>
-            </CardHeader>
-            <CardContent className="h-[300px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={systemData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.5} />
-                  <XAxis dataKey="time" stroke="#94a3b8" fontSize={12} />
-                  <YAxis stroke="#94a3b8" fontSize={12} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155' }}
-                    itemStyle={{ color: '#fff' }}
-                  />
-                  <Line type="monotone" dataKey="cpu" stroke="#3b82f6" strokeWidth={2} dot={false} name="CPU %" />
-                  <Line type="monotone" dataKey="memory" stroke="#a855f7" strokeWidth={2} dot={false} name="Memory %" />
-                </LineChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-
-          {/* Device Status Pie Chart */}
-          <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm">
-            <CardHeader>
-              <CardTitle>Device Status</CardTitle>
-              <CardDescription>Current status of all managed devices</CardDescription>
-            </CardHeader>
-            <CardContent className="h-[300px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={devicesData}>
-                  <defs>
-                    <linearGradient id="colorOnline" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#22c55e" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.5} />
-                  <XAxis dataKey="name" stroke="#94a3b8" fontSize={12} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155' }}
-                    itemStyle={{ color: '#fff' }}
-                  />
-                  <Area type="monotone" dataKey="value" stroke="#22c55e" fillOpacity={1} fill="url(#colorOnline)" name="Devices" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Recent Devices Table */}
-        <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm">
-          <CardHeader>
-            <CardTitle>Recent Devices</CardTitle>
-            <CardDescription>Recently connected managed devices</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="border-b border-slate-800">
-                  <tr>
-                    <th className="pb-3 font-medium text-slate-400">Device Name</th>
-                    <th className="pb-3 font-medium text-slate-400">OS</th>
-                    <th className="pb-3 font-medium text-slate-400">Last Seen</th>
-                    <th className="pb-3 font-medium text-slate-400">Status</th>
-                    <th className="pb-3 font-medium text-slate-400 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[
-                    { name: 'workstation-01', os: 'Windows 11', lastSeen: '2 min ago', status: 'Online' },
-                    { name: 'server-prod-01', os: 'Ubuntu 24.04', lastSeen: '5 min ago', status: 'Online' },
-                    { name: 'laptop-dev-03', os: 'macOS 15', lastSeen: '12 min ago', status: 'Online' },
-                    { name: 'desktop-sales-02', os: 'Windows 10', lastSeen: '1 hour ago', status: 'Offline' },
-                  ].map((device, idx) => (
-                    <tr key={idx} className="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
-                      <td className="py-3 font-medium text-white">{device.name}</td>
-                      <td className="py-3 text-slate-400">{device.os}</td>
-                      <td className="py-3 text-slate-400">{device.lastSeen}</td>
-                      <td className="py-3">
-                        <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                          device.status === 'Online' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
-                        }`}>
-                          {device.status}
-                        </span>
-                      </td>
-                      <td className="py-3 text-right">
-                        <Button variant="ghost" size="sm">Connect</Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+    <AuthGuard>
+      <DashboardShell
+        alertCount={
+          overview?.active_alerts?.filter((a) => a.severity === 'critical')
+            .length || 0
+        }
+      >
+        {loading || !overview ? (
+          <DashboardLoading />
+        ) : (
+          <div className="space-y-6 animate-fadeInUp">
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+              <HealthScore score={healthScore} />
+              <div className="lg:col-span-3 grid grid-cols-2 lg:grid-cols-3 gap-4">
+                <StatCard
+                  title="Devices Online"
+                  value={overview.system_health.online_devices}
+                  icon={Monitor}
+                  progress={
+                    totalDevices > 0 ? (onlineDevices / totalDevices) * 100 : 0
+                  }
+                  accent="emerald"
+                  trend={{
+                    direction: 'up',
+                    percentage: Math.round(
+                      (onlineDevices / totalDevices) * 100
+                    ),
+                  }}
+                />
+                <StatCard
+                  title="Pending Tickets"
+                  value={overview.pending_tickets?.length || 0}
+                  icon={Ticket}
+                  accent="cyan"
+                  trend={{
+                    direction: 'down',
+                    percentage:
+                      overview.pending_tickets?.filter(
+                        (t) => t.priority === 'critical'
+                      ).length || 0,
+                  }}
+                />
+                <StatCard
+                  title="Active Alerts"
+                  value={overview.active_alerts?.length || 0}
+                  icon={AlertTriangle}
+                  accent="amber"
+                  trend={{ direction: 'up', percentage: critAlerts }}
+                />
+                <StatCard
+                  title="CPU Usage"
+                  value={overview.system_health.cpu_usage}
+                  icon={Zap}
+                  accent="violet"
+                  progress={cpuUsage}
+                />
+                <StatCard
+                  title="Memory Usage"
+                  value={overview.system_health.memory_usage}
+                  icon={Cpu}
+                  accent="cyan"
+                  progress={memUsage}
+                />
+                <StatCard
+                  title="Network Latency"
+                  value={overview.system_health.network_latency}
+                  icon={Globe}
+                  accent="emerald"
+                />
+              </div>
             </div>
-          </CardContent>
-        </Card>
-      </main>
 
-      {/* Footer */}
-      <footer className="border-t border-slate-800 bg-slate-950 py-6 mt-auto">
-        <div className="container mx-auto px-6 text-center text-sm text-slate-500">
-          <p>&copy; 2024 Vapor RMM. All rights reserved.</p>
-        </div>
-      </footer>
-    </div>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <ResourceChart data={overview.resource_history || []} />
+              <DeviceStatusChart data={deviceStatusData} />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <TicketsPanel tickets={overview.pending_tickets || []} />
+              <AlertsPanel alerts={overview.active_alerts || []} />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <DeviceFleetTable
+                  devices={realDevices}
+                  selectedDevices={selectedDevices}
+                  onToggleDevice={handleToggleDevice}
+                  onToggleAll={handleToggleAll}
+                  onBulkDelete={handleBulkDelete}
+                  onExportCSV={handleExportCSV}
+                  onRemoteControl={(device) =>
+                    setRemoteControlModal({ open: true, device })
+                  }
+                  onTailscale={(device) =>
+                    setTailscaleModal({ open: true, device })
+                  }
+                />
+              </div>
+              <div className="space-y-6">
+                <QuickActionsPanel
+                  onRemoteControl={handleRemoteControl}
+                  onNewTicket={() => setCreateTicketModal(true)}
+                  onDeployUpdates={handleDeployUpdates}
+                  onRunReport={handleRunReport}
+                  onScanSecurity={handleScanSecurity}
+                  onAddDevice={handleAddDevice}
+                  onBranding={() => setBrandingModal(true)}
+                  onClientLinks={handleLoadInstallLinks}
+                  onSetupWizard={() => setSetupWizard(true)}
+                />
+                <RecentActivityPanel />
+              </div>
+            </div>
+
+            <SlaCard />
+          </div>
+        )}
+
+        <RemoteControlModal
+          isOpen={remoteControlModal.open}
+          onClose={() =>
+            setRemoteControlModal({ open: false, device: null })
+          }
+          device={remoteControlModal.device}
+        />
+        <TailscaleModal
+          isOpen={tailscaleModal.open}
+          onClose={() => setTailscaleModal({ open: false, device: null })}
+          device={tailscaleModal.device}
+        />
+        <BrandingModal
+          open={brandingModal}
+          onClose={() => setBrandingModal(false)}
+          branding={branding}
+          onBrandingChange={setBranding}
+        />
+        <InstallLinksModal
+          open={installLinksModal}
+          onClose={() => setInstallLinksModal(false)}
+          links={installLinks}
+        />
+        <CreateTicketModal
+          open={createTicketModal}
+          onClose={() => setCreateTicketModal(false)}
+          onCreated={loadData}
+        />
+        <SetupWizard
+          open={setupWizard}
+          onClose={() => setSetupWizard(false)}
+        />
+      </DashboardShell>
+    </AuthGuard>
   )
 }

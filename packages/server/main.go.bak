@@ -1,0 +1,1893 @@
+package main
+
+import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/google/uuid"
+	"github.com/gofiber/fiber/v2"
+	"golang.org/x/crypto/bcrypt"
+
+	"vaporrmm/models"
+)
+
+// agentToken stores registered agent tokens with their device IDs
+type agentToken struct {
+	Token    string
+	DeviceID string
+	Hostname string
+}
+
+var (
+	db               *sql.DB
+	registeredTokens = make(map[string]*agentToken) // token -> agentToken
+	tokenMu          sync.RWMutex
+	jwtSecret        string
+	serverPort       int
+	agentWSPort      int
+)
+
+// sunshineStatus represents the status of Sunshine on a device
+type sunshineStatus struct {
+	Installed bool `json:"installed"`
+	Running   bool `json:"running"`
+	Port      int  `json:"port"`
+}
+
+// tailscaleStatus represents the status of Tailscale on a device
+type tailscaleStatus struct {
+	Installed    bool   `json:"installed"`
+	Connected    bool   `json:"connected"`
+	IP           string `json:"ip,omitempty"`
+	Hostname     string `json:"hostname,omitempty"`
+	Peers        int    `json:"peers,omitempty"`
+	BackendState string `json:"backend_state,omitempty"`
+}
+
+// BrandingConfig holds the white-label branding configuration
+type BrandingConfig struct {
+	AppName      string `json:"app_name"`
+	IconURL      string `json:"icon_url"`
+	CompanyName  string `json:"company_name"`
+	PrimaryColor string `json:"primary_color"`
+}
+
+// serverDevice represents a device record for JSON serialization
+type serverDevice struct {
+	ID            string        `json:"id"`
+	Name          string        `json:"name"`
+	Hostname      string        `json:"hostname"`
+	IPAddress     string        `json:"ip_address"`
+	MacAddress    string        `json:"mac_address"`
+	OSName        string        `json:"os_name"`
+	OSVersion     string        `json:"os_version"`
+	KernelVersion string        `json:"kernel_version"`
+	AgentVersion  string        `json:"agent_version"`
+	Status        string        `json:"status"`
+	LastSeen      int64         `json:"last_seen"`
+	CreatedAt     int64         `json:"created_at"`
+	PublicKey     *string       `json:"public_key,omitempty"`
+	UserData      *string       `json:"user_data,omitempty"`
+	SystemUUID    *string       `json:"system_uuid,omitempty"`
+	SerialNumber  *string       `json:"serial_number,omitempty"`
+	Manufacturer  *string       `json:"manufacturer,omitempty"`
+	Model         *string       `json:"model,omitempty"`
+	CPU           *string       `json:"cpu,omitempty"`
+	Memory        *int64        `json:"memory,omitempty"`
+	DiskSize      *int64        `json:"disk_size,omitempty"`
+	Timezone      *string       `json:"timezone,omitempty"`
+	AgentPort     *int          `json:"agent_port,omitempty"`
+	AgentIP       *string       `json:"agent_ip,omitempty"`
+	Sunshine      *sunshineStatus   `json:"sunshine,omitempty"`
+	Tailscale     *tailscaleStatus  `json:"tailscale,omitempty"`
+}
+
+// StatusResponse for health checks
+type StatusResponse struct {
+	Status  string `json:"status"`
+	Version string `json:"version"`
+}
+
+// LoginRequest represents a login request
+type LoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// LoginResponse represents a login response
+type LoginResponse struct {
+	Token  string `json:"token"`
+	UserID string `json:"user_id"`
+	Email  string `json:"email"`
+	Name   string `json:"name,omitempty"`
+}
+
+// CommandRequest represents a command to send to an agent
+type CommandRequest struct {
+	ID        string                 `json:"id"`
+	Type      string                 `json:"type"`
+	Payload   map[string]interface{} `json:"payload"`
+	CreatedAt time.Time              `json:"created_at"`
+}
+
+// CommandResult represents the result of a command execution
+type CommandResult struct {
+	CommandID string    `json:"command_id"`
+	Success   bool      `json:"success"`
+	Output    string    `json:"output,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// allowedCommandTypes defines which command types are allowed
+var allowedCommandTypes = map[string]bool{
+	"shell":  true,
+	"script": true,
+}
+
+func initDB() error {
+	var err error
+	dbPath := os.Getenv("DATABASE_PATH")
+	if dbPath == "" {
+		dbPath = "./data/vapor_rmm.db"
+	}
+
+	if err := os.MkdirAll("./data", 0755); err != nil {
+		return fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	db, err = sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Test database connection
+	if err := db.Ping(); err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	// Create branding table
+	createBrandingSQL := `
+	CREATE TABLE IF NOT EXISTS branding (
+		id TEXT PRIMARY KEY DEFAULT 'default',
+		app_name TEXT DEFAULT 'vaporRMM',
+		icon_url TEXT DEFAULT '',
+		company_name TEXT DEFAULT 'Vaporware RMM',
+		primary_color TEXT DEFAULT '#3b82f6'
+	);`
+
+	if _, err = db.Exec(createBrandingSQL); err != nil {
+		return fmt.Errorf("failed to create branding table: %w", err)
+	}
+
+	// Insert default branding if not exists
+	insertDefaultBranding := `
+	INSERT OR IGNORE INTO branding (id, app_name, icon_url, company_name, primary_color)
+	VALUES ('default', 'vaporRMM', '', 'Vaporware RMM', '#3b82f6');`
+
+	if _, err = db.Exec(insertDefaultBranding); err != nil {
+		log.Printf("Warning: could not insert default branding: %v", err)
+	}
+
+	// Create devices table
+	createDevicesSQL := `
+	CREATE TABLE IF NOT EXISTS devices (
+		id TEXT PRIMARY KEY,
+		name TEXT,
+		hostname TEXT,
+		ip_address TEXT,
+		mac_address TEXT,
+		os_name TEXT,
+		os_version TEXT,
+		kernel_version TEXT,
+		agent_version TEXT,
+		status TEXT DEFAULT 'offline',
+		last_seen INTEGER,
+		created_at INTEGER,
+		public_key TEXT,
+		user_data TEXT,
+		system_uuid TEXT,
+		serial_number TEXT,
+		manufacturer TEXT,
+		model TEXT,
+		cpu TEXT,
+		memory INTEGER,
+		disk_size INTEGER,
+		timezone TEXT,
+		agent_port INTEGER,
+		agent_ip TEXT
+	);`
+
+	if _, err = db.Exec(createDevicesSQL); err != nil {
+		return fmt.Errorf("failed to create devices table: %w", err)
+	}
+
+	// Create device_commands table (moved from handler)
+	createCommandsSQL := `
+	CREATE TABLE IF NOT EXISTS device_commands (
+		id TEXT PRIMARY KEY,
+		device_id TEXT,
+		type TEXT,
+		payload TEXT,
+		status TEXT DEFAULT 'pending',
+		output TEXT,
+		created_at INTEGER,
+		finished_at INTEGER
+	);`
+
+	if _, err = db.Exec(createCommandsSQL); err != nil {
+		return fmt.Errorf("failed to create device_commands table: %w", err)
+	}
+
+	// Create index for faster command lookups
+	createIndexSQL := `
+	CREATE INDEX IF NOT EXISTS idx_device_commands_device_status 
+	ON device_commands(device_id, status);`
+
+	if _, err = db.Exec(createIndexSQL); err != nil {
+		log.Printf("Warning: could not create index: %v", err)
+	}
+
+	// Create users table for authentication
+	createUsersSQL := `
+	CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY,
+		email TEXT UNIQUE NOT NULL,
+		password_hash TEXT NOT NULL,
+		name TEXT,
+		role TEXT DEFAULT 'admin',
+		created_at INTEGER,
+		last_login INTEGER
+	);`
+
+	if _, err = db.Exec(createUsersSQL); err != nil {
+		return fmt.Errorf("failed to create users table: %w", err)
+	}
+
+	return nil
+}
+
+// generateSecureKey creates a random base64-encoded 32-byte key
+func generateSecureKey() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("Failed to generate secure key: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// generateJWT creates a proper HMAC-SHA256 signed JWT token
+func generateJWT(userID string, expiryHours int) (string, error) {
+	header := `{"alg":"HS256","typ":"JWT"}`
+	payload := fmt.Sprintf(`{"sub":"%s","exp":%d}`, userID, time.Now().Add(time.Duration(expiryHours)*time.Hour).Unix())
+
+	headerEncoded := base64.URLEncoding.EncodeToString([]byte(header))
+	payloadEncoded := base64.URLEncoding.EncodeToString([]byte(payload))
+
+	signingInput := headerEncoded + "." + payloadEncoded
+
+	// Create HMAC-SHA256 signature
+	mac := hmac.New(sha256.New, []byte(jwtSecret))
+	mac.Write([]byte(signingInput))
+	signature := base64.URLEncoding.EncodeToString(mac.Sum(nil))
+
+	return signingInput + "." + signature, nil
+}
+
+// validateJWT validates an HMAC-SHA256 signed JWT token
+func validateJWT(tokenString string) (string, error) {
+	parts := strings.Split(tokenString, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid token format")
+	}
+
+	// Verify the HMAC signature
+	signingInput := parts[0] + "." + parts[1]
+
+	// Compare signatures using constant-time comparison
+	providedMAC, err := base64.URLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return "", fmt.Errorf("invalid signature encoding: %w", err)
+	}
+
+	// Compute expected MAC
+	mac := hmac.New(sha256.New, []byte(jwtSecret))
+	mac.Write([]byte(signingInput))
+	expectedMAC := mac.Sum(nil)
+
+	if !hmac.Equal(expectedMAC, providedMAC) {
+		return "", fmt.Errorf("invalid token signature")
+	}
+
+	// Decode and validate payload
+	payload, err := base64.URLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("invalid token payload: %w", err)
+	}
+
+	var claims struct {
+		Subject string `json:"sub"`
+		Expiry  int64  `json:"exp"`
+	}
+
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("failed to parse claims: %w", err)
+	}
+
+	if time.Now().Unix() > claims.Expiry {
+		return "", fmt.Errorf("token expired")
+	}
+
+	return claims.Subject, nil
+}
+
+// authMiddleware validates Bearer token authentication
+func authMiddleware() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		authHeader := c.Get("Authorization")
+		if authHeader == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Missing authorization header",
+				"message": "Bearer token required",
+				"code":    401,
+			})
+		}
+
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Invalid authorization header",
+				"message": "Expected Bearer token",
+				"code":    401,
+			})
+		}
+
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+
+		// Check if it's an agent token
+		tokenMu.RLock()
+		if _, exists := registeredTokens[token]; exists {
+			tokenMu.RUnlock()
+			c.Locals("auth_type", "agent")
+			c.Locals("token", token)
+			return c.Next()
+		}
+		tokenMu.RUnlock()
+
+		// Validate as JWT
+		userID, err := validateJWT(token)
+		if err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Invalid token",
+				"message": err.Error(),
+				"code":    401,
+			})
+		}
+
+		c.Locals("auth_type", "user")
+		c.Locals("user_id", userID)
+		return c.Next()
+	}
+}
+
+// agentAuthMiddleware validates agent-specific Bearer tokens
+func agentAuthMiddleware() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		authHeader := c.Get("Authorization")
+		if authHeader == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Missing authorization header",
+				"message": "Agent Bearer token required",
+				"code":    401,
+			})
+		}
+
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Invalid authorization header",
+				"message": "Expected Bearer token",
+				"code":    401,
+			})
+		}
+
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+
+		tokenMu.RLock()
+		agentTok, exists := registeredTokens[token]
+		tokenMu.RUnlock()
+
+		if !exists {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Invalid agent token",
+				"message": "Agent not registered",
+				"code":    401,
+			})
+		}
+
+		c.Locals("device_id", agentTok.DeviceID)
+		c.Locals("hostname", agentTok.Hostname)
+		return c.Next()
+	}
+}
+
+// registerAgentToken stores an agent token for authentication
+func registerAgentToken(token, deviceID, hostname string) {
+	tokenMu.Lock()
+	defer tokenMu.Unlock()
+	registeredTokens[token] = &agentToken{
+		Token:    token,
+		DeviceID: deviceID,
+		Hostname: hostname,
+	}
+}
+
+// sendCommandToDevice sends a command to an agent at its tracked address with authorization.
+// If apiToken is empty, the function will look it up from registeredTokens using deviceID.
+func sendCommandToDevice(agentIP string, agentPort int, apiToken string, cmdData []byte) error {
+	if agentIP == "" {
+		agentIP = "localhost"
+	}
+	if agentPort == 0 {
+		agentPort = 47991
+	}
+
+	url := fmt.Sprintf("http://%s:%d/agent/run", agentIP, agentPort)
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(cmdData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiToken)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send command to agent: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("agent returned non-OK status: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// scanner is an interface that covers both *sql.Row and *sql.Rows
+type scanner interface {
+	Scan(dest ...interface{}) error
+}
+
+// scanDevice scans a device from either a *sql.Row or *sql.Rows
+func scanDevice(s scanner) (*serverDevice, error) {
+	d := &serverDevice{}
+	err := s.Scan(
+		&d.ID, &d.Name, &d.Hostname, &d.IPAddress, &d.MacAddress,
+		&d.OSName, &d.OSVersion, &d.KernelVersion, &d.AgentVersion,
+		&d.Status, &d.LastSeen, &d.CreatedAt,
+		&d.PublicKey, &d.UserData, &d.SystemUUID, &d.SerialNumber,
+		&d.Manufacturer, &d.Model, &d.CPU, &d.Memory, &d.DiskSize,
+		&d.Timezone, &d.AgentPort, &d.AgentIP,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+func main() {
+	// Load configuration from environment
+	jwtSecret = os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = generateSecureKey()
+		log.Println("Warning: JWT_SECRET not set, using generated key (will not persist across restarts)")
+	}
+
+	serverPort = 8080
+	if p := os.Getenv("SERVER_PORT"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			serverPort = parsed
+		}
+	}
+
+	agentWSPort = 47991
+	if p := os.Getenv("AGENT_WS_PORT"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			agentWSPort = parsed
+		}
+	}
+
+	if err := initDB(); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.Close()
+
+	// Create default admin user if none exists
+	createDefaultAdmin()
+
+	app := fiber.New()
+
+	// Health check endpoint (no auth required)
+	app.Get("/health", func(c *fiber.Ctx) error {
+		return c.JSON(StatusResponse{
+			Status:  "ok",
+			Version: "1.0.0",
+		})
+	})
+
+	// ============================================================
+	// Public endpoints (no auth)
+	// ============================================================
+
+	// Agent registration
+	app.Post("/agent/register", func(c *fiber.Ctx) error {
+		var regInfo map[string]interface{}
+		if err := c.BodyParser(&regInfo); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "Invalid request body",
+				"message": "Failed to parse registration data",
+			})
+		}
+
+		hostname, _ := regInfo["hostname"].(string)
+		if hostname == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "hostname is required",
+			})
+		}
+
+		// Get auth token from header
+		authHeader := c.Get("Authorization")
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if token == authHeader {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Bearer token required",
+			})
+		}
+
+		// Create device record
+		deviceID := uuid.New().String()
+		now := time.Now().Unix()
+
+		osName, _ := regInfo["os"].(string)
+		osVersion, _ := regInfo["os_version"].(string)
+		localIP, _ := regInfo["local_ip"].(string)
+		macAddr, _ := regInfo["mac_address"].(string)
+		cpuModel, _ := regInfo["cpu"].(string)
+		agentVersion, _ := regInfo["agent_version"].(string)
+
+		_, err := db.Exec(
+			`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, agent_version, status, last_seen, created_at, cpu, agent_ip) 
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, agentVersion, "online", now, now, cpuModel, localIP,
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Failed to register device",
+				"message": err.Error(),
+			})
+		}
+
+		// Register the agent token
+		registerAgentToken(token, deviceID, hostname)
+
+		return c.JSON(fiber.Map{
+			"device_id": deviceID,
+			"hostname":  hostname,
+			"status":    "registered",
+			"message":   "Device registered successfully",
+		})
+	})
+
+	// Agent heartbeat
+	app.Post("/agent/heartbeat", agentAuthMiddleware(), func(c *fiber.Ctx) error {
+		var heartbeatData map[string]interface{}
+		if err := c.BodyParser(&heartbeatData); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid request body",
+			})
+		}
+
+		deviceID := c.Locals("device_id").(string)
+		now := time.Now().Unix()
+
+		// Extract standard status fields
+		status, _ := heartbeatData["status"].(string)
+		if status == "" {
+			status = "online"
+		}
+
+		// Update device status
+		result, err := db.Exec(
+			"UPDATE devices SET last_seen = ?, status = ? WHERE id = ?",
+			now, status, deviceID,
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to update heartbeat",
+			})
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		// Process Sunshine status if present
+		if sunshineRaw, ok := heartbeatData["sunshine"]; ok {
+			if sunshineMap, ok := sunshineRaw.(map[string]interface{}); ok {
+				installed, _ := sunshineMap["installed"].(bool)
+				running, _ := sunshineMap["running"].(bool)
+				portFloat, _ := sunshineMap["port"].(float64)
+				port := int(portFloat)
+				if port == 0 {
+					port = 47990
+				}
+
+				// Store Sunshine status in device_commands table as a special record
+				sunshineJSON, _ := json.Marshal(map[string]interface{}{
+					"installed": installed,
+					"running":   running,
+					"port":      port,
+					"updated_at": now,
+				})
+				_, err := db.Exec(
+					`INSERT OR REPLACE INTO device_commands (id, device_id, type, payload, status, created_at) 
+					 VALUES (?, ?, ?, ?, ?, ?)`,
+					"sunshine_status_"+deviceID, deviceID, "sunshine_status", string(sunshineJSON), "completed", now,
+				)
+				if err != nil {
+					log.Printf("Warning: could not store sunshine status: %v", err)
+				}
+			}
+		}
+
+		// Process Tailscale status if present
+		if tailscaleRaw, ok := heartbeatData["tailscale"]; ok {
+			if tailscaleMap, ok := tailscaleRaw.(map[string]interface{}); ok {
+				installed, _ := tailscaleMap["installed"].(bool)
+				connected, _ := tailscaleMap["connected"].(bool)
+				ip, _ := tailscaleMap["ip"].(string)
+				hostname, _ := tailscaleMap["hostname"].(string)
+				peersFloat, _ := tailscaleMap["peers"].(float64)
+				backendState, _ := tailscaleMap["backend_state"].(string)
+				peers := int(peersFloat)
+
+				// Store Tailscale status in device_commands table
+				tailscaleJSON, _ := json.Marshal(map[string]interface{}{
+					"installed":     installed,
+					"connected":     connected,
+					"ip":            ip,
+					"hostname":      hostname,
+					"peers":         peers,
+					"backend_state": backendState,
+					"updated_at":    now,
+				})
+				_, err := db.Exec(
+					`INSERT OR REPLACE INTO device_commands (id, device_id, type, payload, status, created_at) 
+					 VALUES (?, ?, ?, ?, ?, ?)`,
+					"tailscale_status_"+deviceID, deviceID, "tailscale_status", string(tailscaleJSON), "completed", now,
+				)
+				if err != nil {
+					log.Printf("Warning: could not store tailscale status: %v", err)
+				}
+
+				// Update device's agent_ip with Tailscale IP if available
+				if ip != "" {
+					_, err := db.Exec(
+						`UPDATE devices SET agent_ip = ? WHERE id = ?`,
+						ip, deviceID,
+					)
+					if err != nil {
+						log.Printf("Warning: could not update agent_ip: %v", err)
+					}
+				}
+			}
+		}
+
+		return c.JSON(fiber.Map{
+			"status":  "ok",
+			"message": "Heartbeat received",
+		})
+	})
+
+	// Agent help request endpoint
+	app.Post("/agent/help-request", agentAuthMiddleware(), func(c *fiber.Ctx) error {
+		deviceID := c.Locals("device_id").(string)
+		hostname := c.Locals("hostname").(string)
+
+		var helpData map[string]interface{}
+		if err := c.BodyParser(&helpData); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid request body",
+			})
+		}
+
+		// Store help request in device_commands table
+		now := time.Now().Unix()
+		helpJSON, _ := json.Marshal(map[string]interface{}{
+			"type":       "help_request",
+			"device_id":  deviceID,
+			"hostname":   hostname,
+			"timestamp":  now,
+			"details":    helpData,
+		})
+
+		commandID := uuid.New().String()
+		_, err := db.Exec(
+			`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) 
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			commandID, deviceID, "help_request", string(helpJSON), "pending", now,
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to store help request",
+			})
+		}
+
+		log.Printf("Help request received from device %s (%s)", deviceID, hostname)
+
+		return c.JSON(fiber.Map{
+			"status":  "ok",
+			"message": "Help request sent to IT support",
+			"request_id": commandID,
+		})
+	})
+
+	// Get pending commands for agent
+	app.Get("/agent/:hostname/commands", agentAuthMiddleware(), func(c *fiber.Ctx) error {
+		hostname := c.Params("hostname")
+		deviceID := c.Locals("device_id").(string)
+
+		// Verify hostname matches device
+		var dbHostname string
+		err := db.QueryRow("SELECT hostname FROM devices WHERE id = ?", deviceID).Scan(&dbHostname)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		if dbHostname != hostname {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "Hostname mismatch",
+			})
+		}
+
+		rows, err := db.Query(
+			`SELECT payload FROM device_commands WHERE device_id = ? AND status = 'pending' ORDER BY created_at ASC`,
+			deviceID,
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to query commands",
+			})
+		}
+		defer rows.Close()
+
+		var commands []CommandRequest
+		for rows.Next() {
+			var payload string
+			if err := rows.Scan(&payload); err != nil {
+				continue
+			}
+			var cmd CommandRequest
+			if err := json.Unmarshal([]byte(payload), &cmd); err == nil {
+				commands = append(commands, cmd)
+			}
+		}
+
+		return c.JSON(commands)
+	})
+
+	// Agent submit command results
+	app.Post("/agent/:hostname/results", agentAuthMiddleware(), func(c *fiber.Ctx) error {
+		var req struct {
+			Results []CommandResult `json:"results"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid request body",
+			})
+		}
+
+		for _, result := range req.Results {
+			output := result.Output
+			status := "completed"
+			if !result.Success {
+				status = "failed"
+				output = result.Error
+			}
+			_, err := db.Exec(
+				`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ?`,
+				status, output, time.Now().Unix(), result.CommandID,
+			)
+			if err != nil {
+				log.Printf("Warning: could not update command result: %v", err)
+			}
+		}
+
+		return c.JSON(fiber.Map{
+			"status": "ok",
+		})
+	})
+
+	// ============================================================
+	// Authenticated API routes
+	// ============================================================
+
+	api := app.Group("/api", authMiddleware())
+
+	// Auth endpoints
+	auth := api.Group("/auth")
+
+	// Login endpoint with rate limiting
+	type loginAttempt struct {
+		count     int
+		lastTime  time.Time
+		blockedAt time.Time
+	}
+	loginAttempts := make(map[string]*loginAttempt)
+	loginMu := sync.Mutex{}
+	maxAttempts := 5
+	blockDuration := 15 * time.Minute
+	windowDuration := 5 * time.Minute
+
+	auth.Post("/login", func(c *fiber.Ctx) error {
+		var req LoginRequest
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "Invalid request body",
+				"message": "Email and password required",
+			})
+		}
+
+		if req.Email == "" || req.Password == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "Missing credentials",
+				"message": "Email and password are required",
+			})
+		}
+
+		// Rate limiting check
+		loginMu.Lock()
+		attempt, exists := loginAttempts[req.Email]
+		now := time.Now()
+
+		if exists {
+			// Reset counter if window has passed
+			if now.Sub(attempt.lastTime) > windowDuration {
+				attempt.count = 0
+				attempt.blockedAt = time.Time{}
+			}
+
+			// Check if blocked
+			if !attempt.blockedAt.IsZero() && now.Sub(attempt.blockedAt) < blockDuration {
+				loginMu.Unlock()
+				return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+					"error":   "Too many login attempts",
+					"message": "Account temporarily locked. Please try again later.",
+				})
+			}
+
+			// Clear block if block duration has passed
+			if !attempt.blockedAt.IsZero() && now.Sub(attempt.blockedAt) >= blockDuration {
+				attempt.count = 0
+				attempt.blockedAt = time.Time{}
+			}
+		} else {
+			attempt = &loginAttempt{}
+			loginAttempts[req.Email] = attempt
+		}
+		loginMu.Unlock()
+
+		// Look up user
+		var userID, email, name, passwordHash string
+		err := db.QueryRow(
+			"SELECT id, email, name, password_hash FROM users WHERE email = ?",
+			req.Email,
+		).Scan(&userID, &email, &name, &passwordHash)
+		if err != nil {
+			// Increment failed attempt
+			loginMu.Lock()
+			attempt.count++
+			attempt.lastTime = now
+			if attempt.count >= maxAttempts {
+				attempt.blockedAt = now
+			}
+			loginMu.Unlock()
+
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Invalid credentials",
+				"message": "Email or password incorrect",
+			})
+		}
+
+		// Password check with bcrypt
+		if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+			// Increment failed attempt
+			loginMu.Lock()
+			attempt.count++
+			attempt.lastTime = now
+			if attempt.count >= maxAttempts {
+				attempt.blockedAt = now
+			}
+			loginMu.Unlock()
+
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Invalid credentials",
+				"message": "Email or password incorrect",
+			})
+		}
+
+		// Clear failed attempts on successful login
+		loginMu.Lock()
+		delete(loginAttempts, req.Email)
+		loginMu.Unlock()
+
+		// Generate JWT token
+		token, err := generateJWT(userID, 24)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to generate token",
+			})
+		}
+
+		// Update last login
+		_, err = db.Exec("UPDATE users SET last_login = ? WHERE id = ?", time.Now().Unix(), userID)
+		if err != nil {
+			log.Printf("Warning: could not update last login: %v", err)
+		}
+
+		return c.JSON(LoginResponse{
+			Token:  token,
+			UserID: userID,
+			Email:  email,
+			Name:   name,
+		})
+	})
+
+	// ============================================================
+	// Branding endpoints (accessible without auth for agents)
+	// ============================================================
+
+	// Get current branding (public - no auth required for agents)
+	app.Get("/api/branding/", func(c *fiber.Ctx) error {
+		var brandingConfig BrandingConfig
+		err := db.QueryRow(
+			`SELECT app_name, icon_url, company_name, primary_color FROM branding WHERE id = 'default'`,
+		).Scan(&brandingConfig.AppName, &brandingConfig.IconURL, &brandingConfig.CompanyName, &brandingConfig.PrimaryColor)
+		if err != nil {
+			// Return defaults
+			return c.JSON(BrandingConfig{
+				AppName:      "vaporRMM",
+				IconURL:      "",
+				CompanyName:  "Vaporware RMM",
+				PrimaryColor: "#3b82f6",
+			})
+		}
+		return c.JSON(brandingConfig)
+	})
+
+	branding := api.Group("/branding")
+
+	// Update branding (requires auth)
+	branding.Put("/", func(c *fiber.Ctx) error {
+		var req BrandingConfig
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid request body",
+			})
+		}
+
+		_, err := db.Exec(
+			`UPDATE branding SET app_name = ?, icon_url = ?, company_name = ?, primary_color = ? WHERE id = 'default'`,
+			req.AppName, req.IconURL, req.CompanyName, req.PrimaryColor,
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to update branding",
+			})
+		}
+
+		return c.JSON(fiber.Map{
+			"message": "Branding updated successfully",
+			"branding": req,
+		})
+	})
+
+	// Generate agent install link/script
+	branding.Get("/agent-install", func(c *fiber.Ctx) error {
+		// Get branding
+		var brandingConfig BrandingConfig
+		db.QueryRow(
+			`SELECT app_name, icon_url, company_name, primary_color FROM branding WHERE id = 'default'`,
+		).Scan(&brandingConfig.AppName, &brandingConfig.IconURL, &brandingConfig.CompanyName, &brandingConfig.PrimaryColor)
+
+		// Get server URL from request
+		serverURL := fmt.Sprintf("%s://%s", c.Protocol(), c.Hostname())
+
+		// Generate install script with branding
+		installScript := fmt.Sprintf(`#!/bin/bash
+# %s Agent Installation Script
+# Generated by %s
+# Server: %s
+
+set -euo pipefail
+
+APP_NAME="%s"
+SERVER_URL="%s"
+ICON_URL="%s"
+
+echo "Installing $APP_NAME agent..."
+echo "Connecting to server: $SERVER_URL"
+
+# Download and install agent
+curl -fsSL "$SERVER_URL/api/agent/install.sh" | bash -s -- --server "$SERVER_URL"
+
+# Configure branding
+if [ -n "$ICON_URL" ]; then
+    echo "Configuring agent branding..."
+    mkdir -p /etc/vaporrmm
+    echo "$ICON_URL" > /etc/vaporrmm/agent_icon_url
+fi
+
+echo "$APP_NAME agent installation complete!"
+`, brandingConfig.CompanyName, brandingConfig.CompanyName, serverURL, brandingConfig.AppName, serverURL, brandingConfig.IconURL)
+
+		format := c.Query("format", "script")
+		if format == "json" {
+			return c.JSON(fiber.Map{
+				"app_name":      brandingConfig.AppName,
+				"company_name":  brandingConfig.CompanyName,
+				"icon_url":      brandingConfig.IconURL,
+				"server_url":    serverURL,
+				"install_url":   fmt.Sprintf("%s/api/agent/install.sh", serverURL),
+				"install_command": fmt.Sprintf("curl -fsSL %s/api/agent/install.sh | bash", serverURL),
+			})
+		}
+
+		c.Set("Content-Type", "text/x-shellscript")
+		c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s-agent-install.sh", brandingConfig.AppName))
+		return c.SendString(installScript)
+	})
+
+	// Get per-client/site install links
+	branding.Get("/install-links", func(c *fiber.Ctx) error {
+		// Get branding
+		var brandingConfig BrandingConfig
+		db.QueryRow(
+			`SELECT app_name, icon_url, company_name, primary_color FROM branding WHERE id = 'default'`,
+		).Scan(&brandingConfig.AppName, &brandingConfig.IconURL, &brandingConfig.CompanyName, &brandingConfig.PrimaryColor)
+
+		serverURL := fmt.Sprintf("%s://%s", c.Protocol(), c.Hostname())
+
+		// Generate different install options
+		links := fiber.Map{
+			"app_name":      brandingConfig.AppName,
+			"company_name":  brandingConfig.CompanyName,
+			"icon_url":      brandingConfig.IconURL,
+			"primary_color": brandingConfig.PrimaryColor,
+			"server_url":    serverURL,
+			"install_options": []fiber.Map{
+				{
+					"name": "Linux (curl)",
+					"command": fmt.Sprintf("curl -fsSL %s/api/branding/install-links?format=script | sudo bash", serverURL),
+					"platform": "linux",
+				},
+				{
+					"name": "Windows (PowerShell)",
+					"command": fmt.Sprintf("Invoke-WebRequest -Uri '%s/api/agent/install.ps1' -UseBasicParsing | Invoke-Expression", serverURL),
+					"platform": "windows",
+				},
+				{
+					"name": "macOS (Homebrew)",
+					"command": fmt.Sprintf("brew install %s-agent", strings.ToLower(brandingConfig.AppName)),
+					"platform": "macos",
+				},
+				{
+					"name": "Download Script",
+					"url": fmt.Sprintf("%s/api/branding/agent-install?format=script", serverURL),
+					"platform": "all",
+				},
+			},
+		}
+
+		return c.JSON(links)
+	})
+
+	// Device endpoints
+	devices := api.Group("/devices")
+
+	// Get all devices
+	devices.Get("/", func(c *fiber.Ctx) error {
+		rows, err := db.Query(
+			`SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version,
+			 status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model,
+			 cpu, memory, disk_size, timezone, agent_port, agent_ip FROM devices ORDER BY last_seen DESC`,
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to query devices",
+			})
+		}
+		defer rows.Close()
+
+		var deviceList []serverDevice
+		for rows.Next() {
+			d, err := scanDevice(rows)
+			if err != nil {
+				log.Printf("Error scanning device: %v", err)
+				continue
+			}
+			deviceList = append(deviceList, *d)
+		}
+
+		return c.JSON(deviceList)
+	})
+
+	// Get device by ID
+	devices.Get("/:id", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		row := db.QueryRow(
+			`SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version,
+			 status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model,
+			 cpu, memory, disk_size, timezone, agent_port, agent_ip FROM devices WHERE id = ?`,
+			id,
+		)
+		d, err := scanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+		return c.JSON(d)
+	})
+
+	// Register new device (manual registration via API)
+	devices.Post("/", func(c *fiber.Ctx) error {
+		var device models.NewDeviceInput
+		if err := c.BodyParser(&device); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid request body",
+			})
+		}
+
+		deviceID := uuid.New().String()
+		now := time.Now().Unix()
+
+		_, err := db.Exec(
+			`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, status, last_seen, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			deviceID, device.Name, device.Hostname, device.IPAddress, device.MacAddress,
+			device.OSName, device.OSVersion, "offline", now, now,
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to insert device",
+			})
+		}
+
+		return c.Status(fiber.StatusCreated).JSON(serverDevice{
+			ID:        deviceID,
+			Name:      device.Name,
+			Hostname:  device.Hostname,
+			IPAddress: device.IPAddress,
+			OSName:    device.OSName,
+			OSVersion: device.OSVersion,
+			Status:    "offline",
+			CreatedAt: now,
+			LastSeen:  now,
+		})
+	})
+
+	// Update device
+	devices.Put("/:id", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		var update models.UpdateDeviceInput
+		if err := c.BodyParser(&update); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid request body",
+			})
+		}
+
+		fields := []string{"last_seen = ?"}
+		args := []interface{}{time.Now().Unix()}
+
+		if update.Name != nil {
+			fields = append(fields, "name = ?")
+			args = append(args, *update.Name)
+		}
+		if update.Hostname != nil {
+			fields = append(fields, "hostname = ?")
+			args = append(args, *update.Hostname)
+		}
+		if update.Status != nil {
+			fields = append(fields, "status = ?")
+			args = append(args, *update.Status)
+		}
+
+		args = append(args, id)
+
+		query := fmt.Sprintf("UPDATE devices SET %s WHERE id = ?", strings.Join(fields, ", "))
+		result, err := db.Exec(query, args...)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to update device",
+			})
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		row := db.QueryRow(
+			`SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version,
+			 status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model,
+			 cpu, memory, disk_size, timezone, agent_port, agent_ip FROM devices WHERE id = ?`,
+			id,
+		)
+		d, err := scanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found after update",
+			})
+		}
+
+		return c.JSON(d)
+	})
+
+	// Delete device
+	devices.Delete("/:id", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		result, err := db.Exec("DELETE FROM devices WHERE id = ?", id)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to delete device",
+			})
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		// Remove agent token if exists
+		tokenMu.Lock()
+		for token, at := range registeredTokens {
+			if at.DeviceID == id {
+				delete(registeredTokens, token)
+				break
+			}
+		}
+		tokenMu.Unlock()
+
+		return c.JSON(fiber.Map{
+			"message": "Device deleted successfully",
+		})
+	})
+
+	// Device heartbeat (legacy endpoint)
+	devices.Post("/:id/heartbeat", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		result, err := db.Exec(
+			"UPDATE devices SET last_seen = ?, status = ? WHERE id = ?",
+			time.Now().Unix(), "online", id,
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to update heartbeat",
+			})
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		row := db.QueryRow(
+			`SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version,
+			 status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model,
+			 cpu, memory, disk_size, timezone, agent_port, agent_ip FROM devices WHERE id = ?`,
+			id,
+		)
+		d, err := scanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		return c.JSON(d)
+	})
+
+	// Send command to device
+	devices.Post("/:id/command", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		var cmdReq struct {
+			Type    string `json:"type"`
+			Command string `json:"command"`
+		}
+		if err := c.BodyParser(&cmdReq); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid request body",
+			})
+		}
+
+		if cmdReq.Type == "" || cmdReq.Command == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "type and command are required",
+			})
+		}
+
+		// Validate command type
+		if !allowedCommandTypes[cmdReq.Type] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "invalid command type",
+			})
+		}
+
+		// Get device
+		row := db.QueryRow(
+			`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`,
+			id,
+		)
+		d, err := scanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		// Create command record with UUID
+		cmdID := uuid.New().String()
+		cmdData := CommandRequest{
+			ID:        cmdID,
+			Type:      cmdReq.Type,
+			Payload:   map[string]interface{}{"command": cmdReq.Command},
+			CreatedAt: time.Now(),
+		}
+
+		payloadJSON, _ := json.Marshal(cmdData)
+
+		_, err = db.Exec(
+			`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			cmdID, id, cmdReq.Type, string(payloadJSON), "pending", time.Now().Unix(),
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to create command",
+			})
+		}
+
+		// Send command to agent asynchronously
+		agentPort := 47991
+		if d.AgentPort != nil {
+			agentPort = *d.AgentPort
+		}
+		agentIP := ""
+		if d.AgentIP != nil {
+			agentIP = *d.AgentIP
+		}
+
+		// Look up the agent's API token
+		tokenMu.RLock()
+		var deviceToken string
+		for t, at := range registeredTokens {
+			if at.DeviceID == id {
+				deviceToken = t
+				break
+			}
+		}
+		tokenMu.RUnlock()
+
+		go func() {
+			if sendErr := sendCommandToDevice(agentIP, agentPort, deviceToken, payloadJSON); sendErr != nil {
+				log.Printf("Failed to send command %s to device %s: %v", cmdID, id, sendErr)
+				_, err := db.Exec(
+					`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ?`,
+					"failed", sendErr.Error(), time.Now().Unix(), cmdID,
+				)
+				if err != nil {
+					log.Printf("Warning: could not update failed command status: %v", err)
+				}
+			} else {
+				_, err := db.Exec(
+					`UPDATE device_commands SET status = ?, finished_at = ? WHERE id = ?`,
+					"completed", time.Now().Unix(), cmdID,
+				)
+				if err != nil {
+					log.Printf("Warning: could not update command status: %v", err)
+				}
+			}
+		}()
+
+		return c.JSON(fiber.Map{
+			"message":    "Command sent",
+			"command_id": cmdID,
+		})
+	})
+
+	// ============================================================
+	// Sunshine/Remote Desktop endpoints
+	// ============================================================
+
+	// Get Sunshine status for a device
+	devices.Get("/:id/sunshine", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		// Get device to verify it exists
+		row := db.QueryRow(
+			`SELECT id, hostname, ip_address, agent_ip, agent_port FROM devices WHERE id = ?`,
+			id,
+		)
+		d, err := scanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		// Get Sunshine status from device_commands table
+		var sunshinePayload string
+		err = db.QueryRow(
+			`SELECT payload FROM device_commands WHERE id = ?`,
+			"sunshine_status_"+id,
+		).Scan(&sunshinePayload)
+
+		var sunshineInfo *sunshineStatus
+		if err == nil && sunshinePayload != "" {
+			var statusData map[string]interface{}
+			if err := json.Unmarshal([]byte(sunshinePayload), &statusData); err == nil {
+				installed, _ := statusData["installed"].(bool)
+				running, _ := statusData["running"].(bool)
+				portFloat, _ := statusData["port"].(float64)
+				port := int(portFloat)
+				if port == 0 {
+					port = 47990
+				}
+				sunshineInfo = &sunshineStatus{
+					Installed: installed,
+					Running:   running,
+					Port:      port,
+				}
+			}
+		}
+
+		// Get device IP for Moonlight connection
+		deviceIP := d.IPAddress
+		if d.AgentIP != nil && *d.AgentIP != "" {
+			deviceIP = *d.AgentIP
+		}
+
+		return c.JSON(fiber.Map{
+			"device_id":   id,
+			"hostname":    d.Hostname,
+			"device_ip":   deviceIP,
+			"sunshine":    sunshineInfo,
+			"moonlight_url": fmt.Sprintf("moonlight://%s", deviceIP),
+			"web_url":     fmt.Sprintf("http://%s:47990", deviceIP),
+		})
+	})
+
+	// Proxy to Sunshine web UI (for devices with Sunshine running)
+	devices.Get("/:id/sunshine/proxy", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		// Get device
+		row := db.QueryRow(
+			`SELECT id, hostname, ip_address, agent_ip FROM devices WHERE id = ?`,
+			id,
+		)
+		d, err := scanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		// Get Sunshine status to check if running
+		var sunshinePayload string
+		err = db.QueryRow(
+			`SELECT payload FROM device_commands WHERE id = ?`,
+			"sunshine_status_"+id,
+		).Scan(&sunshinePayload)
+
+		sunshinePort := 47990
+		if err == nil && sunshinePayload != "" {
+			var statusData map[string]interface{}
+			if err := json.Unmarshal([]byte(sunshinePayload), &statusData); err == nil {
+				running, _ := statusData["running"].(bool)
+				if !running {
+					return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+						"error":   "Sunshine is not running on this device",
+						"message": "Start Sunshine on the device before accessing remote desktop",
+					})
+				}
+				if portFloat, ok := statusData["port"].(float64); ok && portFloat > 0 {
+					sunshinePort = int(portFloat)
+				}
+			}
+		}
+
+		// Get target device IP
+		deviceIP := d.IPAddress
+		if d.AgentIP != nil && *d.AgentIP != "" {
+			deviceIP = *d.AgentIP
+		}
+
+		// Redirect to Sunshine web UI (proxy would require WebSocket support)
+		sunshineURL := fmt.Sprintf("http://%s:%d", deviceIP, sunshinePort)
+		return c.Redirect(sunshineURL, fiber.StatusFound)
+	})
+
+	// Install Sunshine command (sends command to agent to install/configure Sunshine)
+	devices.Post("/:id/sunshine/install", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		// Get device
+		row := db.QueryRow(
+			`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`,
+			id,
+		)
+		d, err := scanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		// Create install command with UUID
+		cmdID := uuid.New().String()
+		cmdData := CommandRequest{
+			ID:        cmdID,
+			Type:      "shell",
+			Payload:   map[string]interface{}{"command": "vaporrmm install-sunshine --port 47990"},
+			CreatedAt: time.Now(),
+		}
+
+		payloadJSON, _ := json.Marshal(cmdData)
+
+		_, err = db.Exec(
+			`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			cmdID, id, "sunshine_install", string(payloadJSON), "pending", time.Now().Unix(),
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to create install command",
+			})
+		}
+
+		// Send command to agent
+		agentPort := 47991
+		if d.AgentPort != nil {
+			agentPort = *d.AgentPort
+		}
+		agentIP := ""
+		if d.AgentIP != nil {
+			agentIP = *d.AgentIP
+		}
+
+		// Look up the agent's API token
+		tokenMu.RLock()
+		var sunshineDeviceToken string
+		for t, at := range registeredTokens {
+			if at.DeviceID == id {
+				sunshineDeviceToken = t
+				break
+			}
+		}
+		tokenMu.RUnlock()
+
+		go func() {
+			if sendErr := sendCommandToDevice(agentIP, agentPort, sunshineDeviceToken, payloadJSON); sendErr != nil {
+				log.Printf("Failed to send Sunshine install command to device %s: %v", id, sendErr)
+				_, err := db.Exec(
+					`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ?`,
+					"failed", sendErr.Error(), time.Now().Unix(), cmdID,
+				)
+				if err != nil {
+					log.Printf("Warning: could not update failed command status: %v", err)
+				}
+			} else {
+				_, err := db.Exec(
+					`UPDATE device_commands SET status = ?, finished_at = ? WHERE id = ?`,
+					"completed", time.Now().Unix(), cmdID,
+				)
+				if err != nil {
+					log.Printf("Warning: could not update command status: %v", err)
+				}
+			}
+		}()
+
+		return c.JSON(fiber.Map{
+			"message":    "Sunshine install command sent",
+			"command_id": cmdID,
+		})
+	})
+
+	// ============================================================
+	// Tailscale endpoints
+	// ============================================================
+
+	// Get Tailscale status for a device
+	devices.Get("/:id/tailscale", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		// Get device to verify it exists
+		row := db.QueryRow(
+			`SELECT id, hostname, ip_address, agent_ip, agent_port FROM devices WHERE id = ?`,
+			id,
+		)
+		d, err := scanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		// Get Tailscale status from device_commands table
+		var tailscalePayload string
+		err = db.QueryRow(
+			`SELECT payload FROM device_commands WHERE id = ?`,
+			"tailscale_status_"+id,
+		).Scan(&tailscalePayload)
+
+		var tailscaleInfo *tailscaleStatus
+		if err == nil && tailscalePayload != "" {
+			var statusData map[string]interface{}
+			if err := json.Unmarshal([]byte(tailscalePayload), &statusData); err == nil {
+				installed, _ := statusData["installed"].(bool)
+				connected, _ := statusData["connected"].(bool)
+				ip, _ := statusData["ip"].(string)
+				hostname, _ := statusData["hostname"].(string)
+				peersFloat, _ := statusData["peers"].(float64)
+				backendState, _ := statusData["backend_state"].(string)
+				peers := int(peersFloat)
+				tailscaleInfo = &tailscaleStatus{
+					Installed:    installed,
+					Connected:    connected,
+					IP:           ip,
+					Hostname:     hostname,
+					Peers:        peers,
+					BackendState: backendState,
+				}
+			}
+		}
+
+		// Get device IP (prefer Tailscale IP if available)
+		deviceIP := d.IPAddress
+		if tailscaleInfo != nil && tailscaleInfo.IP != "" {
+			deviceIP = tailscaleInfo.IP
+		} else if d.AgentIP != nil && *d.AgentIP != "" {
+			deviceIP = *d.AgentIP
+		}
+
+		return c.JSON(fiber.Map{
+			"device_id": id,
+			"hostname":  d.Hostname,
+			"device_ip": deviceIP,
+			"tailscale": tailscaleInfo,
+		})
+	})
+
+	// Install Tailscale command (sends command to agent to install Tailscale)
+	devices.Post("/:id/tailscale/install", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		// Parse request body for optional authkey
+		var req struct {
+			AuthKey  string `json:"auth_key,omitempty"`
+			ExitNode bool   `json:"exit_node,omitempty"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			// Continue with empty req on parse error
+		}
+
+		// Get device
+		row := db.QueryRow(
+			`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`,
+			id,
+		)
+		d, err := scanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		// Build install command
+		installCmd := "vaporrmm install-tailscale"
+		if req.AuthKey != "" {
+			installCmd += fmt.Sprintf(" --authkey=%s", req.AuthKey)
+		}
+		if req.ExitNode {
+			installCmd += " --exit-node"
+		}
+
+		// Create install command with UUID
+		cmdID := uuid.New().String()
+		cmdData := CommandRequest{
+			ID:        cmdID,
+			Type:      "shell",
+			Payload:   map[string]interface{}{"command": installCmd},
+			CreatedAt: time.Now(),
+		}
+
+		payloadJSON, _ := json.Marshal(cmdData)
+
+		_, err = db.Exec(
+			`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			cmdID, id, "tailscale_install", string(payloadJSON), "pending", time.Now().Unix(),
+		)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to create install command",
+			})
+		}
+
+		// Send command to agent
+		agentPort := 47991
+		if d.AgentPort != nil {
+			agentPort = *d.AgentPort
+		}
+		agentIP := ""
+		if d.AgentIP != nil {
+			agentIP = *d.AgentIP
+		}
+
+		// Look up the agent's API token
+		tokenMu.RLock()
+		var tailscaleDeviceToken string
+		for t, at := range registeredTokens {
+			if at.DeviceID == id {
+				tailscaleDeviceToken = t
+				break
+			}
+		}
+		tokenMu.RUnlock()
+
+		go func() {
+			if sendErr := sendCommandToDevice(agentIP, agentPort, tailscaleDeviceToken, payloadJSON); sendErr != nil {
+				log.Printf("Failed to send Tailscale install command to device %s: %v", id, sendErr)
+				_, err := db.Exec(
+					`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ?`,
+					"failed", sendErr.Error(), time.Now().Unix(), cmdID,
+				)
+				if err != nil {
+					log.Printf("Warning: could not update failed command status: %v", err)
+				}
+			} else {
+				_, err := db.Exec(
+					`UPDATE device_commands SET status = ?, finished_at = ? WHERE id = ?`,
+					"completed", time.Now().Unix(), cmdID,
+				)
+				if err != nil {
+					log.Printf("Warning: could not update command status: %v", err)
+				}
+			}
+		}()
+
+		return c.JSON(fiber.Map{
+			"message":    "Tailscale install command sent",
+			"command_id": cmdID,
+		})
+	})
+
+	// Generate Tailscale auth key (requires Tailscale CLI on server)
+	devices.Post("/:id/tailscale/auth-key", func(c *fiber.Ctx) error {
+		id := c.Params("id")
+
+		// Get device
+		_, err := scanDevice(db.QueryRow(
+			`SELECT id, hostname FROM devices WHERE id = ?`,
+			id,
+		))
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Device not found",
+			})
+		}
+
+		// Parse request for auth key options
+		var req struct {
+			Reusable  bool     `json:"reusable,omitempty"`
+			Ephemeral bool     `json:"ephemeral,omitempty"`
+			Tags      []string `json:"tags,omitempty"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			// Continue with empty req on parse error
+		}
+
+		// Build tailscale command
+		args := []string{"tailscale", "auth-key", "create"}
+		if req.Reusable {
+			args = append(args, "--reusable")
+		}
+		if req.Ephemeral {
+			args = append(args, "--ephemeral")
+		}
+		for _, tag := range req.Tags {
+			args = append(args, "--tag="+tag)
+		}
+
+		cmd := exec.Command(args[0], args[1:]...)
+		output, err := cmd.Output()
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error":   "Failed to generate auth key",
+				"message": "Ensure Tailscale CLI is installed and authenticated on the server",
+			})
+		}
+
+		authKey := strings.TrimSpace(string(output))
+
+		return c.JSON(fiber.Map{
+			"auth_key": authKey,
+			"message":  "Auth key generated successfully",
+		})
+	})
+
+	log.Printf("Starting Vapor RMM Server on port %d", serverPort)
+	if err := app.Listen(fmt.Sprintf(":%d", serverPort)); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
+}
+
+// createDefaultAdmin creates a default admin user if none exists
+func createDefaultAdmin() {
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
+		log.Printf("Warning: could not check users table: %v", err)
+		return
+	}
+
+	if count == 0 {
+		defaultPassword := "admin123" // Change in production!
+		
+		// Hash password with bcrypt
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(defaultPassword), bcrypt.DefaultCost)
+		if err != nil {
+			log.Printf("Warning: could not hash password: %v", err)
+			return
+		}
+		
+		userID := uuid.New().String()
+		_, err = db.Exec(
+			`INSERT INTO users (id, email, password_hash, name, role, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			userID, "admin@vaporrmm.local", string(hashedPassword), "Admin", "admin", time.Now().Unix(),
+		)
+		if err != nil {
+			log.Printf("Warning: could not create default admin user: %v", err)
+		} else {
+			log.Println("Created default admin user (email: admin@vaporrmm.local - change default password!)")
+		}
+	}
+}

@@ -1,0 +1,108 @@
+# Security-hardened Sunshine build
+# Builds from third_party/sunshine source with minimal runtime attack surface
+# syntax=docker/dockerfile:1
+
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ninja-build \
+    nasm \
+    libdrm-dev \
+    libx11-dev \
+    libxrandr-dev \
+    libxinerama-dev \
+    libxcursor-dev \
+    libxi-dev \
+    libwayland-dev \
+    libpulse-dev \
+    libopus-dev \
+    libva-dev \
+    libvdpau-dev \
+    libnvidia-encode-550 || true \
+    libnvidia-decode-550 || true \
+    curl \
+    ca-certificates \
+    python3 \
+    python3-pip \
+    nodejs \
+    npm \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy sunshine source
+COPY third_party/sunshine ./sunshine
+
+# Build Sunshine
+WORKDIR /build/sunshine
+RUN mkdir build && cd build && \
+    cmake -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DSUNSHINE_BUILD_HOMEBREW=OFF \
+    -DSUNSHINE_BUILD_PKG=OFF \
+    .. && \
+    ninja
+
+# Runtime stage — minimal attack surface
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libdrm2 \
+    libx11-6 \
+    libxrandr2 \
+    libxinerama1 \
+    libxcursor1 \
+    libxi6 \
+    libwayland-client0 \
+    libpulse0 \
+    libopus0 \
+    libva2 \
+    libvdpau1 \
+    libevdev2 \
+    udev \
+    ca-certificates \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+ARG PGID=1001
+ARG PUID=1001
+ARG UNAME=sunshine
+ENV UNAME=${UNAME}
+ENV HOME=/home/${UNAME}
+ENV TZ=UTC
+
+RUN groupadd -f -g "${PGID}" "${UNAME}" && \
+    useradd -lm -d ${HOME} -s /bin/bash -g "${PGID}" -u "${PUID}" "${UNAME}" && \
+    mkdir -p ${HOME}/.config/sunshine && \
+    chown -R ${UNAME}:${UNAME} ${HOME}
+
+# Copy built binary
+COPY --from=builder /build/sunshine/build/sunshine /usr/bin/sunshine
+COPY --from=builder /build/sunshine/build/assets /usr/share/sunshine/assets
+
+# Security hardening
+RUN chmod 755 /usr/bin/sunshine && \
+    chmod 750 /usr/share/sunshine/assets
+
+# Network
+EXPOSE 47984-47990/tcp
+EXPOSE 48010
+EXPOSE 47998-48000/udp
+
+USER ${UNAME}
+WORKDIR ${HOME}
+
+VOLUME ["/home/${UNAME}/.config/sunshine"]
+
+ENTRYPOINT ["/usr/bin/sunshine"]

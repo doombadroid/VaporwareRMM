@@ -1,0 +1,93 @@
+# Moonlight Qt build container
+# Compiles the desktop client from third_party/moonlight-qt source
+# Outputs: /artifacts/ directory with built binaries
+# syntax=docker/dockerfile:1
+
+FROM ubuntu:24.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install build dependencies for Qt6
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    qt6-base-dev \
+    qt6-declarative-dev \
+    qt6-tools-dev \
+    qt6-multimedia-dev \
+    qt6-svg-dev \
+    libopus-dev \
+    libssl-dev \
+    libevdev-dev \
+    libsdl2-dev \
+    libva-dev \
+    libvdpau-dev \
+    libavcodec-dev \
+    libavutil-dev \
+    libavformat-dev \
+    libswscale-dev \
+    pkg-config \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy moonlight-qt source
+COPY third_party/moonlight-qt ./moonlight-qt
+
+# Initialize submodules (moonlight-common-c, qmdnsengine, etc.)
+WORKDIR /build/moonlight-qt
+RUN git submodule update --init --recursive --depth 1
+
+# Build Moonlight Qt
+RUN mkdir build && cd build && \
+    cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DQt6_DIR=/usr/lib/x86_64-linux-gnu/cmake/Qt6 && \
+    make -j$(nproc)
+
+# Package the build
+RUN mkdir -p /artifacts && \
+    cp -r build /artifacts/moonlight-qt-build && \
+    cp build/app/Moonlight /artifacts/Moonlight 2>/dev/null || true
+
+# Runtime stage for testing (optional — desktop apps usually run on host)
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    qt6-base-dev \
+    qt6-svg-dev \
+    qt6-multimedia-dev \
+    libopus0 \
+    libssl3 \
+    libevdev2 \
+    libsdl2-2.0-0 \
+    libva2 \
+    libvdpau1 \
+    libavcodec60 \
+    libavutil58 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy artifacts from builder
+COPY --from=builder /artifacts /artifacts
+
+# Create non-root user for testing
+ARG PGID=1001
+ARG PUID=1001
+ARG UNAME=moonlight
+ENV UNAME=${UNAME}
+ENV HOME=/home/${UNAME}
+
+RUN groupadd -f -g "${PGID}" "${UNAME}" && \
+    useradd -lm -d ${HOME} -s /bin/bash -g "${PGID}" -u "${PUID}" "${UNAME}" && \
+    chown -R ${UNAME}:${UNAME} ${HOME}
+
+USER ${UNAME}
+WORKDIR /artifacts
+
+CMD ["echo", "Moonlight Qt built. Binaries in /artifacts/"]

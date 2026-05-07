@@ -1,0 +1,378 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint frontend
+        run: |
+          cd apps/dashboard
+          pnpm lint
+
+      - name: Type check frontend
+        run: |
+          cd apps/dashboard
+          pnpm typecheck
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run frontend tests
+        run: |
+          cd apps/dashboard
+          pnpm test
+
+      - name: Install Playwright browsers
+        run: |
+          cd apps/dashboard
+          npx playwright install chromium
+
+      - name: Run E2E tests
+        run: |
+          cd apps/dashboard
+          pnpm test:e2e
+
+  go-lint:
+    name: Go Lint
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: |
+            go.work.sum
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: packages/server
+          args: --timeout=5m
+
+  go-test:
+    name: Go Tests & Coverage
+    runs-on: ubuntu-latest
+    needs: go-lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: |
+            go.work.sum
+
+      - name: Run server tests with coverage
+        run: |
+          cd packages/server
+          go test -v -race -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out
+
+      - name: Run agent tests with coverage
+        run: |
+          cd packages/agent
+          go test -v -race -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out
+
+      - name: Run CLI tests with coverage
+        run: |
+          cd packages/cli
+          go test -v -race -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out
+
+  build-server:
+    name: Build Go Server
+    runs-on: ubuntu-latest
+    needs: go-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: |
+            packages/server/go.sum
+            go.work.sum
+
+      - name: Build server binary
+        run: |
+          cd packages/server
+          go build -o vaporrmm-server ./main.go
+
+      - name: Upload server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-linux-amd64
+          path: packages/server/vaporrmm-server
+          retention-days: 7
+
+  build-agent:
+    name: Build Go Agent
+    runs-on: ubuntu-latest
+    needs: go-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+          cache-dependency-path: |
+            packages/agent/go.sum
+            go.work.sum
+
+      - name: Build agent binary (Linux AMD64)
+        run: |
+          cd packages/agent
+          GOOS=linux GOARCH=amd64 go build -o vaporrmm-agent-linux-amd64 ./main.go
+
+      - name: Build agent binary (Linux ARM64)
+        run: |
+          cd packages/agent
+          GOOS=linux GOARCH=arm64 go build -o vaporrmm-agent-linux-arm64 ./main.go
+
+      - name: Build agent binary (Windows AMD64)
+        run: |
+          cd packages/agent
+          GOOS=windows GOARCH=amd64 go build -o vaporrmm-agent-windows-amd64.exe ./main.go
+
+      - name: Build agent binary (macOS AMD64)
+        run: |
+          cd packages/agent
+          GOOS=darwin GOARCH=amd64 go build -o vaporrmm-agent-darwin-amd64 ./main.go
+
+      - name: Build agent binary (macOS ARM64)
+        run: |
+          cd packages/agent
+          GOOS=darwin GOARCH=arm64 go build -o vaporrmm-agent-darwin-arm64 ./main.go
+
+      - name: Upload Linux AMD64 agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-linux-amd64
+          path: packages/agent/vaporrmm-agent-linux-amd64
+          retention-days: 7
+
+      - name: Upload Linux ARM64 agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-linux-arm64
+          path: packages/agent/vaporrmm-agent-linux-arm64
+          retention-days: 7
+
+      - name: Upload Windows AMD64 agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-windows-amd64
+          path: packages/agent/vaporrmm-agent-windows-amd64.exe
+          retention-days: 7
+
+      - name: Upload macOS AMD64 agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-darwin-amd64
+          path: packages/agent/vaporrmm-agent-darwin-amd64
+          retention-days: 7
+
+      - name: Upload macOS ARM64 agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-darwin-arm64
+          path: packages/agent/vaporrmm-agent-darwin-arm64
+          retention-days: 7
+
+  docker-build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [build-server, build-agent]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./packages/server/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push dashboard image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./apps/dashboard/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/dashboard:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/dashboard:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  docker-compose-test:
+    name: Test Docker Compose
+    runs-on: ubuntu-latest
+    needs: [build-server, build-agent]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build and start services
+        run: |
+          docker compose up --build -d
+
+      - name: Wait for services to be ready
+        run: |
+          sleep 30
+          curl -f http://localhost:8080/health || exit 1
+
+      - name: Stop services
+        if: always()
+        run: docker compose down
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'table'
+          output: 'trivy-fs-results.txt'
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:${{ github.sha }}
+          format: 'table'
+          output: 'trivy-image-results.txt'
+
+      - name: Upload Trivy results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-scan-results
+          path: |
+            trivy-fs-results.txt
+            trivy-image-results.txt
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [docker-build, security-scan]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: '*'
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            artifacts/vaporrmm-server
+            artifacts/vaporrmm-agent-linux-amd64
+            artifacts/vaporrmm-agent-linux-arm64
+            artifacts/vaporrmm-agent-windows-amd64.exe
+            artifacts/vaporrmm-agent-darwin-amd64
+            artifacts/vaporrmm-agent-darwin-arm64
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

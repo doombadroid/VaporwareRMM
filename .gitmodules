@@ -1,0 +1,9 @@
+[submodule "third_party/sunshine"]
+	path = third_party/sunshine
+	url = https://github.com/LizardByte/Sunshine.git
+[submodule "third_party/moonlight-web"]
+	path = third_party/moonlight-web
+	url = https://github.com/MrCreativ3001/moonlight-web-stream.git
+[submodule "third_party/moonlight-qt"]
+	path = third_party/moonlight-qt
+	url = https://github.com/moonlight-stream/moonlight-qt.git

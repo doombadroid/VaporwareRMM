@@ -2,12 +2,8 @@
   "name": "vaporrmm",
   "version": "0.1.0",
   "private": true,
-  "packageManager": "pnpm@9.0.0",
+  "packageManager": "pnpm@9.15.0",
   "description": "Vapor RMM - Remote Monitoring and Management System",
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
@@ -19,7 +15,9 @@
     "build:server": "cd packages/server && go build -o ../../bin/server main.go",
     "build:agent": "cd packages/agent && go build -o ../../bin/agent main.go",
     "build:cli": "cd packages/cli && go build -o ../../bin/vaporrmm main.go",
-    "lint": "turbo run lint"
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "test:go": "go test ./packages/..."
   },
   "devDependencies": {
     "@turbo/gen": "^2.3.3",

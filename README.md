@@ -1,450 +1,318 @@
-# vaporRMM - Remote Monitoring & Management
+# Vaporware RMM
 
-![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
-[![Go Report Card](https://goreportcard.com/badge/github.com/vaporrmm/vaporrmm)](https://goreportcard.com/report/github.com/vaporrmm/vaporrmm)
-[![Docker Hub](https://img.shields.io/docker/pulls/vaporrmm/server.svg)](https://hub.docker.com/r/vaporrmm)
+Self-hosted Remote Monitoring & Management for MSPs and small ops teams. Multi-tenant by design. Sunshine + Moonlight for remote desktop. Tailscale for agent transport.
 
-**vaporRMM** is a comprehensive, open-source Remote Monitoring and Management platform designed for IT professionals, MSPs, and DevOps teams. Built with modern technologies, it provides real-time system monitoring, automated patch management, remote desktop access, and security compliance tracking.
+> ## ⚠️ ALPHA SOFTWARE — USE AT YOUR OWN RISK
+>
+> This is **pre-1.0 alpha software**. It is published for evaluation, hobbyist
+> deployments, and security research. **Do not run it on production fleets,
+> over the public internet, or against systems containing data you cannot
+> afford to lose**, until you have personally audited the code paths you
+> depend on.
+>
+> Specifically, the project ships with:
+>
+> - No external security audit. Self-audited only.
+> - No upgrade path or migration guarantees between alpha releases. Schema
+>   migrations may break; back up before pulling.
+> - No long-term support. APIs, env vars, install scripts, and database
+>   schema may change without notice.
+> - Limited multi-node testing. Single-node deployments are the supported
+>   path; multi-node Redis fan-out is implemented but lightly exercised.
+> - **No warranty of any kind.** See `LICENSE` (AGPL-3.0).
+>
+> Found a vulnerability? Email **`security@tcitsys.com`**. Do not open a
+> public issue. See [`SECURITY.md`](SECURITY.md) for scope + disclosure
+> policy.
 
----
-
-## 🌟 Features
-
-| Dashboard | Server | Agent |
-|-----------|--------|-------|
-| **Dashboard Overview** — Real-time device status, alerts, and resource metrics | **Server Architecture** — Go backend with SQLite/PostgreSQL, REST API, WebSocket hub | **Agent Deployment** — Cross-platform agent with heartbeat, command execution, file transfer |
-
-### Core Capabilities
-
-- **Real-time Monitoring** - CPU, memory, disk, network metrics with configurable alerts
-- **Remote Desktop** - Secure VNC/WebRTC access via Sunshine backend
-- **Patch Management** - Automated OS and application updates across your fleet
-- **Security Compliance** - Continuous vulnerability scanning and reporting
-- **Script Execution** - Run PowerShell/Bash scripts on remote systems
-- **Inventory Tracking** - Hardware/software inventory with custom attributes
-- **Multi-Tenant** - Support for MSPs managing multiple clients
-
----
-
-## 🏗 Architecture
-
-```mermaid
-graph TD
-    subgraph "Client Network"
-        A[Agent on Endpoint] -->|WebSocket| B[Server API]
-        C[Sunshine VNC] -->|Local| D[Remote Desktop]
-    end
-    
-    subgraph "vaporRMM Server"
-        B --> E[PostgreSQL/SQLite DB]
-        B --> F[JWT Auth]
-        B --> G[Websocket Hub]
-        B --> H[Agent Registry]
-    end
-    
-    subgraph "Web Interface"
-        I[Next.js Dashboard] -->|REST API| B
-        J[TanStack Query] -->|Data Fetching| B
-    end
-    
-    E -->|Backups| K[External Storage]
-    F --> L[OAuth2/SAML]
-    
-    style A fill:#3b82f6,color:white
-    style B fill:#10b981,color:white
-    style I fill:#8b5cf6,color:white
-```
-
-### Technology Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Frontend | Next.js 15 (App Router), TypeScript, TailwindCSS, shadcn/ui |
-| State Management | TanStack Query, WebSocket |
-| Backend API | Go + Fiber Framework |
-| Database | SQLite (dev), PostgreSQL (production) |
-| Remote Desktop | Sunshine API (localhost:47990) |
-| Agent | Go + WebSockets |
+![Login](docs/screenshots/01-login.png)
 
 ---
 
-## 🚀 Quick Start
+## Features
 
-### Prerequisites
+### Core
 
-- **Docker & Docker Compose** (v2.0+)
-- **Node.js 18+** (for local development)
-- **Go 1.21+** (for building agents)
+- **Multi-tenant from the ground up.** Every row carries a `tenant_id`. Super-admin sees everything; tenant admins see only their own. Cross-tenant access denied at the SQL layer, not just the UI.
+- **Agent fleet management.** Cross-platform agents (Linux amd64/arm64, Windows amd64, macOS amd64/arm64). Install with one command. Persistent bearer token, 30s heartbeat, auto-reconnect.
+- **Remote desktop via Sunshine + Moonlight.** Per-device install + status. Pairing PIN flow. Optional Moonlight Web for in-browser streaming.
+- **Tailscale integration.** Per-tenant auth-key generation, agent install, status reporting.
+- **Real-time dashboard.** WebSocket events fan out to dashboard clients filtered by tenant + role. Multi-node deployments supported via Redis pub/sub.
 
-### Docker Deployment
+### Auth & Security
+
+- **Roles**: `super_admin` (cross-tenant) > `admin` (tenant-scoped) > `user` (read + own devices).
+- **TOTP / 2FA** with single-use backup codes. Pre-TOTP sessions invalidated on enable.
+- **JWT** (HMAC-SHA256) cookie-only sessions; stateful — every request checks `user_sessions`.
+- **CSRF** double-submit cookie on state-changing requests.
+- **Per-tenant agent registration secrets** (SHA-256 hashed at rest). Plaintext shown once.
+- **AES-256-GCM encryption at rest** for SMTP passwords + webhook secrets.
+- **Tenant suspension** with operator-configurable grace period.
+- **Self-serve signup** (gated by `SIGNUP_OPEN=1` or `SIGNUP_INVITE_CODE`).
+- **User invites** via email with one-time token (7-day TTL).
+- **Tenant impersonation** for super-admin support: enter a tenant as `tenant_admin`, original identity tracked, audit-logged on start + end.
+- **Rate limiting** with priority `agent > tenant > IP` so noisy fleets don't strangle dashboards.
+
+### Operations
+
+- **Backup + restore** scripts for SQLite and PostgreSQL with documented drill procedure (see [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md)).
+- **Tenant data export** (JSON dump, sensitive fields excluded) for offboarding.
+- **Tenant purge** (right-to-erasure) including user-keyed tables.
+- **Per-tenant Prometheus metrics**: `vaporrmm_tenant_devices`, `..._online`, `..._users`, plus global counters.
+- **Caddy on-demand TLS** for tenant subdomains (`*.rmm.example.com`) with `/caddy/ask` gate.
+- **Integration probes** for Tailscale CLI, Sunshine release URL, Moonlight web.
+- **Production runbook** with first-boot, scaling, and DR procedures (see [docs/PRODUCTION.md](docs/PRODUCTION.md)).
+
+### Tested
+
+- Go unit + integration tests (SQLite + PostgreSQL via ephemeral Docker rig).
+- Cross-tenant isolation tests verifying read/write boundaries.
+- Playwright E2E covering login, TOTP, tenant CRUD, install-secret reveal.
+- k6 load tests: 100 concurrent agents heartbeating @ p95 < 200ms, 10 dashboard users @ p95 < 300ms.
+
+---
+
+## Screenshots
+
+### Sign-in
+
+![Login](docs/screenshots/01-login.png)
+
+### Dashboard
+
+Super-admin's global view (the "All tenants" indicator + amber rule across the top mark cross-tenant context):
+
+![Dashboard](docs/screenshots/02-dashboard.png)
+
+### Tenants admin
+
+Cross-tenant view, super-admin only. Each row: tenant name + slug, plan, device + user counts, age. Actions per row: rotate registration secret, impersonate, suspend, delete.
+
+![Tenants](docs/screenshots/03-tenants.png)
+
+### Two-factor auth
+
+Per-user TOTP enrollment with QR code + 8 single-use backup codes shown once.
+
+![Settings · Security](docs/screenshots/04-settings-security.png)
+
+---
+
+## Quick start (Docker, Linux)
+
+Prerequisites: Docker + Docker Compose, a domain with DNS control if you want real TLS, an SMTP relay if you want password reset emails.
+
+### 1. Clone + secrets
 
 ```bash
-# Clone the repository
-git clone https://github.com/vaporrmm/vaporrmm.git
-cd vaporrmm
+git clone https://github.com/<you>/vaporRMM /srv/vaporrmm
+cd /srv/vaporrmm
 
-# Start all services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Access dashboard
-open http://localhost:3000
+mkdir -p secrets
+openssl rand -hex 32 > secrets/jwt_secret.txt
+ENCRYPTION_KEY="$(openssl rand -base64 32)"
+ADMIN_PW="$(openssl rand -base64 24 | tr -d '/+=' | head -c 24)Aa1!"
+PG_PW="$(openssl rand -base64 24 | tr -d '/+=' | head -c 24)"
 ```
 
-### Manual Installation
+### 2. `.env` (repo root)
 
 ```bash
-# Build and run the server
+DOMAIN=localhost                 # or rmm.yourdomain.com
+ACME_EMAIL=ops@yourdomain.com    # for Let's Encrypt
+PUBLIC_URL=https://localhost     # used for password-reset + invite links
+
+POSTGRES_PASSWORD=$PG_PW
+JWT_SECRET=$(cat secrets/jwt_secret.txt)
+SECRETS_ENCRYPTION_KEY=$ENCRYPTION_KEY
+ADMIN_PASSWORD=$ADMIN_PW
+
+# Optional but recommended
+REGISTRATION_SECRET=                # set to lock down agent registration
+SUSPENSION_GRACE_HOURS=72           # warning banner before hard-block
+SIGNUP_INVITE_CODE=                 # set to enable gated signup
+CORS_ORIGINS=https://localhost
+```
+
+Save the values you can't recover (`ADMIN_PASSWORD`, `JWT_SECRET`, `SECRETS_ENCRYPTION_KEY`) to a password manager. Losing `SECRETS_ENCRYPTION_KEY` means SMTP passwords + TOTP secrets become unrecoverable.
+
+### 3. Bring up the stack
+
+```bash
+docker compose up -d
+docker compose logs -f server     # wait for "starting server" + migration lines
+```
+
+### 4. Verify
+
+```bash
+curl -k https://localhost/health           # → 200 {"status":"ok"}
+curl -k https://localhost/api/branding/    # → default branding JSON
+```
+
+Open `https://localhost` in a browser. Log in as `admin@vaporrmm.local` with the `ADMIN_PASSWORD` you set.
+
+### 5. Hardening (do today, not next month)
+
+1. Settings → Users → change the default admin's email
+2. Settings → Security → enable TOTP, save the 8 backup codes somewhere safe
+3. `make test-postgres` against your live DB to verify migrations applied cleanly
+4. Run a backup → restore drill ([docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md))
+
+---
+
+## Quick start (dev, no Docker)
+
+```bash
+# Server
 cd packages/server
-go build -o vaporrmm-server .
-./vaporrmm-server
+JWT_SECRET=dev-secret-key-that-is-long-enough \
+  ADMIN_PASSWORD='DevTime123!' \
+  DATABASE_PATH=/tmp/vaporrmm.db \
+  go run .
 
-# Install the agent on target systems
-curl -fsSL https://raw.githubusercontent.com/vaporrmm/vaporrmm/main/packages/cli/install.sh | bash
+# In a second shell — dashboard
+cd apps/dashboard
+NEXT_PUBLIC_API_URL=http://localhost:8080/api \
+  npm run dev
 ```
+
+Server on `:8080`, dashboard on `:3000`. The dashboard expects the server's CORS to include `http://localhost:3000` — set `CORS_ORIGINS` if needed.
 
 ---
 
-## 📋 Installation Guide
+## Onboarding a tenant
 
-### Option 1: Docker (Recommended for Production)
-
-```yaml
-# docker-compose.yml
-version: '3.8'
-services:
-  server:
-    image: vaporrmm/server:latest
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./data:/app/data
-      - ./certs:/app/certs
-    environment:
-      - DATABASE_URL=sqlite:///app/data/vaporrmm.db
-      - JWT_SECRET=your-secret-key-here
-    restart: unless-stopped
-
-  agent:
-    image: vaporrmm/agent:latest
-    volumes:
-      - /var/run/dbus:/var/run/dbus
-    environment:
-      - SERVER_URL=http://server:8080
-      - AGENT_ID=${HOSTNAME}
-    privileged: true
-```
-
-### Option 2: Direct Binary Installation
+1. **Tenants → New tenant.** Set name, slug. Hit Create.
+2. **Install command panel** appears once. Pick Linux / macOS / Windows tab. Copy the command.
+3. Run it on each managed machine (Linux/macOS as root via `sudo`; Windows in PowerShell as Admin):
 
 ```bash
-# Linux/macOS
-curl -L https://github.com/vaporrmm/vaporrmm/releases/latest/download/vaporrmm-linux-amd64.tar.gz | tar xz
-sudo mv vaporrmm-server /usr/local/bin/
-
-# Windows (PowerShell)
-Invoke-WebRequest -Uri "https://github.com/vaporrmm/vaporrmm/releases/latest/download/vaporrmm-windows-amd64.zip" -OutFile vaporrmm.zip
-Expand-Archive vaporrmm.zip -DestinationPath $env:PROGRAMFILES\vaporrmm
+# Linux / macOS
+curl -fsSL https://rmm.yourdomain.com/api/branding/agent-install?format=script \
+  | sudo REGISTRATION_SECRET='vrt_xxxxx' bash -s -- --server https://rmm.yourdomain.com
 ```
 
-### Option 3: Package Managers
+```powershell
+# Windows (PowerShell as Administrator) — the dashboard supplies the full snippet
+$env:REGISTRATION_SECRET='vrt_xxxxx'
+# downloads agent.exe, persists token + env file, registers Windows service
+```
 
-```bash
-# Debian/Ubuntu
-curl -fsSL https://repo.vaporrmm.com/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/vaporrmm-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/vaporrmm-archive-keyring.gpg] https://repo.vaporrmm.com/deb stable main" | sudo tee /etc/apt/sources.list.d/vaporrmm.list
-sudo apt update && sudo apt install vaporrmm-server
+The agent registers exactly once with the registration secret, persists its bearer token to `/etc/vaporrmm/agent_token` (Linux/macOS) or `%ProgramData%\vaporrmm\` (Windows), then heartbeats every 30 seconds.
 
-# RHEL/CentOS/Fedora
-sudo dnf install dnf-plugins-core
-sudo dnf config-manager --add-repo https://repo.vaporrmm.com/rpm/vaporrmm.repo
-sudo dnf install vaporrmm-server
+---
+
+## Architecture
+
+```
+                     ┌───────────────────┐
+                     │  Caddy (TLS)      │
+                     │  on-demand certs  │
+                     └─────────┬─────────┘
+                               │
+            ┌──────────────────┼──────────────────┐
+            │                  │                  │
+            ▼                  ▼                  ▼
+   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+   │  Dashboard   │    │  Go API      │    │  Agents      │
+   │  Next.js 15  │◄──►│  Fiber       │◄──►│  (managed    │
+   │  React 19    │    │              │    │   machines)  │
+   └──────────────┘    └──────┬───────┘    └──────────────┘
+                              │
+                  ┌───────────┴───────────┐
+                  │                       │
+                  ▼                       ▼
+          ┌──────────────┐        ┌──────────────┐
+          │  PostgreSQL  │        │  Redis       │
+          │  (or SQLite  │        │  (rate limit │
+          │   for dev)   │        │   + WS pub)  │
+          └──────────────┘        └──────────────┘
+```
+
+- **Server** (`packages/server`) — Go Fiber, JWT auth, CSRF, multi-tenant data layer, REST + WebSocket.
+- **Dashboard** (`apps/dashboard`) — Next.js 15, App Router, TailwindCSS, shadcn/ui.
+- **Agent** (`packages/agent`) — Cross-platform Go binary, gopsutil for system metrics.
+- **CLI** (`packages/cli`) — Management CLI.
+- **Models** (`packages/models`) — Shared Go types between server + agent.
+
+DB abstraction (`internal/db`) supports SQLite (dev/single-host) and PostgreSQL (production). The wrapper rewrites `?` placeholders to `$1, $2, ...` for Postgres so handlers stay portable.
+
+---
+
+## Make targets
+
+```
+make test            # unit + Postgres integration tests
+make test-unit       # Go unit tests against SQLite
+make test-postgres   # Go tests against ephemeral Postgres in Docker
+make test-e2e        # Playwright end-to-end (boots full stack)
+make test-load       # k6 load tests against $LOAD_BASE
+make agent-build     # build local-arch agent → bin/agent
+make agent-build-all # cross-build matrix (5 targets) → bin/agent-<os>-<arch>
+make up-test-db      # start ephemeral Postgres on :5433
+make down-test-db    # stop + wipe
+make clean-bin       # rm -rf bin/
 ```
 
 ---
 
-## 🔐 Security
+## Documentation
 
-### Security Checklist
-
-| Item | Status | Notes |
-|------|--------|-------|
-| TLS/HTTPS | ✅ | Required in production |
-| mTLS for Agents | ✅ | Agent certificates validated |
-| JWT Authentication | ✅ | HS256 with configurable secret |
-| Secret Management | ✅ | Environment variables, Vault support |
-| Audit Logging | ✅ | All admin actions logged |
-| API Rate Limiting | ✅ | 100 req/min default |
-
-### Security Best Practices
-
-```bash
-# Enable mTLS for agent communication
-export AGENT_MTLS=true
-export AGENT_CERT=/etc/vaporrmm/agent.crt
-export AGENT_KEY=/etc/vaporrmm/agent.key
-
-# Configure secure secrets (never commit to git!)
-export JWT_SECRET=$(openssl rand -base64 32)
-export DATABASE_PASSWORD=$(openssl rand -base64 16)
-
-# Enable TLS with custom certificates
-export SERVER_CERT=/etc/vaporrmm/server.crt
-export SERVER_KEY=/etc/vaporrmm/server.key
-```
-
-### Security Architecture
-
-```mermaid
-sequenceDiagram
-    participant Agent as Agent
-    participant Server as vaporRMM Server
-    participant DB as Database
-    
-    Note over Agent,Server: Mutual TLS Authentication
-    Agent->>Server: POST /api/agents/register
-    Server->>Agent: Request client certificate
-    Agent->>Server: Present agent certificate
-    Server->>DB: Verify certificate validity
-    DB-->>Server: Certificate verified
-    
-    Note over Agent,Server: Authorized Communication
-    Server->>Agent: Authenticated WebSocket connection
-    Agent-->>Server: Encrypted metrics data
-```
+- [docs/PRODUCTION.md](docs/PRODUCTION.md) — full deployment runbook, monitoring, scaling, disaster recovery.
+- [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) — backup schedule, restore procedure, drill checklist, RPO/RTO targets.
+- [docs/AGENT_INSTALL.md](docs/AGENT_INSTALL.md) — per-OS agent install + troubleshooting.
+- [PRODUCT.md](PRODUCT.md) — product positioning, anti-references, design intent.
+- [DESIGN.md](DESIGN.md) — design system reference (palette, typography, motion).
+- [CLAUDE.md](CLAUDE.md) — guidance for agentic coding tools working in this repo.
 
 ---
 
-## 📊 Configuration
+## Required environment
 
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SERVER_PORT` | 8080 | API server port |
-| `DATABASE_URL` | sqlite:///data/vaporrmm.db | Database connection string |
-| `JWT_SECRET` | (required) | Secret for JWT token signing |
-| `CORS_ORIGINS` | * | Allowed CORS origins |
-| `LOG_LEVEL` | info | Log verbosity (debug, info, warn, error) |
-
-### Config File (`vaporrmm.yml`)
-
-```yaml
-server:
-  port: 8080
-  host: "0.0.0.0"
-  
-database:
-  type: sqlite
-  path: /var/lib/vaporrmm/data.db
-  
-security:
-  mtls_enabled: true
-  jwt_expiry: 24h
-  refresh_token_expiry: 720h
-
-agent:
-  heartbeat_interval: 30s
-  checkin_timeout: 180s
-  
-webhook:
-  enabled: true
-  events:
-    - agent_connected
-    - agent_disconnected
-    - security_alert
-```
+| Variable | Required | Purpose |
+|---|---|---|
+| `JWT_SECRET` | yes | Signs session JWTs. 32+ chars. Without it, sessions don't survive restart. |
+| `SECRETS_ENCRYPTION_KEY` | for production | base64 32-byte key (`openssl rand -base64 32`). Encrypts SMTP passwords + TOTP secrets at rest. |
+| `DATABASE_URL` | for Postgres | `postgres://user:pw@host:5432/db?sslmode=disable`. Falls back to SQLite when unset. |
+| `DATABASE_PATH` | for SQLite | Path to SQLite file (default `./data/vapor_rmm.db`). |
+| `ADMIN_PASSWORD` | optional | First-run admin password. Random + printed once if unset. |
+| `PUBLIC_URL` | for production | Base URL for password-reset and invite links. |
+| `CORS_ORIGINS` | for prod | Comma-separated allowed origins for the dashboard. |
+| `REGISTRATION_SECRET` | optional | Fallback registration secret when no per-tenant secret matches. |
+| `BASE_DOMAIN` | for subdomain routing | E.g. `rmm.example.com`. Drives tenant subdomain resolution + Caddy on-demand TLS. |
+| `SUSPENSION_GRACE_HOURS` | optional | Hours of warning before hard-block on tenant suspension. Default 72. |
+| `SUNSHINE_VERSION` | optional | LizardByte/Sunshine release tag. Validated; defaults to `v2025.628.4510`. |
+| `MOONLIGHT_WEB_URL` | optional | If set, dashboard exposes in-browser streaming. |
+| `SIGNUP_OPEN` | optional | Set `1` to enable open self-serve tenant signup. |
+| `SIGNUP_INVITE_CODE` | optional | When set, signup requires this code in the request body. |
+| `REDIS_URL` | for multi-node | `redis://host:6379`. Required for distributed rate limiting + cross-node WS broadcast. |
+| `METRICS_API_KEY` | optional | If set, `/metrics` requires `Authorization: Bearer <key>` instead of admin JWT. |
+| `SERVER_CERT` / `SERVER_KEY` | optional | Direct TLS termination on the Go server. Caddy is preferred. |
+| `DISABLE_RATE_LIMIT` | tests only | Set `1` to bypass all rate limiting. Never in production. |
 
 ---
 
-## 🛠 Development
+## Tech stack
 
-### Prerequisites
-
-- **Go 1.21+**
-- **Node.js 18+**
-- **pnpm 8+**
-
-### Setup
-
-```bash
-# Clone repository
-git clone https://github.com/vaporrmm/vaporrmm.git
-cd vaporrmm
-
-# Install dependencies
-pnpm install
-
-# Generate shadcn/ui components
-npx shadcn-ui@latest add button card input form label select
-
-# Start development servers
-pnpm dev:dashboard  # Next.js on port 3000
-pnpm dev:server     # Go API on port 8080
-```
-
-### Project Structure
-
-```
-vaporrmm/
-├── apps/
-│   └── dashboard/           # Next.js 15 App Router frontend
-├── packages/
-│   ├── server/              # Go/Fiber REST API
-│   │   ├── cmd/            # Main entry points
-│   │   ├── internal/       # Internal packages
-│   │   │   ├── db/         # Database layer
-│   │   │   └── handlers/   # HTTP handlers
-│   │   └── pkg/            # Reusable server packages
-│   ├── agent/              # Go agent for endpoints
-│   └── cli/                # CLI tool for installation
-├── docker/
-│   ├── server/Dockerfile
-│   ├── agent/Dockerfile
-│   └── dashboard/Dockerfile
-└── scripts/                 # Build and deployment scripts
-```
+- Go 1.23
+- Fiber v2 + golang-jwt/jwt v5
+- PostgreSQL 16 / SQLite via mattn/go-sqlite3
+- Redis 7 (optional, multi-node)
+- Caddy 2 (reverse proxy + on-demand TLS)
+- Next.js 15 + React 19 + TailwindCSS
+- Playwright (E2E) + k6 (load) + go test (unit/integration)
+- Sunshine + Moonlight (LizardByte) for remote desktop
+- Tailscale for agent transport
 
 ---
 
-## 🧪 Testing
+## License
 
-```bash
-# Run all tests
-pnpm test
-
-# Test specific packages
-pnpm test:server      # Go server tests
-pnpm test:agent       # Agent integration tests
-pnpm test:e2e         # End-to-end tests
-
-# Code coverage
-pnpm test:coverage    # Generate coverage report
-```
+AGPL-3.0. See `LICENSE`.
 
 ---
 
-## 📦 Building
+## Security disclosure
 
-### Docker Images
-
-```bash
-# Build all images
-docker-compose build
-
-# Build individual image
-docker build -f docker/server/Dockerfile -t vaporrmm/server .
-docker build -f docker/agent/Dockerfile -t vaporrmm/agent .
-
-# Push to registry
-docker push vaporrmm/server:latest
-```
-
-### Native Binaries
-
-```bash
-# Linux
-go build -o vaporrmm-server ./packages/server/main.go
-go build -o vaporrmm-agent ./packages/agent/main.go
-
-# Cross-platform
-GOOS=windows GOARCH=amd64 go build -o vaporrmm-server.exe ./packages/server/main.go
-GOOS=darwin GOARCH=arm64 go build -o vaporrmm-darwin-arm64 ./packages/server/main.go
-```
-
----
-
-## 📝 API Documentation
-
-Once the server is running, visit:
-
-- **Swagger UI**: `http://localhost:8080/swagger`
-- **OpenAPI Spec**: `http://localhost:8080/api/openapi.json`
-
-### Authentication
-
-```bash
-# Login to get JWT token
-curl -X POST http://localhost:8080/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@vaporrmm.local","password":"your-password"}'
-
-# Use token in subsequent requests
-curl http://localhost:8080/api/agents \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-```
-
----
-
-## 🤝 Contributing
-
-We welcome contributions from the community! Here's how you can help:
-
-1. **Fork** the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Contributing Guidelines
-
-- All code must pass linting and tests
-- Follow Go formatting standards (`gofmt`, `goimports`)
-- Update documentation for new features
-- Add unit tests for new functionality
-
----
-
-## 📄 License
-
-This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
-
-```
-vaporRMM - Remote Monitoring & Management Platform
-Copyright (C) 2024 vaporRMM Contributors
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU Affero General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License
-along with this program. If not, see <https://www.gnu.org/licenses/>.
-```
-
-### Commercial Licensing
-
-For organizations that cannot comply with AGPL requirements, commercial licensing options are available. Contact [license@vaporrmm.com](mailto:license@vaporrmm.com) for pricing and terms.
-
----
-
-## 📞 Support & Community
-
-- **GitHub Issues**: [Report bugs and request features](https://github.com/vaporrmm/vaporrmm/issues)
-- **Discord**: [Join our community server](https://discord.gg/vaporrmm)
-- **Documentation**: [Full documentation](https://docs.vaporrmm.com)
-- **Twitter**: [@vaporrmm](https://twitter.com/vaporrmm)
-
----
-
-## 🙏 Acknowledgments
-
-- [Sunshine](https://github.com/loki-47-6F-64/sunshine) for remote desktop functionality
-- [Fiber](https://gofiber.io/) for the Go web framework
-- [Next.js](https://nextjs.org/) for the frontend framework
-- All our [contributors](https://github.com/vaporrmm/vaporrmm/graphs/contributors)
-
----
-
-## ⭐ Show your support
-
-Give a ⭐️ if you like this project!
-
-[![Star History Chart](https://api.star-history.com/svg?repos=vaporrmm/vaporrmm&type=Date)](https://star-history.com/#vaporrmm/vaporrmm&Date)
+Found a vulnerability? Email **`security@tcitsys.com`**. Please don't open a public issue. See [`SECURITY.md`](SECURITY.md) for the full disclosure policy and threat-model scope.

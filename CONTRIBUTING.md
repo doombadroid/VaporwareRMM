@@ -1,6 +1,16 @@
-# Contributing to vaporRMM
+# Contributing to Vaporware RMM
 
 Thank you for your interest in contributing! This document covers the basics.
+
+By submitting a pull request, you agree that your contributions are licensed
+under the project's [AGPL-3.0 license](LICENSE) and that you have the right to
+license them. We do not require a separate CLA. Significant features should be
+discussed in an issue first so we can agree on scope before code is written.
+
+**Security issues:** do not file them as a regular issue or PR. Email
+`security@tcitsys.com`. See [SECURITY.md](SECURITY.md).
+
+**Code of conduct:** see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Getting Started
 
@@ -60,4 +70,5 @@ Thank you for your interest in contributing! This document covers the basics.
 
 ## Questions?
 
-Open an issue or discussion on GitHub.
+Open an issue or discussion on GitHub. For security questions, email
+`security@tcitsys.com` instead.

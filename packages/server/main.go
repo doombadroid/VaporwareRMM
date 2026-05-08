@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +22,7 @@ import (
 	"vaporrmm/server/internal/events"
 	"vaporrmm/server/internal/handlers"
 	"vaporrmm/server/internal/metrics"
+	"vaporrmm/server/internal/middleware"
 	"vaporrmm/server/internal/redis"
 	"vaporrmm/server/internal/utils"
 )
@@ -74,12 +76,24 @@ func main() {
 	}
 
 	moonlightWebURL := os.Getenv("MOONLIGHT_WEB_URL")
+	sunshineVersion := os.Getenv("SUNSHINE_VERSION")
+	if sunshineVersion == "" {
+		sunshineVersion = "v2025.628.4510"
+	}
+	// SUNSHINE_VERSION is interpolated into shell commands sent to agents.
+	// Restrict to a strict charset so a typo or hostile env can't inject RCE.
+	if !regexp.MustCompile(`^v?[0-9A-Za-z._-]{1,32}$`).MatchString(sunshineVersion) {
+		slog.Error("SUNSHINE_VERSION must be alphanumeric + . _ - (max 32 chars); refusing to start", "value", sunshineVersion)
+		os.Exit(1)
+	}
 
 	if err := db.Init(); err != nil {
 		slog.Error("failed to initialize database", "error", err)
 		os.Exit(1)
 	}
 	defer db.DB.Close()
+
+	db.EnsureDefaultTenant()
 
 	redis.Init()
 	defer redis.Close()
@@ -121,6 +135,9 @@ func main() {
 		c.Set("Content-Security-Policy", "default-src 'self'")
 		return c.Next()
 	})
+
+	// Resolve tenant from Host subdomain (hint only — JWT remains source of truth)
+	app.Use(middleware.ResolveTenantFromHost())
 
 	// HTTPS redirect + HSTS when TLS_CERT is set
 	if os.Getenv("SERVER_CERT") != "" {
@@ -170,6 +187,7 @@ func main() {
 		MaxCommandLimit:         maxCommandLimit,
 		MaxAuditLimit:           maxAuditLimit,
 		MoonlightWebURL:         moonlightWebURL,
+		SunshineVersion:         sunshineVersion,
 	}
 
 	// System routes
@@ -201,6 +219,24 @@ func main() {
 
 	// Auth routes
 	handlers.RegisterAuthRoutes(publicAPI, api, cfg)
+
+	// TOTP routes
+	handlers.RegisterTOTPRoutes(publicAPI, api, cfg)
+
+	// Tenant management (super-admin only)
+	handlers.RegisterTenantRoutes(api)
+
+	// User invites (tenant-admin self-serve + super_admin cross-tenant)
+	handlers.RegisterInviteRoutes(publicAPI, api)
+
+	// Self-serve tenant signup (gated by SIGNUP_OPEN or SIGNUP_INVITE_CODE)
+	handlers.RegisterSignupRoutes(publicAPI)
+
+	// Tenant data export + super_admin purge (right-to-erasure)
+	handlers.RegisterTenantExportRoutes(api)
+
+	// Operational readiness probes (Tailscale CLI, Sunshine releases, Moonlight web)
+	handlers.RegisterIntegrationProbes(api)
 
 	// Branding routes
 	handlers.RegisterBrandingRoutes(app, api)
@@ -259,13 +295,14 @@ func main() {
 				}
 				if n, _ := res.RowsAffected(); n > 0 {
 					slog.Info("marked devices offline", "count", n)
-					rows, _ := db.DB.Query(`SELECT id, hostname FROM devices WHERE last_seen < ? AND status = 'offline' LIMIT ?`, threshold, n)
+					rows, _ := db.DB.Query(`SELECT id, hostname, COALESCE(user_id,''), COALESCE(tenant_id,'default') FROM devices WHERE last_seen < ? AND status = 'offline' LIMIT ?`, threshold, n)
 					if rows != nil {
 						for rows.Next() {
-							var did, hostname string
-							_ = rows.Scan(&did, &hostname)
-							events.TriggerWebhooks("device.offline", map[string]interface{}{"device_id": did, "hostname": hostname, "timestamp": time.Now().Unix()})
-							events.WSBroadcastMessage(map[string]interface{}{"type": "device.offline", "device_id": did, "hostname": hostname, "timestamp": time.Now().Unix()})
+							var did, hostname, ownerID, tid string
+							_ = rows.Scan(&did, &hostname, &ownerID, &tid)
+							ts := time.Now().Unix()
+							events.TriggerWebhooks(tid, "device.offline", map[string]interface{}{"device_id": did, "hostname": hostname, "timestamp": ts})
+							events.WSBroadcastFiltered(tid, ownerID, map[string]interface{}{"type": "device.offline", "device_id": did, "hostname": hostname, "timestamp": ts})
 						}
 						rows.Close()
 					}
@@ -293,6 +330,46 @@ func main() {
 					metrics.DBInUseConnsGauge.Set(float64(stats.InUse))
 					metrics.DBIdleConnsGauge.Set(float64(stats.Idle))
 				}
+
+				// Per-tenant gauges. Reset all and re-populate so deleted tenants drop out.
+				metrics.DevicesByTenant.Reset()
+				metrics.OnlineDevicesByTenant.Reset()
+				metrics.UsersByTenant.Reset()
+				if rows, err := db.DB.Query(`SELECT tenant_id, COUNT(*) FROM devices GROUP BY tenant_id`); err == nil {
+					for rows.Next() {
+						var tid string
+						var n float64
+						if err := rows.Scan(&tid, &n); err == nil && tid != "" {
+							metrics.DevicesByTenant.WithLabelValues(tid).Set(n)
+						}
+					}
+					rows.Close()
+				}
+				if rows, err := db.DB.Query(`SELECT tenant_id, COUNT(*) FROM devices WHERE status = 'online' GROUP BY tenant_id`); err == nil {
+					for rows.Next() {
+						var tid string
+						var n float64
+						if err := rows.Scan(&tid, &n); err == nil && tid != "" {
+							metrics.OnlineDevicesByTenant.WithLabelValues(tid).Set(n)
+						}
+					}
+					rows.Close()
+				}
+				if rows, err := db.DB.Query(`SELECT tenant_id, COUNT(*) FROM users GROUP BY tenant_id`); err == nil {
+					for rows.Next() {
+						var tid string
+						var n float64
+						if err := rows.Scan(&tid, &n); err == nil && tid != "" {
+							metrics.UsersByTenant.WithLabelValues(tid).Set(n)
+						}
+					}
+					rows.Close()
+				}
+				var active, suspended float64
+				_ = db.DB.QueryRow(`SELECT COUNT(*) FROM tenants WHERE status = 'active'`).Scan(&active)
+				_ = db.DB.QueryRow(`SELECT COUNT(*) FROM tenants WHERE status = 'suspended'`).Scan(&suspended)
+				metrics.TenantsActive.Set(active)
+				metrics.TenantsSuspended.Set(suspended)
 			case <-offlineDone:
 				return
 			}

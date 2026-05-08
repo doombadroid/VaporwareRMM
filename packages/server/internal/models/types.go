@@ -5,6 +5,7 @@ type AgentToken struct {
 	TokenHash string // SHA-256 hash of the bearer token
 	DeviceID  string
 	Hostname  string
+	TenantID  string
 	ExpiresAt int64 // Unix timestamp; 0 means no expiration
 }
 

@@ -50,6 +50,42 @@ var (
 			Help: "Number of idle database connections",
 		},
 	)
+
+	// Per-tenant gauges. Labelled "tenant_id" so we can alert on a single
+	// tenant's noisy fleet without masking it under global aggregates.
+	DevicesByTenant = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "vaporrmm_tenant_devices",
+			Help: "Number of registered devices per tenant",
+		},
+		[]string{"tenant_id"},
+	)
+	OnlineDevicesByTenant = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "vaporrmm_tenant_devices_online",
+			Help: "Number of online devices per tenant",
+		},
+		[]string{"tenant_id"},
+	)
+	UsersByTenant = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "vaporrmm_tenant_users",
+			Help: "Number of users per tenant",
+		},
+		[]string{"tenant_id"},
+	)
+	TenantsActive = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "vaporrmm_tenants_active",
+			Help: "Number of tenants in active status",
+		},
+	)
+	TenantsSuspended = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "vaporrmm_tenants_suspended",
+			Help: "Number of tenants in suspended status",
+		},
+	)
 )
 
 func init() {
@@ -67,4 +103,9 @@ func init() {
 	register(DBOpenConnsGauge)
 	register(DBInUseConnsGauge)
 	register(DBIdleConnsGauge)
+	register(DevicesByTenant)
+	register(OnlineDevicesByTenant)
+	register(UsersByTenant)
+	register(TenantsActive)
+	register(TenantsSuspended)
 }

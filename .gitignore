@@ -1,56 +1,81 @@
-# Dependencies
+# ── Dependencies ──────────────────────────────────────────────
 node_modules/
+**/node_modules/
+.pnpm-store/
 
-# Next.js
+# ── Next.js ───────────────────────────────────────────────────
 .next/
 out/
 
-# Go binaries and build artifacts
+# ── Go binaries / build artifacts ─────────────────────────────
 bin/
 packages/server/vaporrmm-server
 packages/server/server
 packages/server/*.exe
 packages/server/*~
 
-# Built agent/cli binaries (but keep source files)
+# Built agent/cli binaries (keep source files)
 packages/agent/vapor-agent
 packages/agent/vaporRMM_agent
 packages/agent/vaporrmm-agent
 packages/cli/vapor-cli
 packages/cli/vaporRMM_cli
 packages/cli/vaporrmm-cli
+packages/agent/agent-*-*
+packages/agent/dist/
 
-# Go test coverage files
+# Go test/profile artifacts
 *.prof
 coverage/
+*.test
+*.out
 
-# Go vendor directory
+# Go vendor
 vendor/
+
+# ── Secrets / state ──────────────────────────────────────────
+# Real secrets must NEVER be committed. Only *.example files are tracked.
+secrets/
+!secrets/*.example
+secrets/*
+!secrets/.gitkeep
 
 # Environment variables
 .env
 .env.local
 .env.production
+.env.*.local
 
-# Logs
+# ── Databases / volumes ──────────────────────────────────────
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/
+backups/
+
+# ── Logs ─────────────────────────────────────────────────────
 logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# OS files
+# ── Playwright / test ────────────────────────────────────────
+playwright-report/
+test-results/
+
+# ── OS files ─────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# IDE
+# ── IDE ──────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# Test coverage
-coverage/
 
 # Cache
 .cache/

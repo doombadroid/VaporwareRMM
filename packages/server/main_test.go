@@ -170,7 +170,7 @@ func TestTokenGeneration(t *testing.T) {
 	}
 
 	// Test JWT generation
-	jwt, err := auth.GenerateJWT("user123", "admin", 24)
+	jwt, err := auth.GenerateJWT("user123", "default", "admin", 24)
 	if err != nil {
 		t.Fatalf("Failed to generate JWT: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestTokenGeneration(t *testing.T) {
 	}
 
 	// Test JWT validation
-	userID, role, err := auth.ValidateJWT(jwt)
+	userID, _, role, err := auth.ValidateJWT(jwt)
 	if err != nil {
 		t.Errorf("Failed to validate JWT: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestTokenGeneration(t *testing.T) {
 }
 
 func TestAgentTokenRegistration(t *testing.T) {
-	auth.RegisterAgentToken("test-token", "device-123", "test-host")
+	auth.RegisterAgentToken("test-token", "device-123", "test-host", "default")
 
 	auth.TokenMu.RLock()
 	agentTok, exists := auth.RegisteredTokens[auth.HashToken("test-token")]

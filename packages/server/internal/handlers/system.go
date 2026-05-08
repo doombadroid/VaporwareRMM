@@ -2,8 +2,12 @@ package handlers
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
@@ -13,12 +17,33 @@ import (
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+	"vaporrmm/server/internal/middleware"
+	"vaporrmm/server/internal/redis"
 	"vaporrmm/server/internal/utils"
 )
 
 func RegisterSystemRoutes(app *fiber.App, cfg Config, openAPISpec []byte) {
-	// Prometheus metrics endpoint
+	// Prometheus metrics endpoint — requires METRICS_API_KEY bearer or JWT admin session
 	app.Get("/metrics", func(c *fiber.Ctx) error {
+		if key := os.Getenv("METRICS_API_KEY"); key != "" {
+			if c.Get("Authorization") != "Bearer "+key {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+			}
+		} else {
+			token := c.Cookies("auth_token")
+			if token == "" {
+				if h := c.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+					token = strings.TrimPrefix(h, "Bearer ")
+				}
+			}
+			if token == "" {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+			}
+			_, _, role, err := auth.ValidateJWT(token)
+			if err != nil || (role != "admin" && role != "super_admin") {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+			}
+		}
 		c.Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		var buf bytes.Buffer
 		promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{}).ServeHTTP(
@@ -26,6 +51,22 @@ func RegisterSystemRoutes(app *fiber.App, cfg Config, openAPISpec []byte) {
 			&http.Request{Method: "GET", URL: &url.URL{Path: "/metrics"}},
 		)
 		return c.SendString(buf.String())
+	})
+
+	// Caddy on-demand TLS "ask" endpoint.
+	// Caddy hits this with ?domain=foo.example.com before issuing a new cert.
+	// We answer 200 only when the host's subdomain matches an active tenant slug,
+	// preventing arbitrary cert issuance for spoofed domains.
+	//
+	// Intentionally NOT proxied through the public Caddyfile (apex block) so
+	// external attackers can't enumerate tenant slugs. Caddy reaches it via
+	// the internal docker network at http://server:8080/caddy/ask.
+	app.Get("/caddy/ask", func(c *fiber.Ctx) error {
+		slug := middleware.ExtractSubdomainSlug(c.Query("domain"))
+		if middleware.SlugIsActive(slug) {
+			return c.SendStatus(fiber.StatusOK)
+		}
+		return c.SendStatus(fiber.StatusNotFound)
 	})
 
 	// Health check
@@ -42,28 +83,57 @@ func RegisterSystemRoutes(app *fiber.App, cfg Config, openAPISpec []byte) {
 		})
 	})
 
-	// WebSocket with auth validation
+	// WebSocket with auth validation — cookie only (query param would be logged by proxies)
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if !websocket.IsWebSocketUpgrade(c) {
 			return fiber.ErrUpgradeRequired
 		}
-		// Validate auth token from query param or cookie
-		token := c.Query("token")
-		if token == "" {
-			token = c.Cookies("auth_token")
-		}
+		token := c.Cookies("auth_token")
 		if token == "" {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "WebSocket auth required"})
 		}
-		_, _, err := auth.ValidateJWT(token)
+		userID, tenantID, role, err := auth.ValidateJWT(token)
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid WebSocket token"})
 		}
+
+		// Stateful session check — mirrors AuthMiddleware; rejects revoked sessions
+		tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
+		var sessionUserID string
+		if redis.IsEnabled() {
+			if cached, err := redis.Client.Get(redis.Ctx, "session:"+tokenHash).Result(); err == nil && cached != "" {
+				sessionUserID = cached
+			}
+		}
+		if sessionUserID == "" {
+			if err := db.DB.QueryRow(`SELECT user_id FROM user_sessions WHERE token_hash = ?`, tokenHash).Scan(&sessionUserID); err != nil {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Session revoked"})
+			}
+		}
+		if sessionUserID != userID {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Session mismatch"})
+		}
+
+		// Suspended / deleted tenants cannot establish WebSocket. super_admin bypasses.
+		if !auth.IsSuperAdmin(role) && !auth.TenantAllowed(tenantID) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Tenant inactive"})
+		}
+
+		c.Locals("ws_user_id", userID)
+		c.Locals("ws_role", role)
+		c.Locals("ws_tenant_id", tenantID)
 		return c.Next()
 	})
 	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
+		userID, _ := c.Locals("ws_user_id").(string)
+		role, _ := c.Locals("ws_role").(string)
+		tenantID, _ := c.Locals("ws_tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		info := &events.WSClientInfo{UserID: userID, TenantID: tenantID, Role: role}
 		events.WSMu.Lock()
-		events.WSClients[c] = true
+		events.WSClients[c] = info
 		events.WSMu.Unlock()
 		defer func() {
 			events.WSMu.Lock()

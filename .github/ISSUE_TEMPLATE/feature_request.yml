@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest a feature or enhancement.
+title: "[feat] "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem?
+      description: Describe the user/operator problem you're trying to solve. "It would be nice to have X" is a solution; "I cannot do Y today, which forces me to Z" is a problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you solve it? What does the UX or API look like?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else did you try, and why didn't it work?
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Server (Go API, agent endpoints, DB)
+        - Agent (Go agent binary)
+        - Dashboard (Next.js UI)
+        - Install scripts / deployment
+        - Documentation
+        - Other
+    validations:
+      required: true

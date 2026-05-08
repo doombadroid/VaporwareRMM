@@ -10,6 +10,7 @@ type Config struct {
 	MaxCommandLimit         int
 	MaxAuditLimit           int
 	MoonlightWebURL         string
+	SunshineVersion         string
 }
 
 const agentHeartbeatRateLimit = 5 // per minute

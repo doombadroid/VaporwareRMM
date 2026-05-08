@@ -16,6 +16,7 @@ import (
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+	"vaporrmm/server/internal/email"
 	"vaporrmm/server/internal/events"
 	"vaporrmm/server/internal/redis"
 	"vaporrmm/server/internal/utils"
@@ -53,10 +54,11 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 		}
 
 		clientIP := c.IP()
+		bypassLimits := os.Getenv("DISABLE_RATE_LIMIT") == "1"
 		loginMu.Lock()
 		ipAttempt, ipExists := ipAttempts[clientIP]
 		now := time.Now()
-		if ipExists {
+		if !bypassLimits && ipExists {
 			if now.Sub(ipAttempt.lastTime) > ipWindowDuration {
 				ipAttempt.count = 0
 			}
@@ -74,7 +76,7 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 				attempt.count = 0
 				attempt.blockedAt = time.Time{}
 			}
-			if !attempt.blockedAt.IsZero() && now.Sub(attempt.blockedAt) < blockDuration {
+			if !bypassLimits && !attempt.blockedAt.IsZero() && now.Sub(attempt.blockedAt) < blockDuration {
 				loginMu.Unlock()
 				return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": "Too many login attempts", "message": "Account temporarily locked. Please try again later."})
 			}
@@ -88,8 +90,8 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 		}
 		loginMu.Unlock()
 
-		var userID, email, name, passwordHash string
-		err := db.DB.QueryRow("SELECT id, email, name, password_hash FROM users WHERE email = ?", req.Email).Scan(&userID, &email, &name, &passwordHash)
+		var userID, email, name, passwordHash, tenantID string
+		err := db.DB.QueryRow("SELECT id, email, name, password_hash, COALESCE(tenant_id,'default') FROM users WHERE email = ?", req.Email).Scan(&userID, &email, &name, &passwordHash, &tenantID)
 		if err != nil {
 			loginMu.Lock()
 			attempt.count++
@@ -128,7 +130,18 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 			role = "admin"
 		}
 
-		token, err := auth.GenerateJWT(userID, role, 24)
+		// If TOTP is enabled, return a short-lived challenge token instead of the full JWT.
+		// The client must complete /auth/login/totp to get a real session.
+		var totpEnabled int
+		if err := db.DB.QueryRow(`SELECT enabled FROM user_totp WHERE user_id = ?`, userID).Scan(&totpEnabled); err == nil && totpEnabled == 1 {
+			challenge, err := auth.GenerateTOTPChallenge(userID, tenantID)
+			if err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to generate challenge"})
+			}
+			return c.JSON(fiber.Map{"requires_totp": true, "totp_challenge": challenge})
+		}
+
+		token, err := auth.GenerateJWT(userID, tenantID, role, 24)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to generate token"})
 		}
@@ -172,7 +185,7 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 			Path:     "/",
 		})
 
-		events.AuditLog(userID, "auth.login", "user", userID, fmt.Sprintf("login from %s", c.IP()), c.IP())
+		events.AuditLogTenant(tenantID, userID, "auth.login", "user", userID, fmt.Sprintf("login from %s", c.IP()), c.IP())
 		return c.JSON(models.LoginResponse{Token: token, UserID: userID, Email: email, Name: name})
 	})
 
@@ -221,9 +234,18 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 		); err != nil {
 			slog.Warn("db exec failed", "error", err)
 		}
-		// TODO: Send reset token via email instead of returning it in the response.
-		// For development/testing, the token is logged server-side.
-		slog.Info("password reset token generated", "email", req.Email, "token_hash", tokenHash)
+		baseURL := os.Getenv("PUBLIC_URL")
+		if baseURL == "" {
+			scheme := "http"
+			if c.Protocol() == "https" || os.Getenv("SERVER_CERT") != "" {
+				scheme = "https"
+			}
+			baseURL = scheme + "://" + c.Hostname()
+		}
+		if err := sendPasswordResetEmail(req.Email, resetToken, baseURL); err != nil {
+			slog.Warn("failed to send password reset email", "email", req.Email, "error", err)
+			slog.Info("password reset token stored", "email", req.Email, "token_hash", tokenHash)
+		}
 		return c.JSON(fiber.Map{"message": "If this email exists, a reset link has been sent"})
 	})
 
@@ -336,13 +358,25 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 		if err := redis.DeleteUserSessions(userID); err != nil {
 			slog.Warn("failed to delete user sessions from redis", "error", err)
 		}
-		events.AuditLog(userID, "session.revoke_all", "session", "", "revoked all other sessions", c.IP())
+		callerTenant, _ := c.Locals("tenant_id").(string)
+		events.AuditLogTenant(callerTenant, userID, "session.revoke_all", "session", "", "revoked all other sessions", c.IP())
 		return c.JSON(fiber.Map{"message": "Other sessions revoked"})
 	})
 
 	// User management (admin only)
 	api.Get("/users", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
-		rows, err := db.DB.Query(`SELECT id, email, name, role, created_at, last_login FROM users ORDER BY created_at DESC`)
+		role, _ := c.Locals("user_role").(string)
+		var rows *sql.Rows
+		var err error
+		if auth.IsSuperAdmin(role) {
+			rows, err = db.DB.Query(`SELECT id, email, name, role, created_at, last_login FROM users ORDER BY created_at DESC`)
+		} else {
+			tenantID, _ := c.Locals("tenant_id").(string)
+			if tenantID == "" {
+				tenantID = "default"
+			}
+			rows, err = db.DB.Query(`SELECT id, email, name, role, created_at, last_login FROM users WHERE tenant_id = ? ORDER BY created_at DESC`, tenantID)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query users"})
 		}
@@ -376,15 +410,67 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 	api.Get("/users/me", func(c *fiber.Ctx) error {
 		userID := c.Locals("user_id").(string)
 		var u struct {
-			ID        string `json:"id"`
-			Email     string `json:"email"`
-			Name      string `json:"name"`
-			Role      string `json:"role"`
-			CreatedAt int64  `json:"created_at"`
+			ID                  string `json:"id"`
+			Email               string `json:"email"`
+			Name                string `json:"name"`
+			Role                string `json:"role"`
+			CreatedAt           int64  `json:"created_at"`
+			TenantID            string `json:"tenant_id"`
+			TenantName          string `json:"tenant_name"`
+			Impersonating       bool   `json:"impersonating"`
+			OriginalRole        string `json:"original_role,omitempty"`
+			OriginalTenantID    string `json:"original_tenant_id,omitempty"`
 		}
-		err := db.DB.QueryRow(`SELECT id, email, name, role, created_at FROM users WHERE id = ?`, userID).Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.CreatedAt)
+		err := db.DB.QueryRow(
+			`SELECT u.id, u.email, u.name, u.role, u.created_at, COALESCE(u.tenant_id,'default'), COALESCE(t.name,'Default')
+			   FROM users u LEFT JOIN tenants t ON t.id = u.tenant_id WHERE u.id = ?`, userID,
+		).Scan(&u.ID, &u.Email, &u.Name, &u.Role, &u.CreatedAt, &u.TenantID, &u.TenantName)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
+		}
+		// Override role + tenant_id with whatever's in the JWT, since we may
+		// be in an impersonation session (role=admin in another tenant).
+		if claimRole, ok := c.Locals("user_role").(string); ok && claimRole != "" {
+			u.Role = claimRole
+		}
+		if claimTid, ok := c.Locals("tenant_id").(string); ok && claimTid != "" {
+			u.TenantID = claimTid
+			var name string
+			if err := db.DB.QueryRow(`SELECT name FROM tenants WHERE id = ?`, claimTid).Scan(&name); err == nil && name != "" {
+				u.TenantName = name
+			}
+		}
+		// Detect impersonation by re-parsing the JWT for impersonation claims
+		token := c.Cookies("auth_token")
+		if token == "" {
+			if h := c.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+				token = strings.TrimPrefix(h, "Bearer ")
+			}
+		}
+		if token != "" {
+			if _, origTid, origRole, ok := auth.ParseImpersonationClaims(token); ok {
+				u.Impersonating = true
+				u.OriginalRole = origRole
+				u.OriginalTenantID = origTid
+			}
+		}
+		// Suspension grace banner (when applicable). Tenant is functional but
+		// users should be told it's been suspended and when access ends.
+		if inGrace, deadline := auth.TenantInGrace(u.TenantID); inGrace {
+			return c.JSON(fiber.Map{
+				"id":                 u.ID,
+				"email":              u.Email,
+				"name":               u.Name,
+				"role":               u.Role,
+				"created_at":         u.CreatedAt,
+				"tenant_id":          u.TenantID,
+				"tenant_name":        u.TenantName,
+				"impersonating":      u.Impersonating,
+				"original_role":      u.OriginalRole,
+				"original_tenant_id": u.OriginalTenantID,
+				"tenant_in_grace":    true,
+				"grace_deadline":     deadline,
+			})
 		}
 		return c.JSON(u)
 	})
@@ -407,20 +493,90 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to hash password"})
 		}
 		if req.Role == "" {
-			req.Role = "admin"
+			req.Role = "user"
 		}
-		if req.Role != "admin" && req.Role != "user" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Role must be admin or user"})
+		callerRole, _ := c.Locals("user_role").(string)
+		validRoles := map[string]bool{"admin": true, "user": true}
+		if auth.IsSuperAdmin(callerRole) {
+			validRoles["super_admin"] = true
+		}
+		if !validRoles[req.Role] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid role"})
+		}
+		// New user inherits caller's tenant unless caller is super_admin and specifies one
+		newUserTenant, _ := c.Locals("tenant_id").(string)
+		if newUserTenant == "" {
+			newUserTenant = "default"
+		}
+		// Enforce tenant user cap (0 = unlimited; super_admin bypasses)
+		if !auth.IsSuperAdmin(callerRole) {
+			var maxUsers int
+			if err := db.DB.QueryRow(`SELECT COALESCE(max_users,0) FROM tenants WHERE id = ?`, newUserTenant).Scan(&maxUsers); err != nil {
+				slog.Warn("could not read tenant user cap", "tenant_id", newUserTenant, "error", err)
+			}
+			if maxUsers > 0 {
+				var count int
+				if err := db.DB.QueryRow(`SELECT COUNT(*) FROM users WHERE tenant_id = ?`, newUserTenant).Scan(&count); err == nil && count >= maxUsers {
+					return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+						"error":   "User limit reached",
+						"message": fmt.Sprintf("Tenant has reached its user cap (%d).", maxUsers),
+					})
+				}
+			}
 		}
 		userID := uuid.New().String()
-		_, err = db.DB.Exec(`INSERT INTO users (id, email, password_hash, name, role, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			userID, req.Email, string(passwordHash), req.Name, req.Role, time.Now().Unix())
+		_, err = db.DB.Exec(`INSERT INTO users (id, email, password_hash, name, role, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			userID, req.Email, string(passwordHash), req.Name, req.Role, time.Now().Unix(), newUserTenant)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create user", "message": err.Error()})
 		}
 		adminID, _ := c.Locals("user_id").(string)
-		events.AuditLog(adminID, "user.create", "user", userID, fmt.Sprintf("created user %s", req.Email), c.IP())
+		events.AuditLogTenant(newUserTenant, adminID, "user.create", "user", userID, fmt.Sprintf("created user %s", req.Email), c.IP())
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": userID, "email": req.Email, "name": req.Name, "role": req.Role, "message": "User created successfully"})
+	})
+
+	api.Put("/users/me/password", func(c *fiber.Ctx) error {
+		userID := c.Locals("user_id").(string)
+		var req struct {
+			CurrentPassword string `json:"current_password"`
+			NewPassword     string `json:"new_password"`
+		}
+		if err := c.BodyParser(&req); err != nil || req.CurrentPassword == "" || req.NewPassword == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "current_password and new_password are required"})
+		}
+		if err := auth.ValidatePasswordStrength(req.NewPassword); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+		var passwordHash string
+		if err := db.DB.QueryRow("SELECT password_hash FROM users WHERE id = ?", userID).Scan(&passwordHash); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to load user"})
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.CurrentPassword)); err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Current password is incorrect"})
+		}
+		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to hash password"})
+		}
+		if _, err := db.DB.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(newHash), userID); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update password"})
+		}
+		// Revoke all other sessions; keep the one making this request
+		currentToken := c.Cookies("auth_token")
+		if currentToken == "" {
+			if h := c.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+				currentToken = strings.TrimPrefix(h, "Bearer ")
+			}
+		}
+		if currentToken != "" {
+			currentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(currentToken)))
+			if _, err := db.DB.Exec(`DELETE FROM user_sessions WHERE user_id = ? AND token_hash != ?`, userID, currentHash); err != nil {
+				slog.Warn("db exec failed", "error", err)
+			}
+		}
+		callerTenant, _ := c.Locals("tenant_id").(string)
+		events.AuditLogTenant(callerTenant, userID, "auth.password_change", "user", userID, "password changed", c.IP())
+		return c.JSON(fiber.Map{"message": "Password updated successfully"})
 	})
 
 	api.Delete("/users/:id", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
@@ -429,7 +585,18 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 		if targetID == adminID {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Cannot delete yourself"})
 		}
-		result, err := db.DB.Exec(`DELETE FROM users WHERE id = ?`, targetID)
+		callerRole, _ := c.Locals("user_role").(string)
+		var result sql.Result
+		var err error
+		if auth.IsSuperAdmin(callerRole) {
+			result, err = db.DB.Exec(`DELETE FROM users WHERE id = ?`, targetID)
+		} else {
+			tenantID, _ := c.Locals("tenant_id").(string)
+			if tenantID == "" {
+				tenantID = "default"
+			}
+			result, err = db.DB.Exec(`DELETE FROM users WHERE id = ? AND tenant_id = ?`, targetID, tenantID)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete user"})
 		}
@@ -442,7 +609,19 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 		if err := redis.DeleteUserSessions(targetID); err != nil {
 			slog.Warn("failed to delete user sessions from redis", "error", err)
 		}
-		events.AuditLog(adminID, "user.delete", "user", targetID, "deleted user", c.IP())
+		callerTenant, _ := c.Locals("tenant_id").(string)
+		events.AuditLogTenant(callerTenant, adminID, "user.delete", "user", targetID, "deleted user", c.IP())
 		return c.JSON(fiber.Map{"message": "User deleted successfully"})
 	})
+}
+
+// sendPasswordResetEmail sends a password reset link via the central email package.
+// Tenant SMTP is resolved by user_id; falls back to 'default' tenant SMTP.
+func sendPasswordResetEmail(toEmail, plainToken, baseURL string) error {
+	var userTenant string
+	if err := db.DB.QueryRow(`SELECT COALESCE(tenant_id,'default') FROM users WHERE email = ?`, toEmail).Scan(&userTenant); err != nil {
+		userTenant = "default"
+	}
+	resetURL := fmt.Sprintf("%s/reset-password?token=%s", strings.TrimRight(baseURL, "/"), plainToken)
+	return email.SendPasswordReset(userTenant, toEmail, resetURL)
 }

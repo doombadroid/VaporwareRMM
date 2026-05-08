@@ -3,25 +3,16 @@
 import { useEffect, useState } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 
-function isTokenExpired(token: string): boolean {
-  try {
-    const payload = JSON.parse(atob(token.split('.')[1]))
-    return payload.exp * 1000 < Date.now()
-  } catch {
-    return true
-  }
-}
-
 export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter()
   const pathname = usePathname()
   const [checked, setChecked] = useState(false)
 
   useEffect(() => {
-    const token = localStorage.getItem('auth_token')
-    const expired = !token || isTokenExpired(token)
+    const expiry = parseInt(localStorage.getItem('auth_expiry') || '0', 10)
+    const expired = !expiry || expiry < Date.now()
     if (expired && pathname !== '/login') {
-      localStorage.removeItem('auth_token')
+      localStorage.removeItem('auth_expiry')
       router.replace('/login')
     } else {
       setChecked(true)

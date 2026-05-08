@@ -1,0 +1,30 @@
+version: '3.8'
+
+# Ephemeral Postgres for integration / load tests.
+# Uses port 5433 to avoid collision with any prod Postgres.
+# Data is on a tmpfs — wiped on every "down".
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d postgres-test
+#   DATABASE_URL=postgres://test:test@localhost:5433/vaporrmm_test?sslmode=disable \
+#     go test -count=1 -run TestPostgres ./packages/server/...
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: vaporrmm-postgres-test
+    environment:
+      POSTGRES_DB: vaporrmm_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d vaporrmm_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 2s

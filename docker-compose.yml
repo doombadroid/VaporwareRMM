@@ -42,6 +42,31 @@ services:
           cpus: '0.5'
           memory: 256M
 
+  # ── Cache / rate limiter / WS pub-sub ─────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: vaporrmm-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - vaporrmm-redis-data:/data
+    networks:
+      - vaporrmm-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 320M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
   # ── API server ────────────────────────────────────────────
   server:
     build:
@@ -49,16 +74,25 @@ services:
       dockerfile: packages/server/Dockerfile
     container_name: vaporrmm-server
     environment:
-      DATABASE_URL:  postgres://vaporrmm:${POSTGRES_PASSWORD}@postgres:5432/vaporrmm?sslmode=disable
-      JWT_SECRET:    ${JWT_SECRET:?set JWT_SECRET in .env}
-      JWT_SECRET_FILE: /run/secrets/jwt_secret
-      SERVER_PORT:   8080
-      CORS_ORIGINS:  ${CORS_ORIGINS:-}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      DATABASE_URL:           postgres://vaporrmm:${POSTGRES_PASSWORD}@postgres:5432/vaporrmm?sslmode=disable
+      REDIS_URL:              redis://redis:6379
+      JWT_SECRET:              ${JWT_SECRET:?set JWT_SECRET in .env}
+      JWT_SECRET_FILE:         /run/secrets/jwt_secret
+      SECRETS_ENCRYPTION_KEY:  ${SECRETS_ENCRYPTION_KEY:?set SECRETS_ENCRYPTION_KEY in .env (openssl rand -base64 32)}
+      SERVER_PORT:             8080
+      CORS_ORIGINS:            ${CORS_ORIGINS:-}
+      ADMIN_PASSWORD:          ${ADMIN_PASSWORD:-}
+      PUBLIC_URL:              ${PUBLIC_URL:-}
+      REGISTRATION_SECRET:     ${REGISTRATION_SECRET:-}
+      BASE_DOMAIN:             ${DOMAIN:-localhost}
+      SUNSHINE_VERSION:        ${SUNSHINE_VERSION:-v2025.628.4510}
+      SUSPENSION_GRACE_HOURS:  ${SUSPENSION_GRACE_HOURS:-72}
     secrets:
       - jwt_secret
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - vaporrmm-internal
@@ -177,6 +211,7 @@ secrets:
 
 volumes:
   vaporrmm-pgdata:
+  vaporrmm-redis-data:
   vaporrmm-caddy-data:
   vaporrmm-caddy-config:
 

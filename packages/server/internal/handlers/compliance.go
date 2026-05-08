@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"database/sql"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -10,7 +12,6 @@ import (
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
-	"log/slog"
 )
 
 func RegisterComplianceRoutes(api fiber.Router, cfg Config) {
@@ -18,7 +19,19 @@ func RegisterComplianceRoutes(api fiber.Router, cfg Config) {
 		now := time.Now().Unix()
 		results := []fiber.Map{}
 		threshold := now - int64(cfg.DefaultOfflineThreshold)
-		offlineRows, err := db.DB.Query(`SELECT id, hostname, last_seen FROM devices WHERE last_seen < ? AND status != 'offline'`, threshold)
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		isSuper := auth.IsSuperAdmin(role)
+		var offlineRows *sql.Rows
+		var err error
+		if isSuper {
+			offlineRows, err = db.DB.Query(`SELECT id, hostname, last_seen FROM devices WHERE last_seen < ? AND status != 'offline'`, threshold)
+		} else {
+			offlineRows, err = db.DB.Query(`SELECT id, hostname, last_seen FROM devices WHERE last_seen < ? AND status != 'offline' AND tenant_id = ?`, threshold, tenantID)
+		}
 		if err == nil {
 			for offlineRows.Next() {
 				var id, hostname string
@@ -33,7 +46,12 @@ func RegisterComplianceRoutes(api fiber.Router, cfg Config) {
 			}
 			offlineRows.Close()
 		}
-		agentRows, err := db.DB.Query(`SELECT id, hostname, agent_version FROM devices WHERE agent_version != '' AND agent_version != '1.1.0'`)
+		var agentRows *sql.Rows
+		if isSuper {
+			agentRows, err = db.DB.Query(`SELECT id, hostname, agent_version FROM devices WHERE agent_version != '' AND agent_version != '1.1.0'`)
+		} else {
+			agentRows, err = db.DB.Query(`SELECT id, hostname, agent_version FROM devices WHERE agent_version != '' AND agent_version != '1.1.0' AND tenant_id = ?`, tenantID)
+		}
 		if err == nil {
 			for agentRows.Next() {
 				var id, hostname, version string
@@ -47,7 +65,12 @@ func RegisterComplianceRoutes(api fiber.Router, cfg Config) {
 			}
 			agentRows.Close()
 		}
-		patchRows, err := db.DB.Query(`SELECT device_id, title, severity FROM patches WHERE status = 'pending'`)
+		var patchRows *sql.Rows
+		if isSuper {
+			patchRows, err = db.DB.Query(`SELECT device_id, title, severity FROM patches WHERE status = 'pending'`)
+		} else {
+			patchRows, err = db.DB.Query(`SELECT device_id, title, severity FROM patches WHERE status = 'pending' AND tenant_id = ?`, tenantID)
+		}
 		if err == nil {
 			for patchRows.Next() {
 				var deviceID, title, severity string
@@ -55,8 +78,14 @@ func RegisterComplianceRoutes(api fiber.Router, cfg Config) {
 					continue
 				}
 				var hostname string
-				if err := db.DB.QueryRow(`SELECT hostname FROM devices WHERE id = ?`, deviceID).Scan(&hostname); err != nil {
-					slog.Warn("db query row scan failed", "error", err)
+				var hostErr error
+				if isSuper {
+					hostErr = db.DB.QueryRow(`SELECT hostname FROM devices WHERE id = ?`, deviceID).Scan(&hostname)
+				} else {
+					hostErr = db.DB.QueryRow(`SELECT hostname FROM devices WHERE id = ? AND tenant_id = ?`, deviceID, tenantID).Scan(&hostname)
+				}
+				if hostErr != nil {
+					continue // skip devices not visible to caller
 				}
 				results = append(results, fiber.Map{"device_id": deviceID, "hostname": hostname, "check": "pending_patches", "status": "fail", "details": fmt.Sprintf("Pending patch: %s", title), "severity": severity})
 			}
@@ -65,12 +94,15 @@ func RegisterComplianceRoutes(api fiber.Router, cfg Config) {
 			}
 			patchRows.Close()
 		}
-		var adminCount int
-		if err := db.DB.QueryRow(`SELECT COUNT(*) FROM users WHERE email = 'admin@vaporrmm.local' AND last_login > 0`).Scan(&adminCount); err != nil {
-			slog.Warn("db query row scan failed", "error", err)
-		}
-		if adminCount > 0 {
-			results = append(results, fiber.Map{"device_id": "", "hostname": "server", "check": "default_admin", "status": "warning", "details": "Default admin account is still in use. Consider creating a dedicated admin user.", "severity": "medium"})
+		// Default-admin check is global; only run for super_admin
+		if isSuper {
+			var adminCount int
+			if err := db.DB.QueryRow(`SELECT COUNT(*) FROM users WHERE email = 'admin@vaporrmm.local' AND last_login > 0`).Scan(&adminCount); err != nil {
+				slog.Warn("db query row scan failed", "error", err)
+			}
+			if adminCount > 0 {
+				results = append(results, fiber.Map{"device_id": "", "hostname": "server", "check": "default_admin", "status": "warning", "details": "Default admin account is still in use. Consider creating a dedicated admin user.", "severity": "medium"})
+			}
 		}
 		for _, r := range results {
 			resultID := uuid.New().String()
@@ -79,13 +111,13 @@ func RegisterComplianceRoutes(api fiber.Router, cfg Config) {
 			status, _ := r["status"].(string)
 			details, _ := r["details"].(string)
 			severity, _ := r["severity"].(string)
-			if _, err := db.DB.Exec(`INSERT INTO compliance_results (id, device_id, check_type, status, details, severity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				resultID, deviceID, checkType, status, details, severity, now); err != nil {
+			if _, err := db.DB.Exec(`INSERT INTO compliance_results (id, device_id, check_type, status, details, severity, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				resultID, deviceID, checkType, status, details, severity, now, tenantID); err != nil {
 				slog.Warn("db exec failed", "error", err)
 			}
 		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "compliance.scan", "compliance", "", fmt.Sprintf("scanned %d issues", len(results)), c.IP())
+		events.AuditLogTenant(tenantID, userID, "compliance.scan", "compliance", "", fmt.Sprintf("scanned %d issues", len(results)), c.IP())
 		return c.JSON(fiber.Map{"scanned_at": now, "issues": len(results), "results": results})
 	})
 
@@ -99,7 +131,18 @@ func RegisterComplianceRoutes(api fiber.Router, cfg Config) {
 		if limit > cfg.MaxAuditLimit {
 			limit = cfg.MaxAuditLimit
 		}
-		rows, err := db.DB.Query(`SELECT id, device_id, check_type, status, details, severity, created_at FROM compliance_results ORDER BY created_at DESC LIMIT ?`, limit)
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		var rows *sql.Rows
+		var err error
+		if auth.IsSuperAdmin(role) {
+			rows, err = db.DB.Query(`SELECT id, device_id, check_type, status, details, severity, created_at FROM compliance_results ORDER BY created_at DESC LIMIT ?`, limit)
+		} else {
+			rows, err = db.DB.Query(`SELECT id, device_id, check_type, status, details, severity, created_at FROM compliance_results WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`, tenantID, limit)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query compliance results"})
 		}

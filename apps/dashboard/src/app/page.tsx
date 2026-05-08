@@ -11,6 +11,7 @@ import {
   devices as devicesApi,
   branding as brandingApi,
 } from '@/lib/api'
+import api from '@/lib/api'
 import AuthGuard from '@/components/AuthGuard'
 import { useBranding } from '@/components/BrandingProvider'
 import DashboardShell from '@/components/layout/DashboardShell'
@@ -192,15 +193,8 @@ export default function DashboardPage() {
       return
     }
     try {
-      const token = localStorage.getItem('auth_token')
-      const res = await fetch('/api/v1/compliance/scan', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (res.ok) {
-        toast.success('Security scan started')
-      } else {
-        toast.error('Failed to start scan')
-      }
+      await api.get('/compliance/scan')
+      toast.success('Security scan started')
     } catch {
       toast.error('Failed to start scan')
     }
@@ -208,18 +202,9 @@ export default function DashboardPage() {
 
   const handleScanSecurity = async () => {
     try {
-      const token = localStorage.getItem('auth_token')
-      const res = await fetch('/api/v1/compliance/scan', {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (res.ok) {
-        const data = await res.json()
-        toast.success(`Scan complete: ${data.issues || 0} issues found`)
-        loadData()
-      } else {
-        toast.error('Failed to run security scan')
-      }
+      const { data } = await api.get('/compliance/scan')
+      toast.success(`Scan complete: ${data.issues || 0} issues found`)
+      loadData()
     } catch {
       toast.error('Failed to run security scan')
     }

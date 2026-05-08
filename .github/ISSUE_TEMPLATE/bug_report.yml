@@ -1,0 +1,81 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly.
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        **Security issues:** do not file them here. Email `security@tcitsys.com`.
+        See [SECURITY.md](https://github.com/Doomba/vaporRMM/blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `git rev-parse HEAD` (or the release tag you're on).
+      placeholder: e.g. v0.1.0-alpha or 4f826dfb
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - docker compose (single-node)
+        - docker compose (multi-node + Redis)
+        - bare metal / systemd
+        - dev (npm run dev + go run)
+        - other (describe in body)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: db
+    attributes:
+      label: Database
+      options:
+        - SQLite
+        - PostgreSQL
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Concise description of the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Numbered steps that reliably reproduce the issue.
+      placeholder: |
+        1. Start docker compose with ...
+        2. Log in as ...
+        3. Click ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Server logs (`docker compose logs server`), browser console errors, or
+        agent logs (`/var/log/vaporrmm-agent.log`). Redact secrets.
+      render: shell

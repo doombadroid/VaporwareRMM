@@ -1,41 +1,90 @@
 # vaporRMM Caddyfile
 #
-# DOMAIN env var controls TLS behaviour:
-#   DOMAIN=localhost          → Caddy local CA (self-signed, no internet needed)
-#   DOMAIN=rmm.example.com   → Caddy auto-provisions Let's Encrypt (port 80+443 must be public)
+# DOMAIN          base hostname (e.g. rmm.example.com). Required for cert issuance.
+# ACME_EMAIL      contact for Let's Encrypt
+# BASE_DOMAIN     same as DOMAIN, used by the server's tenant-host resolver.
+#                 Tenant subdomains live underneath: <slug>.<BASE_DOMAIN>.
 #
-# Set ACME_EMAIL for Let's Encrypt registration (required for real domains).
+# On-demand TLS issues a certificate for any *.{$DOMAIN} that the server
+# acknowledges via /caddy/ask?domain=... (200 OK = issue, 404 = refuse).
 
 {
     email {$ACME_EMAIL:admin@localhost}
+
+    # Allow on-demand TLS gated by the ask endpoint.
+    on_demand_tls {
+        ask http://server:8080/caddy/ask
+        # Limit issuance rate to slow down accidental misconfigs.
+        burst 5
+    }
 }
 
+# ── Apex domain (login + super-admin + non-tenant routes) ─────────
 {$DOMAIN:localhost} {
-    # ── Compression ─────────────────────────────────────────
     encode gzip
 
-    # ── Backend: Go API server ───────────────────────────────
-    # All vaporRMM API routes
     handle /api/* {
         reverse_proxy server:8080
     }
 
-    # Health check (public, no /api prefix)
     handle /health {
         reverse_proxy server:8080
     }
 
-    # Agent registration and heartbeat endpoints
     handle /agent/* {
         reverse_proxy server:8080
     }
 
-    # ── Frontend: Next.js dashboard ──────────────────────────
+    # /caddy/ask is intentionally NOT proxied to the public.
+    # Caddy reaches it directly via http://server:8080/caddy/ask on the
+    # internal docker network (configured in the on_demand_tls block above).
+    # Exposing it here would let attackers enumerate tenant slugs.
+
+    handle /ws {
+        reverse_proxy server:8080
+    }
+
     handle {
         reverse_proxy dashboard:3000
     }
 
-    # ── Logging ──────────────────────────────────────────────
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+}
+
+# ── Tenant subdomains: *.{$DOMAIN} ─────────────────────────────────
+# Caddy will obtain a TLS cert for every subdomain that /caddy/ask
+# returns 200 for (i.e. every active tenant slug). Same routes as apex.
+*.{$DOMAIN:localhost} {
+    encode gzip
+
+    tls {
+        on_demand
+    }
+
+    handle /api/* {
+        reverse_proxy server:8080
+    }
+
+    handle /health {
+        reverse_proxy server:8080
+    }
+
+    handle /agent/* {
+        reverse_proxy server:8080
+    }
+
+    handle /ws {
+        reverse_proxy server:8080
+    }
+
+    handle {
+        reverse_proxy dashboard:3000
+    }
+
     log {
         output stdout
         format console

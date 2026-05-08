@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,43 +20,58 @@ import (
 	"vaporrmm/server/internal/utils"
 )
 
+var tsAuthKeyRe = regexp.MustCompile(`^[a-zA-Z0-9_:-]+$`)
+
+// tenantFilter returns a SQL fragment and its args to enforce tenant scoping.
+// Returns "", nil for super_admin (cross-tenant access).
+// Returns " AND tenant_id = ?", [tid] for everyone else.
+func tenantFilter(c *fiber.Ctx) (string, []interface{}) {
+	role, _ := c.Locals("user_role").(string)
+	if role == "super_admin" {
+		return "", nil
+	}
+	tenantID, _ := c.Locals("tenant_id").(string)
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	return " AND tenant_id = ?", []interface{}{tenantID}
+}
+
+// callerTenantID returns the tenant_id from the request locals (default fallback).
+func callerTenantID(c *fiber.Ctx) string {
+	tenantID, _ := c.Locals("tenant_id").(string)
+	if tenantID == "" {
+		return "default"
+	}
+	return tenantID
+}
+
+// csvSafe prefixes values that start with formula-triggering characters so
+// spreadsheet applications (Excel, LibreOffice) do not execute them as formulas.
+func csvSafe(s string) string {
+	if len(s) > 0 {
+		switch s[0] {
+		case '=', '+', '-', '@', '\t', '\r':
+			return "'" + s
+		}
+	}
+	return s
+}
+
 var allowedCommandTypes = map[string]bool{
 	"shell":  true,
 	"script": true,
 }
 
 func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
-	// List devices (simple)
-	devices.Get("/", func(c *fiber.Ctx) error {
-		rows, err := db.DB.Query(`SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version,
-			status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model,
-			cpu, memory, disk_size, timezone, agent_port, agent_ip, tags FROM devices ORDER BY last_seen DESC`)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query devices"})
-		}
-		defer rows.Close()
-
-		deviceList := []models.ServerDevice{}
-		for rows.Next() {
-			d, err := utils.ScanDevice(rows)
-			if err != nil {
-				slog.Error("error scanning device", "error", err)
-				continue
-			}
-			deviceList = append(deviceList, *d)
-		}
-		if err := rows.Err(); err != nil {
-			slog.Warn("rows iteration error", "error", err)
-		}
-		return c.JSON(deviceList)
-	})
-
 	// Get device by ID
 	devices.Get("/:id", func(c *fiber.Ctx) error {
 		id := c.Params("id")
+		tf, tArgs := tenantFilter(c)
+		args := append([]interface{}{id}, tArgs...)
 		row := db.DB.QueryRow(`SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version,
 			status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model,
-			cpu, memory, disk_size, timezone, agent_port, agent_ip, tags FROM devices WHERE id = ?`, id)
+			cpu, memory, disk_size, timezone, agent_port, agent_ip, tags FROM devices WHERE id = ?`+tf, args...)
 		d, err := utils.ScanDevice(row)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
@@ -72,14 +88,14 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		deviceID := uuid.New().String()
 		now := time.Now().Unix()
 		userID, _ := c.Locals("user_id").(string)
-		_, err := db.DB.Exec(`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, status, last_seen, created_at, user_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		_, err := db.DB.Exec(`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, status, last_seen, created_at, user_id, tenant_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			deviceID, device.Name, device.Hostname, device.IPAddress, device.MacAddress,
-			device.OSName, device.OSVersion, "offline", now, now, userID)
+			device.OSName, device.OSVersion, "offline", now, now, userID, callerTenantID(c))
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to insert device"})
 		}
-		events.AuditLog(userID, "device.create", "device", deviceID, fmt.Sprintf("created device %s", device.Hostname), c.IP())
+		events.AuditLogTenant(callerTenantID(c), userID, "device.create", "device", deviceID, fmt.Sprintf("created device %s", device.Hostname), c.IP())
 		return c.Status(fiber.StatusCreated).JSON(models.ServerDevice{
 			ID: deviceID, Name: device.Name, Hostname: device.Hostname, IPAddress: device.IPAddress,
 			OSName: device.OSName, OSVersion: device.OSVersion, Status: "offline", CreatedAt: now, LastSeen: now,
@@ -113,8 +129,10 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			args = append(args, strings.Join(*update.Tags, ","))
 		}
 		args = append(args, id)
+		tf, tArgs := tenantFilter(c)
+		args = append(args, tArgs...)
 
-		query := fmt.Sprintf("UPDATE devices SET %s WHERE id = ?", strings.Join(fields, ", "))
+		query := fmt.Sprintf("UPDATE devices SET %s WHERE id = ?"+tf, strings.Join(fields, ", "))
 		result, err := db.DB.Exec(query, args...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update device"})
@@ -123,57 +141,76 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
 		}
 
+		readArgs := append([]interface{}{id}, tArgs...)
 		row := db.DB.QueryRow(`SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version,
 			status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model,
-			cpu, memory, disk_size, timezone, agent_port, agent_ip, tags FROM devices WHERE id = ?`, id)
+			cpu, memory, disk_size, timezone, agent_port, agent_ip, tags FROM devices WHERE id = ?`+tf, readArgs...)
 		d, err := utils.ScanDevice(row)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found after update"})
 		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "device.update", "device", id, "updated device", c.IP())
+		events.AuditLogTenant(callerTenantID(c), userID, "device.update", "device", id, "updated device", c.IP())
 		return c.JSON(d)
 	})
 
 	// Delete device
 	devices.Delete("/:id", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		result, err := db.DB.Exec("DELETE FROM devices WHERE id = ?", id)
+		tf, tArgs := tenantFilter(c)
+		args := append([]interface{}{id}, tArgs...)
+		result, err := db.DB.Exec("DELETE FROM devices WHERE id = ?"+tf, args...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete device"})
 		}
 		if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
 		}
+		callerTenant := callerTenantID(c)
+		role, _ := c.Locals("user_role").(string)
+		isSuper := auth.IsSuperAdmin(role)
 		auth.TokenMu.Lock()
 		for token, at := range auth.RegisteredTokens {
-			if at.DeviceID == id {
-				delete(auth.RegisteredTokens, token)
+			if at.DeviceID != id {
+				continue
+			}
+			if !isSuper && at.TenantID != callerTenant {
+				continue
+			}
+			delete(auth.RegisteredTokens, token)
+			if isSuper {
 				if _, err := db.DB.Exec(`DELETE FROM agent_tokens WHERE token_hash = ?`, token); err != nil {
 					slog.Warn("db exec failed", "error", err)
 				}
-				break
+			} else {
+				if _, err := db.DB.Exec(`DELETE FROM agent_tokens WHERE token_hash = ? AND tenant_id = ?`, token, callerTenant); err != nil {
+					slog.Warn("db exec failed", "error", err)
+				}
 			}
+			break
 		}
 		auth.TokenMu.Unlock()
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "device.delete", "device", id, "deleted device", c.IP())
+		events.AuditLogTenant(callerTenant, userID, "device.delete", "device", id, "deleted device", c.IP())
 		return c.JSON(fiber.Map{"message": "Device deleted successfully"})
 	})
 
 	// Heartbeat
 	devices.Post("/:id/heartbeat", func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		result, err := db.DB.Exec("UPDATE devices SET last_seen = ?, status = ? WHERE id = ?", time.Now().Unix(), "online", id)
+		tf, tArgs := tenantFilter(c)
+		updArgs := append([]interface{}{time.Now().Unix(), "online", id}, tArgs...)
+		result, err := db.DB.Exec("UPDATE devices SET last_seen = ?, status = ? WHERE id = ?"+tf, updArgs...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update heartbeat"})
 		}
 		if rowsAffected, _ := result.RowsAffected(); rowsAffected == 0 {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
 		}
+		readArgs := append([]interface{}{id}, tArgs...)
 		row := db.DB.QueryRow(`SELECT id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version,
 			status, last_seen, created_at, public_key, user_data, system_uuid, serial_number, manufacturer, model,
-			cpu, memory, disk_size, timezone, agent_port, agent_ip, tags FROM devices WHERE id = ?`, id)
+			cpu, memory, disk_size, timezone, agent_port, agent_ip, tags FROM devices WHERE id = ?`+tf, readArgs...)
 		d, err := utils.ScanDevice(row)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
@@ -198,7 +235,9 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid command type"})
 		}
 
-		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`, id)
+		tf, tArgs := tenantFilter(c)
+		lookupArgs := append([]interface{}{id}, tArgs...)
+		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`+tf, lookupArgs...)
 		d, err := utils.ScanDevice(row)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
@@ -209,8 +248,8 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			ID: cmdID, Type: cmdReq.Type, Payload: map[string]interface{}{"command": cmdReq.Command}, CreatedAt: time.Now(),
 		}
 		payloadJSON, _ := json.Marshal(cmdData)
-		_, err = db.DB.Exec(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			cmdID, id, cmdReq.Type, string(payloadJSON), "pending", time.Now().Unix())
+		_, err = db.DB.Exec(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			cmdID, id, cmdReq.Type, string(payloadJSON), "pending", time.Now().Unix(), callerTenantID(c))
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create command"})
 		}
@@ -248,7 +287,7 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		}()
 
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "device.command", "device", id, fmt.Sprintf("sent %s command", cmdReq.Type), c.IP())
+		events.AuditLogTenant(callerTenantID(c), userID, "device.command", "device", id, fmt.Sprintf("sent %s command", cmdReq.Type), c.IP())
 		return c.JSON(fiber.Map{"message": "Command sent", "command_id": cmdID})
 	})
 
@@ -259,7 +298,9 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		var agentIP *string
 		var sunshineInstalled, sunshineRunning int
 		var sunshinePort int
-		err := db.DB.QueryRow(`SELECT hostname, ip_address, agent_ip, COALESCE(sunshine_installed,0), COALESCE(sunshine_running,0), COALESCE(sunshine_port,?) FROM devices WHERE id = ?`, cfg.DefaultSunshinePort, id).Scan(
+		tf, tArgs := tenantFilter(c)
+		args := append([]interface{}{cfg.DefaultSunshinePort, id}, tArgs...)
+		err := db.DB.QueryRow(`SELECT hostname, ip_address, agent_ip, COALESCE(sunshine_installed,0), COALESCE(sunshine_running,0), COALESCE(sunshine_port,?) FROM devices WHERE id = ?`+tf, args...).Scan(
 			&hostname, &ipAddress, &agentIP, &sunshineInstalled, &sunshineRunning, &sunshinePort)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
@@ -279,7 +320,8 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 	// Install Sunshine on device
 	devices.Post("/:id/sunshine/install", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`, id)
+		tf, tArgs := tenantFilter(c)
+		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`+tf, append([]interface{}{id}, tArgs...)...)
 		d, err := utils.ScanDevice(row)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
@@ -288,11 +330,11 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		var installCmd string
 		switch d.OSName {
 		case "windows":
-			installCmd = `powershell -Command "Invoke-WebRequest -Uri 'https://github.com/LizardByte/Sunshine/releases/download/v2025.628.4510/sunshine-windows-installer.exe' -OutFile '$env:TEMP\sunshine.exe'; Start-Process -Wait -FilePath '$env:TEMP\sunshine.exe' -ArgumentList '/S'"`
+			installCmd = fmt.Sprintf(`powershell -Command "Invoke-WebRequest -Uri 'https://github.com/LizardByte/Sunshine/releases/download/%s/sunshine-windows-installer.exe' -OutFile '$env:TEMP\sunshine.exe'; Start-Process -Wait -FilePath '$env:TEMP\sunshine.exe' -ArgumentList '/S'"`, cfg.SunshineVersion)
 		case "darwin":
 			installCmd = `brew install sunshine 2>/dev/null || echo "Install Homebrew first: https://brew.sh"`
 		default:
-			installCmd = `curl -fsSL https://github.com/LizardByte/Sunshine/releases/download/v2025.628.4510/sunshine-ubuntu-24.04-amd64.deb -o /tmp/sunshine.deb && dpkg -i /tmp/sunshine.deb || apt-get install -f -y`
+			installCmd = fmt.Sprintf(`curl -fsSL https://github.com/LizardByte/Sunshine/releases/download/%s/sunshine-ubuntu-24.04-amd64.deb -o /tmp/sunshine.deb && dpkg -i /tmp/sunshine.deb || apt-get install -f -y`, cfg.SunshineVersion)
 		}
 
 		cmdID := uuid.New().String()
@@ -300,8 +342,8 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			ID: cmdID, Type: "shell", Payload: map[string]interface{}{"command": installCmd}, CreatedAt: time.Now(),
 		}
 		payloadJSON, _ := json.Marshal(cmdData)
-		_, err = db.DB.Exec(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			cmdID, id, "shell", string(payloadJSON), "pending", time.Now().Unix())
+		_, err = db.DB.Exec(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			cmdID, id, "shell", string(payloadJSON), "pending", time.Now().Unix(), callerTenantID(c))
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create command"})
 		}
@@ -339,14 +381,15 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		}()
 
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "device.sunshine.install", "device", id, "sent sunshine install command", c.IP())
+		events.AuditLogTenant(callerTenantID(c), userID, "device.sunshine.install", "device", id, "sent sunshine install command", c.IP())
 		return c.JSON(fiber.Map{"message": "Sunshine install command sent", "command_id": cmdID})
 	})
 
 	// Fetch Sunshine pairing PIN from device
 	devices.Get("/:id/sunshine/pin", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`, id)
+		tf, tArgs := tenantFilter(c)
+		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`+tf, append([]interface{}{id}, tArgs...)...)
 		d, err := utils.ScanDevice(row)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
@@ -382,7 +425,8 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 	// Install Tailscale on device
 	devices.Post("/:id/tailscale/install", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`, id)
+		tf, tArgs := tenantFilter(c)
+		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`+tf, append([]interface{}{id}, tArgs...)...)
 		d, err := utils.ScanDevice(row)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
@@ -404,6 +448,9 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		}
 
 		if req.AuthKey != "" {
+			if len(req.AuthKey) > 256 || !tsAuthKeyRe.MatchString(req.AuthKey) {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid auth key format"})
+			}
 			installCmd += fmt.Sprintf(` && tailscale up --authkey %s --accept-routes`, req.AuthKey)
 		}
 
@@ -412,8 +459,8 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			ID: cmdID, Type: "shell", Payload: map[string]interface{}{"command": installCmd}, CreatedAt: time.Now(),
 		}
 		payloadJSON, _ := json.Marshal(cmdData)
-		_, err = db.DB.Exec(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			cmdID, id, "shell", string(payloadJSON), "pending", time.Now().Unix())
+		_, err = db.DB.Exec(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			cmdID, id, "shell", string(payloadJSON), "pending", time.Now().Unix(), callerTenantID(c))
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create command"})
 		}
@@ -451,7 +498,7 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		}()
 
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "device.tailscale.install", "device", id, "sent tailscale install command", c.IP())
+		events.AuditLogTenant(callerTenantID(c), userID, "device.tailscale.install", "device", id, "sent tailscale install command", c.IP())
 		return c.JSON(fiber.Map{"message": "Tailscale install command sent", "command_id": cmdID})
 	})
 
@@ -461,7 +508,8 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		var hostname, ipAddress string
 		var agentIP, tailscaleIP, tailscaleHostname, tailscaleBackendState *string
 		var tailscaleInstalled, tailscaleConnected, tailscalePeers int
-		err := db.DB.QueryRow(`SELECT hostname, ip_address, agent_ip, COALESCE(tailscale_installed,0), COALESCE(tailscale_connected,0), tailscale_ip, tailscale_hostname, COALESCE(tailscale_peers,0), tailscale_backend_state FROM devices WHERE id = ?`, id).Scan(
+		tf, tArgs := tenantFilter(c)
+		err := db.DB.QueryRow(`SELECT hostname, ip_address, agent_ip, COALESCE(tailscale_installed,0), COALESCE(tailscale_connected,0), tailscale_ip, tailscale_hostname, COALESCE(tailscale_peers,0), tailscale_backend_state FROM devices WHERE id = ?`+tf, append([]interface{}{id}, tArgs...)...).Scan(
 			&hostname, &ipAddress, &agentIP, &tailscaleInstalled, &tailscaleConnected, &tailscaleIP, &tailscaleHostname, &tailscalePeers, &tailscaleBackendState)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
@@ -487,7 +535,8 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 
 	devices.Post("/:id/tailscale/auth-key", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		_, err := utils.ScanDevice(db.DB.QueryRow(`SELECT id, hostname FROM devices WHERE id = ?`, id))
+		tf, tArgs := tenantFilter(c)
+		_, err := utils.ScanDevice(db.DB.QueryRow(`SELECT id, hostname FROM devices WHERE id = ?`+tf, append([]interface{}{id}, tArgs...)...))
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
 		}
@@ -560,8 +609,13 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			whereParts = append(whereParts, "(hostname LIKE ? OR name LIKE ?)")
 			args = append(args, "%"+search+"%", "%"+search+"%")
 		}
-		role := c.Locals("user_role")
-		if role != "admin" {
+		role, _ := c.Locals("user_role").(string)
+		if !auth.IsSuperAdmin(role) {
+			whereParts = append(whereParts, "tenant_id = ?")
+			args = append(args, callerTenantID(c))
+		}
+		// Non-admin users (within a tenant) only see devices they own
+		if role != "admin" && !auth.IsSuperAdmin(role) {
 			userID, ok := c.Locals("user_id").(string)
 			if ok && userID != "" {
 				whereParts = append(whereParts, "(user_id = ? OR user_id IS NULL)")
@@ -602,7 +656,13 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 	// Export devices CSV
 	devices.Get("/export", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		format := c.Query("format", "csv")
-		rows, err := db.DB.Query(`SELECT id, hostname, ip_address, mac_address, os_name, os_version, agent_version, status, last_seen, created_at, cpu, memory, disk_size FROM devices ORDER BY hostname`)
+		tf, tArgs := tenantFilter(c)
+		exportQ := `SELECT id, hostname, ip_address, mac_address, os_name, os_version, agent_version, status, last_seen, created_at, cpu, memory, disk_size FROM devices`
+		if tf != "" {
+			exportQ += " WHERE 1=1" + tf
+		}
+		exportQ += " ORDER BY hostname"
+		rows, err := db.DB.Query(exportQ, tArgs...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query devices"})
 		}
@@ -629,9 +689,10 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 					disk = *d.DiskSize
 				}
 				buf.WriteString(fmt.Sprintf("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%d,%d\n",
-					d.ID, d.Hostname, d.IPAddress, d.MacAddress, d.OSName, d.OSVersion, d.AgentVersion,
+					d.ID, csvSafe(d.Hostname), csvSafe(d.IPAddress), csvSafe(d.MacAddress),
+					csvSafe(d.OSName), csvSafe(d.OSVersion), csvSafe(d.AgentVersion),
 					d.Status, time.Unix(lastSeen, 0).Format(time.RFC3339), time.Unix(createdAt, 0).Format(time.RFC3339),
-					cpu, mem, disk))
+					csvSafe(cpu), mem, disk))
 			}
 			if err := rows.Err(); err != nil {
 				slog.Warn("rows iteration error", "error", err)
@@ -655,24 +716,39 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "No device IDs provided"})
 		}
 		placeholders := make([]string, len(req.IDs))
-		args := make([]interface{}, len(req.IDs))
+		args := make([]interface{}, 0, len(req.IDs)+1)
 		for i, id := range req.IDs {
 			placeholders[i] = "?"
-			args[i] = id
+			args = append(args, id)
 		}
-		query := "DELETE FROM devices WHERE id IN (" + strings.Join(placeholders, ",") + ")"
+		tf, tArgs := tenantFilter(c)
+		args = append(args, tArgs...)
+		query := "DELETE FROM devices WHERE id IN (" + strings.Join(placeholders, ",") + ")" + tf
 		result, err := db.DB.Exec(query, args...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete devices"})
 		}
 		rowsAffected, _ := result.RowsAffected()
+		callerTenant := callerTenantID(c)
+		role, _ := c.Locals("user_role").(string)
+		isSuper := auth.IsSuperAdmin(role)
 		auth.TokenMu.Lock()
 		for token, at := range auth.RegisteredTokens {
+			// Tenant gate: never delete tokens belonging to another tenant unless caller is super_admin.
+			if !isSuper && at.TenantID != callerTenant {
+				continue
+			}
 			for _, id := range req.IDs {
 				if at.DeviceID == id {
 					delete(auth.RegisteredTokens, token)
-					if _, err := db.DB.Exec(`DELETE FROM agent_tokens WHERE token_hash = ?`, token); err != nil {
-						slog.Warn("db exec failed", "error", err)
+					if isSuper {
+						if _, err := db.DB.Exec(`DELETE FROM agent_tokens WHERE token_hash = ?`, token); err != nil {
+							slog.Warn("db exec failed", "error", err)
+						}
+					} else {
+						if _, err := db.DB.Exec(`DELETE FROM agent_tokens WHERE token_hash = ? AND tenant_id = ?`, token, callerTenant); err != nil {
+							slog.Warn("db exec failed", "error", err)
+						}
 					}
 					break
 				}
@@ -680,7 +756,7 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		}
 		auth.TokenMu.Unlock()
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "device.bulk_delete", "device", "", fmt.Sprintf("bulk deleted %d devices", rowsAffected), c.IP())
+		events.AuditLogTenant(callerTenant, userID, "device.bulk_delete", "device", "", fmt.Sprintf("bulk deleted %d devices", rowsAffected), c.IP())
 		return c.JSON(fiber.Map{"message": "Devices deleted successfully", "deleted": rowsAffected})
 	})
 
@@ -688,7 +764,8 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 	devices.Get("/:id/metrics", func(c *fiber.Ctx) error {
 		id := c.Params("id")
 		var exists int
-		if err := db.DB.QueryRow(`SELECT COUNT(*) FROM devices WHERE id = ?`, id).Scan(&exists); err != nil || exists == 0 {
+		tf, tArgs := tenantFilter(c)
+		if err := db.DB.QueryRow(`SELECT COUNT(*) FROM devices WHERE id = ?`+tf, append([]interface{}{id}, tArgs...)...).Scan(&exists); err != nil || exists == 0 {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
 		}
 		since := time.Now().Unix() - 3600
@@ -697,7 +774,9 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 				since = parsed
 			}
 		}
-		rows, err := db.DB.Query(`SELECT recorded_at, cpu_usage, memory_usage, disk_usage FROM metrics_history WHERE device_id = ? AND recorded_at > ? ORDER BY recorded_at ASC`, id, since)
+		mtf, mtArgs := tenantFilter(c)
+		mArgs := append([]interface{}{id, since}, mtArgs...)
+		rows, err := db.DB.Query(`SELECT recorded_at, cpu_usage, memory_usage, disk_usage FROM metrics_history WHERE device_id = ? AND recorded_at > ?`+mtf+` ORDER BY recorded_at ASC`, mArgs...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query metrics"})
 		}
@@ -737,7 +816,10 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		if limit > cfg.MaxCommandLimit {
 			limit = 200
 		}
-		rows, err := db.DB.Query(`SELECT id, type, payload, status, output, created_at, finished_at FROM device_commands WHERE device_id = ? ORDER BY created_at DESC LIMIT ?`, id, limit)
+		ctf, ctArgs := tenantFilter(c)
+		cArgs := append([]interface{}{id}, ctArgs...)
+		cArgs = append(cArgs, limit)
+		rows, err := db.DB.Query(`SELECT id, type, payload, status, output, created_at, finished_at FROM device_commands WHERE device_id = ?`+ctf+` ORDER BY created_at DESC LIMIT ?`, cArgs...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query commands"})
 		}
@@ -774,7 +856,9 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 	// ============================================================
 	devices.Get("/:id/file-transfers", func(c *fiber.Ctx) error {
 		deviceID := c.Params("id")
-		rows, err := db.DB.Query(`SELECT id, device_id, type, file_name, file_path, status, progress, created_at, completed_at FROM file_transfers WHERE device_id = ? ORDER BY created_at DESC`, deviceID)
+		ftf, ftArgs := tenantFilter(c)
+		ftQArgs := append([]interface{}{deviceID}, ftArgs...)
+		rows, err := db.DB.Query(`SELECT id, device_id, type, file_name, file_path, status, progress, created_at, completed_at FROM file_transfers WHERE device_id = ?`+ftf+` ORDER BY created_at DESC`, ftQArgs...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query file transfers"})
 		}
@@ -824,14 +908,21 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		if req.Type != "upload" && req.Type != "download" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "type must be upload or download"})
 		}
+		// Verify the parent device belongs to caller's tenant before creating a child row.
+		var deviceTenant string
+		dtf, dtArgs := tenantFilter(c)
+		dArgs := append([]interface{}{deviceID}, dtArgs...)
+		if err := db.DB.QueryRow(`SELECT COALESCE(tenant_id,'default') FROM devices WHERE id = ?`+dtf, dArgs...).Scan(&deviceTenant); err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
+		}
 		transferID := uuid.New().String()
-		_, err := db.DB.Exec(`INSERT INTO file_transfers (id, device_id, type, file_name, file_path, status, progress, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			transferID, deviceID, req.Type, req.FileName, req.FilePath, "pending", 0, time.Now().Unix())
+		_, err := db.DB.Exec(`INSERT INTO file_transfers (id, device_id, type, file_name, file_path, status, progress, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			transferID, deviceID, req.Type, req.FileName, req.FilePath, "pending", 0, time.Now().Unix(), deviceTenant)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create file transfer"})
 		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "file_transfer.create", "file_transfer", transferID, fmt.Sprintf("created %s transfer for %s", req.Type, req.FileName), c.IP())
+		events.AuditLogTenant(deviceTenant, userID, "file_transfer.create", "file_transfer", transferID, fmt.Sprintf("created %s transfer for %s", req.Type, req.FileName), c.IP())
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": transferID, "device_id": deviceID, "type": req.Type, "file_name": req.FileName, "file_path": req.FilePath, "status": "pending", "message": "File transfer created"})
 	})
 
@@ -840,7 +931,9 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 	// ============================================================
 	api.Get("/devices/:id/patches", func(c *fiber.Ctx) error {
 		deviceID := c.Params("id")
-		rows, err := db.DB.Query(`SELECT id, device_id, title, description, severity, status, installed_at, created_at FROM patches WHERE device_id = ? ORDER BY created_at DESC`, deviceID)
+		ptf, ptArgs := tenantFilter(c)
+		pArgs := append([]interface{}{deviceID}, ptArgs...)
+		rows, err := db.DB.Query(`SELECT id, device_id, title, description, severity, status, installed_at, created_at FROM patches WHERE device_id = ?`+ptf+` ORDER BY created_at DESC`, pArgs...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query patches"})
 		}
@@ -886,14 +979,21 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		if req.Severity == "" {
 			req.Severity = "medium"
 		}
+		// Verify the parent device belongs to caller's tenant first
+		var deviceTenant string
+		ptf, ptArgs := tenantFilter(c)
+		dArgs := append([]interface{}{deviceID}, ptArgs...)
+		if err := db.DB.QueryRow(`SELECT COALESCE(tenant_id,'default') FROM devices WHERE id = ?`+ptf, dArgs...).Scan(&deviceTenant); err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
+		}
 		patchID := uuid.New().String()
-		_, err := db.DB.Exec(`INSERT INTO patches (id, device_id, title, description, severity, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			patchID, deviceID, req.Title, req.Description, req.Severity, "pending", time.Now().Unix())
+		_, err := db.DB.Exec(`INSERT INTO patches (id, device_id, title, description, severity, status, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			patchID, deviceID, req.Title, req.Description, req.Severity, "pending", time.Now().Unix(), deviceTenant)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create patch"})
 		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "patch.create", "patch", patchID, fmt.Sprintf("created patch %s for device %s", req.Title, deviceID), c.IP())
+		events.AuditLogTenant(deviceTenant, userID, "patch.create", "patch", patchID, fmt.Sprintf("created patch %s for device %s", req.Title, deviceID), c.IP())
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": patchID, "message": "Patch created successfully"})
 	})
 
@@ -909,12 +1009,18 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		if req.Status == "installed" {
 			installedAt = time.Now().Unix()
 		}
-		_, err := db.DB.Exec(`UPDATE patches SET status = ?, installed_at = ? WHERE id = ?`, req.Status, installedAt, patchID)
+		ptf, ptArgs := tenantFilter(c)
+		updArgs := []interface{}{req.Status, installedAt, patchID}
+		updArgs = append(updArgs, ptArgs...)
+		result, err := db.DB.Exec(`UPDATE patches SET status = ?, installed_at = ? WHERE id = ?`+ptf, updArgs...)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update patch"})
 		}
+		if n, _ := result.RowsAffected(); n == 0 {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Patch not found"})
+		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "patch.update", "patch", patchID, fmt.Sprintf("updated patch status to %s", req.Status), c.IP())
+		events.AuditLogTenant(callerTenantID(c), userID, "patch.update", "patch", patchID, fmt.Sprintf("updated patch status to %s", req.Status), c.IP())
 		return c.JSON(fiber.Map{"message": "Patch updated successfully"})
 	})
 }

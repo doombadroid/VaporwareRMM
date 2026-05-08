@@ -14,7 +14,18 @@ import (
 func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 	// List tickets
 	api.Get("/tickets", func(c *fiber.Ctx) error {
-		rows, err := db.DB.Query(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets ORDER BY created_at DESC`)
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		var rows *sql.Rows
+		var err error
+		if auth.IsSuperAdmin(role) {
+			rows, err = db.DB.Query(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets ORDER BY created_at DESC`)
+		} else {
+			rows, err = db.DB.Query(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets WHERE tenant_id = ? ORDER BY created_at DESC`, tenantID)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query tickets"})
 		}
@@ -65,8 +76,25 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 		}
 		id := uuid.New().String()
 		now := time.Now().Unix()
-		_, err := db.DB.Exec(`INSERT INTO tickets (id, title, description, status, priority, device_id, created_at, updated_at, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, req.Title, req.Description, "open", req.Priority, req.DeviceID, now, now, req.Category)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		// If a device_id is supplied, it must belong to the caller's tenant.
+		if req.DeviceID != "" {
+			role, _ := c.Locals("user_role").(string)
+			var exists int
+			if auth.IsSuperAdmin(role) {
+				_ = db.DB.QueryRow(`SELECT COUNT(*) FROM devices WHERE id = ?`, req.DeviceID).Scan(&exists)
+			} else {
+				_ = db.DB.QueryRow(`SELECT COUNT(*) FROM devices WHERE id = ? AND tenant_id = ?`, req.DeviceID, tenantID).Scan(&exists)
+			}
+			if exists == 0 {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "device_id not found in your tenant"})
+			}
+		}
+		_, err := db.DB.Exec(`INSERT INTO tickets (id, title, description, status, priority, device_id, created_at, updated_at, category, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, req.Title, req.Description, "open", req.Priority, req.DeviceID, now, now, req.Category, tenantID)
 		if err != nil {
 			slog.Error("ticket insert failed", "error", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create ticket"})
@@ -77,12 +105,23 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 	// Get ticket by ID
 	api.Get("/tickets/:id", func(c *fiber.Ctx) error {
 		id := c.Params("id")
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
 		var title, status, priority, category string
 		var description, deviceID, assignedTo sql.NullString
 		var createdAt, updatedAt int64
 		var dueDate sql.NullInt64
-		err := db.DB.QueryRow(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets WHERE id = ?`, id).
-			Scan(&id, &title, &description, &status, &priority, &deviceID, &assignedTo, &createdAt, &updatedAt, &dueDate, &category)
+		var err error
+		if auth.IsSuperAdmin(role) {
+			err = db.DB.QueryRow(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets WHERE id = ?`, id).
+				Scan(&id, &title, &description, &status, &priority, &deviceID, &assignedTo, &createdAt, &updatedAt, &dueDate, &category)
+		} else {
+			err = db.DB.QueryRow(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets WHERE id = ? AND tenant_id = ?`, id, tenantID).
+				Scan(&id, &title, &description, &status, &priority, &deviceID, &assignedTo, &createdAt, &updatedAt, &dueDate, &category)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Ticket not found"})
 		}
@@ -107,8 +146,19 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
 		now := time.Now().Unix()
-		_, err := db.DB.Exec(`UPDATE tickets SET title = COALESCE(NULLIF(?, ''), title), description = COALESCE(NULLIF(?, ''), description), status = COALESCE(NULLIF(?, ''), status), priority = COALESCE(NULLIF(?, ''), priority), assigned_to = COALESCE(NULLIF(?, ''), assigned_to), updated_at = ? WHERE id = ?`,
-			req.Title, req.Description, req.Status, req.Priority, req.AssignedTo, now, id)
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		var err error
+		if auth.IsSuperAdmin(role) {
+			_, err = db.DB.Exec(`UPDATE tickets SET title = COALESCE(NULLIF(?, ''), title), description = COALESCE(NULLIF(?, ''), description), status = COALESCE(NULLIF(?, ''), status), priority = COALESCE(NULLIF(?, ''), priority), assigned_to = COALESCE(NULLIF(?, ''), assigned_to), updated_at = ? WHERE id = ?`,
+				req.Title, req.Description, req.Status, req.Priority, req.AssignedTo, now, id)
+		} else {
+			_, err = db.DB.Exec(`UPDATE tickets SET title = COALESCE(NULLIF(?, ''), title), description = COALESCE(NULLIF(?, ''), description), status = COALESCE(NULLIF(?, ''), status), priority = COALESCE(NULLIF(?, ''), priority), assigned_to = COALESCE(NULLIF(?, ''), assigned_to), updated_at = ? WHERE id = ? AND tenant_id = ?`,
+				req.Title, req.Description, req.Status, req.Priority, req.AssignedTo, now, id, tenantID)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update ticket"})
 		}
@@ -118,7 +168,17 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 	// Delete ticket
 	api.Delete("/tickets/:id", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		_, err := db.DB.Exec(`DELETE FROM tickets WHERE id = ?`, id)
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		var err error
+		if auth.IsSuperAdmin(role) {
+			_, err = db.DB.Exec(`DELETE FROM tickets WHERE id = ?`, id)
+		} else {
+			_, err = db.DB.Exec(`DELETE FROM tickets WHERE id = ? AND tenant_id = ?`, id, tenantID)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete ticket"})
 		}

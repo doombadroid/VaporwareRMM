@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -18,13 +19,31 @@ import (
 func RegisterScriptRoutes(api fiber.Router, cfg Config) {
 	api.Get("/scripts", func(c *fiber.Ctx) error {
 		platform := c.Query("platform", "")
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
 		var query string
 		var args []interface{}
+		base := `SELECT id, name, description, content, platform, created_at, updated_at FROM scripts`
+		where := []string{}
 		if platform != "" {
-			query = `SELECT id, name, description, content, platform, created_at, updated_at FROM scripts WHERE platform = ? OR platform = 'all' ORDER BY name`
+			where = append(where, "(platform = ? OR platform = 'all')")
 			args = append(args, platform)
+		}
+		if !auth.IsSuperAdmin(role) {
+			where = append(where, "tenant_id = ?")
+			args = append(args, tenantID)
+		}
+		if len(where) > 0 {
+			query = base + " WHERE " + where[0]
+			for i := 1; i < len(where); i++ {
+				query += " AND " + where[i]
+			}
+			query += " ORDER BY name"
 		} else {
-			query = `SELECT id, name, description, content, platform, created_at, updated_at FROM scripts ORDER BY name`
+			query = base + " ORDER BY name"
 		}
 		rows, err := db.DB.Query(query, args...)
 		if err != nil {
@@ -68,7 +87,17 @@ func RegisterScriptRoutes(api fiber.Router, cfg Config) {
 			CreatedAt   int64  `json:"created_at"`
 			UpdatedAt   int64  `json:"updated_at"`
 		}
-		err := db.DB.QueryRow(`SELECT id, name, description, content, platform, created_at, updated_at FROM scripts WHERE id = ?`, scriptID).Scan(&s.ID, &s.Name, &s.Description, &s.Content, &s.Platform, &s.CreatedAt, &s.UpdatedAt)
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		var err error
+		if auth.IsSuperAdmin(role) {
+			err = db.DB.QueryRow(`SELECT id, name, description, content, platform, created_at, updated_at FROM scripts WHERE id = ?`, scriptID).Scan(&s.ID, &s.Name, &s.Description, &s.Content, &s.Platform, &s.CreatedAt, &s.UpdatedAt)
+		} else {
+			err = db.DB.QueryRow(`SELECT id, name, description, content, platform, created_at, updated_at FROM scripts WHERE id = ? AND tenant_id = ?`, scriptID, tenantID).Scan(&s.ID, &s.Name, &s.Description, &s.Content, &s.Platform, &s.CreatedAt, &s.UpdatedAt)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Script not found"})
 		}
@@ -85,41 +114,73 @@ func RegisterScriptRoutes(api fiber.Router, cfg Config) {
 		if err := c.BodyParser(&req); err != nil || req.Name == "" || req.Content == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Name and content are required"})
 		}
+		if len(req.Content) > 512*1024 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Script content exceeds 512 KB limit"})
+		}
 		if req.Platform == "" {
 			req.Platform = "all"
 		}
 		scriptID := uuid.New().String()
 		now := time.Now().Unix()
-		_, err := db.DB.Exec(`INSERT INTO scripts (id, name, description, content, platform, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			scriptID, req.Name, req.Description, req.Content, req.Platform, now, now)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		_, err := db.DB.Exec(`INSERT INTO scripts (id, name, description, content, platform, created_at, updated_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			scriptID, req.Name, req.Description, req.Content, req.Platform, now, now, tenantID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create script"})
 		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "script.create", "script", scriptID, fmt.Sprintf("created script %s", req.Name), c.IP())
+		events.AuditLogTenant(tenantID, userID, "script.create", "script", scriptID, fmt.Sprintf("created script %s", req.Name), c.IP())
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": scriptID, "message": "Script created successfully"})
 	})
 
 	api.Delete("/scripts/:id", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		scriptID := c.Params("id")
-		_, err := db.DB.Exec(`DELETE FROM scripts WHERE id = ?`, scriptID)
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		var err error
+		if auth.IsSuperAdmin(role) {
+			_, err = db.DB.Exec(`DELETE FROM scripts WHERE id = ?`, scriptID)
+		} else {
+			_, err = db.DB.Exec(`DELETE FROM scripts WHERE id = ? AND tenant_id = ?`, scriptID, tenantID)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete script"})
 		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "script.delete", "script", scriptID, "deleted script", c.IP())
+		events.AuditLogTenant(tenantID, userID, "script.delete", "script", scriptID, "deleted script", c.IP())
 		return c.JSON(fiber.Map{"message": "Script deleted successfully"})
 	})
 
 	api.Post("/devices/:id/scripts/:script_id/execute", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		deviceID := c.Params("id")
 		scriptID := c.Params("script_id")
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
 		var scriptName, scriptContent string
-		err := db.DB.QueryRow(`SELECT name, content FROM scripts WHERE id = ?`, scriptID).Scan(&scriptName, &scriptContent)
+		var err error
+		if auth.IsSuperAdmin(role) {
+			err = db.DB.QueryRow(`SELECT name, content FROM scripts WHERE id = ?`, scriptID).Scan(&scriptName, &scriptContent)
+		} else {
+			err = db.DB.QueryRow(`SELECT name, content FROM scripts WHERE id = ? AND tenant_id = ?`, scriptID, tenantID).Scan(&scriptName, &scriptContent)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Script not found"})
 		}
-		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`, deviceID)
+		var row *sql.Row
+		if auth.IsSuperAdmin(role) {
+			row = db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`, deviceID)
+		} else {
+			row = db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ? AND tenant_id = ?`, deviceID, tenantID)
+		}
 		d, err := utils.ScanDevice(row)
 		if err != nil {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
@@ -129,8 +190,8 @@ func RegisterScriptRoutes(api fiber.Router, cfg Config) {
 			ID: cmdID, Type: "script", Payload: map[string]interface{}{"command": scriptContent}, CreatedAt: time.Now(),
 		}
 		payloadJSON, _ := json.Marshal(cmdData)
-		_, err = db.DB.Exec(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			cmdID, deviceID, "script", string(payloadJSON), "pending", time.Now().Unix())
+		_, err = db.DB.Exec(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			cmdID, deviceID, "script", string(payloadJSON), "pending", time.Now().Unix(), tenantID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create command"})
 		}
@@ -164,7 +225,7 @@ func RegisterScriptRoutes(api fiber.Router, cfg Config) {
 			}
 		}()
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "script.execute", "device", deviceID, fmt.Sprintf("executed script %s", scriptName), c.IP())
+		events.AuditLogTenant(tenantID, userID, "script.execute", "device", deviceID, fmt.Sprintf("executed script %s", scriptName), c.IP())
 		return c.JSON(fiber.Map{"message": "Script execution started", "command_id": cmdID, "script": scriptName})
 	})
 }

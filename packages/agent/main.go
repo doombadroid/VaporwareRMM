@@ -28,7 +28,6 @@ import (
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/load"
 	"github.com/shirou/gopsutil/v3/mem"
-	"fyne.io/systray"
 )
 
 const (
@@ -202,57 +201,10 @@ func downloadIcon(iconURL string) ([]byte, error) {
 
 // setupSystemTray creates the system tray UI with only the branded icon and "Request Help" button.
 // Skipped automatically when no display is available (headless/Docker/server).
+// setupSystemTray dispatches to the platform-specific tray implementation
+// (see tray_native.go on linux/windows; tray_noop.go elsewhere).
 func (a *Agent) setupSystemTray() {
-	headless := os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == ""
-	if runtime.GOOS != "windows" && headless {
-		slog.Info("No display detected — running headless, system tray disabled")
-		return
-	}
-
-	go func() {
-		systray.Run(func() {
-			// Set title and tooltip - no mention of Sunshine or internal details
-			systray.SetTooltip(fmt.Sprintf("%s - %s\nClick for support", a.companyName, a.hostname))
-
-			// Try to download and set branded icon
-			if a.iconURL != "" {
-				iconData, err := downloadIcon(a.iconURL)
-				if err == nil {
-					systray.SetIcon(iconData)
-				} else {
-					slog.Warn("could not download icon", "error", err)
-				}
-			}
-
-			// Only show "Request Help" menu item - no other options exposed to user
-			mHelp := systray.AddMenuItem("Request Help", "Contact IT support")
-			mStatus := systray.AddMenuItem("Status: Connected", "Agent connection status")
-			mStatus.Disable() // Status is informational only
-
-			// Add separator
-			systray.AddSeparator()
-
-			mQuit := systray.AddMenuItem("Quit", "Stop the agent")
-
-			// Handle menu item clicks
-			go func() {
-				for {
-					select {
-					case <-mHelp.ClickedCh:
-						if err := a.handleRequestHelp(); err != nil {
-							slog.Warn("error handling help request", "error", err)
-						}
-					case <-mQuit.ClickedCh:
-						systray.Quit()
-						return
-					}
-				}
-			}()
-		}, func() {
-			// Cleanup on exit
-			slog.Info("System tray exited")
-		})
-	}()
+	startSystemTray(a)
 }
 
 // handleRequestHelp opens a support dialog or sends a help request to the server
@@ -285,12 +237,12 @@ func (a *Agent) handleRequestHelp() error {
 	}
 	defer resp.Body.Close()
 
-	// Show notification to user
-	systray.SetTooltip(fmt.Sprintf("%s - Help request sent to IT support", a.companyName))
+	// Show notification to user (no-op on platforms without a tray backend)
+	setTrayTooltip(fmt.Sprintf("%s - Help request sent to IT support", a.companyName))
 
 	// Reset tooltip after a moment
 	time.Sleep(3 * time.Second)
-	systray.SetTooltip(fmt.Sprintf("%s - %s\nClick for support", a.companyName, a.hostname))
+	setTrayTooltip(fmt.Sprintf("%s - %s\nClick for support", a.companyName, a.hostname))
 
 	return nil
 }
@@ -1311,7 +1263,61 @@ func saveDeviceID(deviceID, hostname string) {
 // main
 // ---------------------------------------------------------------------------
 
+// loadEnvFile reads simple KEY=VALUE lines from path and sets them in the
+// process environment ONLY when the variable is not already set. This is
+// required on Windows (where `sc.exe create` cannot inject environment
+// variables into a service) and convenient elsewhere as a fallback when
+// the operator hasn't wired EnvironmentFile / launchd correctly.
+//
+// Lines beginning with # are ignored. Quoted values are NOT supported —
+// keep the file simple, no shell escaping.
+func loadEnvFile(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		// Don't override an env var that's already set — operator-supplied
+		// env (e.g. systemd EnvironmentFile) takes precedence.
+		if _, ok := os.LookupEnv(key); ok {
+			continue
+		}
+		_ = os.Setenv(key, val)
+	}
+}
+
+// agentEnvFilePath returns the platform-appropriate location of the agent's
+// environment file. Override with AGENT_ENV_FILE if the operator wants a
+// custom path.
+func agentEnvFilePath() string {
+	if p := os.Getenv("AGENT_ENV_FILE"); p != "" {
+		return p
+	}
+	if runtime.GOOS == "windows" {
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		return programData + `\vaporrmm\agent.env`
+	}
+	return "/etc/vaporrmm/agent.env"
+}
+
 func main() {
+	// Bootstrap env vars from a config file BEFORE reading anything else.
+	// This is the Windows-service workaround and a useful fallback elsewhere.
+	loadEnvFile(agentEnvFilePath())
+
 	serverURL := os.Getenv("VAPOR_SERVER_URL")
 	if serverURL == "" {
 		serverURL = DefaultServerURL

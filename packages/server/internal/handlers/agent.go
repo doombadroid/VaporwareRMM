@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -33,9 +34,29 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "hostname contains invalid characters"})
 		}
 
-		// Optional registration secret for production deployments
-		if regSecret := os.Getenv("REGISTRATION_SECRET"); regSecret != "" {
-			if c.Get("X-Registration-Secret") != regSecret {
+		// Determine tenant binding from registration secret.
+		// Per-tenant secret in tenants.registration_secret takes precedence.
+		// Fallback: REGISTRATION_SECRET env var → 'default' tenant (backward compat).
+		regSecret := c.Get("X-Registration-Secret")
+		tenantID := ""
+		if regSecret != "" {
+			// registration_secret is stored as SHA-256 hex hash, never plaintext
+			secretHash := fmt.Sprintf("%x", sha256.Sum256([]byte(regSecret)))
+			if err := db.DB.QueryRow(`SELECT id FROM tenants WHERE registration_secret = ? AND status = 'active'`, secretHash).Scan(&tenantID); err != nil {
+				tenantID = ""
+			}
+		}
+		if tenantID == "" {
+			envSecret := os.Getenv("REGISTRATION_SECRET")
+			if envSecret != "" {
+				if regSecret != envSecret {
+					return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid registration secret"})
+				}
+				tenantID = "default"
+			} else if regSecret == "" {
+				// No env secret and no header — legacy open registration → default tenant
+				tenantID = "default"
+			} else {
 				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid registration secret"})
 			}
 		}
@@ -44,6 +65,21 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		if token == authHeader {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Bearer token required"})
+		}
+
+		// Enforce tenant device cap (0 = unlimited)
+		var maxDevices int
+		if err := db.DB.QueryRow(`SELECT COALESCE(max_devices,0) FROM tenants WHERE id = ?`, tenantID).Scan(&maxDevices); err != nil {
+			slog.Warn("could not read tenant device cap", "tenant_id", tenantID, "error", err)
+		}
+		if maxDevices > 0 {
+			var count int
+			if err := db.DB.QueryRow(`SELECT COUNT(*) FROM devices WHERE tenant_id = ?`, tenantID).Scan(&count); err == nil && count >= maxDevices {
+				return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+					"error":   "Device limit reached",
+					"message": fmt.Sprintf("Tenant %s has reached its device cap (%d). Contact your administrator.", tenantID, maxDevices),
+				})
+			}
 		}
 
 		deviceID := uuid.New().String()
@@ -57,16 +93,16 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		agentVersion, _ := regInfo["agent_version"].(string)
 
 		_, err := db.DB.Exec(
-			`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, agent_version, status, last_seen, created_at, cpu, agent_ip)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, agentVersion, "online", now, now, cpuModel, localIP,
+			`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, agent_version, status, last_seen, created_at, cpu, agent_ip, tenant_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, agentVersion, "online", now, now, cpuModel, localIP, tenantID,
 		)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register device", "message": err.Error()})
 		}
 
-		auth.RegisterAgentToken(token, deviceID, hostname)
-		events.TriggerWebhooks("device.registered", map[string]interface{}{"device_id": deviceID, "hostname": hostname, "timestamp": now})
+		auth.RegisterAgentToken(token, deviceID, hostname, tenantID)
+		events.TriggerWebhooks(tenantID, "device.registered", map[string]interface{}{"device_id": deviceID, "hostname": hostname, "timestamp": now})
 
 		return c.JSON(fiber.Map{"device_id": deviceID, "hostname": hostname, "status": "registered", "message": "Device registered successfully"})
 	})
@@ -102,21 +138,26 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		}
 
 		if prevStatus == "offline" && status == "online" {
-			var hostname string
-			if err := db.DB.QueryRow(`SELECT hostname FROM devices WHERE id = ?`, deviceID).Scan(&hostname); err != nil {
+			var hostname, ownerID, devTenant string
+			if err := db.DB.QueryRow(`SELECT hostname, COALESCE(user_id,''), COALESCE(tenant_id,'default') FROM devices WHERE id = ?`, deviceID).Scan(&hostname, &ownerID, &devTenant); err != nil {
 				slog.Warn("db query row scan failed", "error", err)
 			}
-			events.TriggerWebhooks("device.online", map[string]interface{}{"device_id": deviceID, "hostname": hostname, "timestamp": now})
-			events.WSBroadcastMessage(map[string]interface{}{"type": "device.online", "device_id": deviceID, "hostname": hostname, "timestamp": now})
+			payload := map[string]interface{}{"device_id": deviceID, "hostname": hostname, "timestamp": now}
+			events.TriggerWebhooks(devTenant, "device.online", payload)
+			events.WSBroadcastFiltered(devTenant, ownerID, map[string]interface{}{"type": "device.online", "device_id": deviceID, "hostname": hostname, "timestamp": now})
 		}
 
 		cpuUsage, _ := heartbeatData["cpu_usage"].(float64)
 		memUsage, _ := heartbeatData["memory_usage"].(float64)
 		diskUsage, _ := heartbeatData["disk_usage"].(float64)
 		if cpuUsage > 0 || memUsage > 0 || diskUsage > 0 {
+			agentTenant, _ := c.Locals("tenant_id").(string)
+			if agentTenant == "" {
+				agentTenant = "default"
+			}
 			if _, err := db.DB.Exec(
-				`INSERT INTO metrics_history (device_id, cpu_usage, memory_usage, disk_usage, recorded_at) VALUES (?, ?, ?, ?, ?)`,
-				deviceID, cpuUsage, memUsage, diskUsage, now,
+				`INSERT INTO metrics_history (device_id, cpu_usage, memory_usage, disk_usage, recorded_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?)`,
+				deviceID, cpuUsage, memUsage, diskUsage, now, agentTenant,
 			); err != nil {
 				slog.Warn("db exec failed", "error", err)
 			}
@@ -191,9 +232,13 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		})
 
 		commandID := uuid.New().String()
+		agentTenant, _ := c.Locals("tenant_id").(string)
+		if agentTenant == "" {
+			agentTenant = "default"
+		}
 		_, err := db.DB.Exec(
-			`INSERT INTO device_commands (id, device_id, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			commandID, deviceID, "help_request", string(helpJSON), "pending", now,
+			`INSERT INTO device_commands (id, device_id, type, payload, status, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			commandID, deviceID, "help_request", string(helpJSON), "pending", now, agentTenant,
 		)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to store help request"})
@@ -340,10 +385,11 @@ echo "  systemctl restart vaporrmm-agent"
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update file transfer"})
 		}
+		ftTenant, _ := c.Locals("tenant_id").(string)
 		if req.Status == "completed" {
-			events.TriggerWebhooks("file_transfer.completed", map[string]interface{}{"transfer_id": transferID, "device_id": deviceID, "timestamp": time.Now().Unix()})
+			events.TriggerWebhooks(ftTenant, "file_transfer.completed", map[string]interface{}{"transfer_id": transferID, "device_id": deviceID, "timestamp": time.Now().Unix()})
 		} else if req.Status == "failed" {
-			events.TriggerWebhooks("file_transfer.failed", map[string]interface{}{"transfer_id": transferID, "device_id": deviceID, "timestamp": time.Now().Unix()})
+			events.TriggerWebhooks(ftTenant, "file_transfer.failed", map[string]interface{}{"transfer_id": transferID, "device_id": deviceID, "timestamp": time.Now().Unix()})
 		}
 		return c.JSON(fiber.Map{"message": "File transfer status updated"})
 	})

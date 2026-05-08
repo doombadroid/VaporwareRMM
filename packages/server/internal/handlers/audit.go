@@ -1,12 +1,13 @@
 package handlers
 
 import (
+	"database/sql"
+	"log/slog"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
-	"log/slog"
 )
 
 func RegisterAuditRoutes(api fiber.Router, cfg Config) {
@@ -20,7 +21,18 @@ func RegisterAuditRoutes(api fiber.Router, cfg Config) {
 		if limit > cfg.MaxAuditLimit {
 			limit = cfg.MaxAuditLimit
 		}
-		rows, err := db.DB.Query(`SELECT id, user_id, action, resource_type, resource_id, details, ip_address, created_at FROM audit_logs ORDER BY created_at DESC LIMIT ?`, limit)
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		var rows *sql.Rows
+		var err error
+		if auth.IsSuperAdmin(role) {
+			rows, err = db.DB.Query(`SELECT id, user_id, action, resource_type, resource_id, details, ip_address, created_at FROM audit_logs ORDER BY created_at DESC LIMIT ?`, limit)
+		} else {
+			rows, err = db.DB.Query(`SELECT id, user_id, action, resource_type, resource_id, details, ip_address, created_at FROM audit_logs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`, tenantID, limit)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query audit logs"})
 		}

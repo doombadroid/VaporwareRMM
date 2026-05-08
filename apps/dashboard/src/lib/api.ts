@@ -18,13 +18,9 @@ function getCookie(name: string): string | null {
   return match ? decodeURIComponent(match[2]) : null;
 }
 
-// Add auth token and CSRF token to requests
+// Add CSRF token to state-changing requests.
+// Auth is handled by the httpOnly auth_token cookie (sent automatically via withCredentials).
 api.interceptors.request.use((config) => {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-  // Include CSRF token for state-changing requests
   const method = config.method?.toUpperCase();
   if (method && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
     const csrf = getCookie('csrf_token');
@@ -40,8 +36,16 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('auth_token');
+      const url: string = error.config?.url || '';
+      // Don't redirect to /login if the request itself was a login/auth attempt —
+      // let the calling component show its own inline error.
+      const isAuthRequest =
+        url.includes('/auth/login') ||
+        url.includes('/auth/forgot-password') ||
+        url.includes('/auth/reset-password') ||
+        url.includes('/auth/login/totp');
+      if (!isAuthRequest && typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        localStorage.removeItem('auth_expiry');
         window.location.href = '/login';
       }
     } else if (error.response?.status >= 500) {
@@ -137,6 +141,8 @@ export interface LoginResponse {
   user_id: string;
   email: string;
   name: string;
+  requires_totp?: boolean;
+  totp_challenge?: string;
 }
 
 export interface CommandRequest {
@@ -205,9 +211,103 @@ export const auth = {
     api.post<LoginResponse>('/auth/login', data).then((res) => res.data),
 };
 
+export const totpApi = {
+  status: () =>
+    api.get<{ enabled: boolean }>('/auth/totp/status').then((res) => res.data),
+  setup: () =>
+    api.post<{ uri: string; secret: string; backup_codes: string[] }>('/auth/totp/setup').then((res) => res.data),
+  enable: (code: string) =>
+    api.post('/auth/totp/enable', { code }).then((res) => res.data),
+  disable: (code: string) =>
+    api.post('/auth/totp/disable', { code }).then((res) => res.data),
+  verify: (totp_challenge: string, code: string) =>
+    api.post<LoginResponse>('/auth/login/totp', { totp_challenge, code }).then((res) => res.data),
+};
+
+// Tenant types
+export interface CurrentUser {
+  id: string;
+  email: string;
+  name: string;
+  role: 'super_admin' | 'admin' | 'user';
+  created_at: number;
+  tenant_id: string;
+  tenant_name: string;
+  impersonating?: boolean;
+  original_role?: string;
+  original_tenant_id?: string;
+  tenant_in_grace?: boolean;
+  grace_deadline?: number; // Unix seconds when access is hard-blocked
+}
+
+export interface Tenant {
+  id: string;
+  name: string;
+  slug?: string;
+  plan: string;
+  status: 'active' | 'suspended';
+  has_registration_key: boolean;
+  max_devices: number;
+  max_users: number;
+  device_count: number;
+  user_count: number;
+  created_at: number;
+  updated_at?: number;
+}
+
+export interface CreateTenantRequest {
+  name: string;
+  slug?: string;
+  plan?: string;
+  max_devices?: number;
+  max_users?: number;
+}
+
+export const usersApi = {
+  me: () => api.get<CurrentUser>('/users/me').then((res) => res.data),
+};
+
+export const tenantsApi = {
+  list: () =>
+    api.get<{ tenants: Tenant[] }>('/admin/tenants/').then((res) => res.data.tenants),
+  create: (data: CreateTenantRequest) =>
+    api.post<Tenant>('/admin/tenants/', data).then((res) => res.data),
+  update: (id: string, data: Partial<Pick<Tenant, 'name' | 'plan' | 'status' | 'max_devices' | 'max_users'>>) =>
+    api.put(`/admin/tenants/${id}`, data).then((res) => res.data),
+  remove: (id: string) =>
+    api.delete(`/admin/tenants/${id}`).then((res) => res.data),
+  rotateRegistrationSecret: (id: string) =>
+    api.post<{
+      registration_secret: string;
+      message: string;
+      install_commands: { linux: string; macos: string; windows: string };
+      server_url: string;
+    }>(`/admin/tenants/${id}/registration-secret`).then((res) => res.data),
+  impersonate: (id: string) =>
+    api.post<{ message: string; tenant_id: string }>(`/admin/tenants/${id}/impersonate`).then((res) => res.data),
+  endImpersonation: () =>
+    api.post('/auth/end-impersonation').then((res) => res.data),
+};
+
+export interface InviteRequest {
+  email: string;
+  role?: 'admin' | 'user';
+  tenant_id?: string; // super_admin only
+}
+
+export const invitesApi = {
+  list: () =>
+    api.get<{ invites: Array<{ id: string; tenant_id: string; email: string; role: string; status: string; expires_at: number; created_at: number }> }>('/invites').then((res) => res.data.invites),
+  create: (data: InviteRequest) =>
+    api.post<{ id: string; email: string; role: string; accept_url?: string; warning?: string }>('/invites', data).then((res) => res.data),
+  revoke: (id: string) =>
+    api.delete(`/invites/${id}`).then((res) => res.data),
+};
+
 export const devices = {
   getAll: () =>
-    api.get<Device[]>('/devices/').then((res) => res.data || []),
+    api.get<{ data: Device[]; total: number; limit: number; offset: number; has_more: boolean }>('/devices/')
+      .then((res) => res.data.data || []),
 
   getById: (id: string) =>
     api.get<Device>(`/devices/${id}`).then((res) => res.data),

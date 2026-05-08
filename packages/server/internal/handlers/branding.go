@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"fmt"
+	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -11,10 +13,27 @@ import (
 	"vaporrmm/server/internal/events"
 )
 
+var (
+	// AppName is used as a shell variable + systemd service name + filesystem path.
+	// Strict charset prevents template / shell / path injection.
+	brandAppNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+	// PrimaryColor must be a CSS hex color so the dashboard CSS injection is bounded.
+	brandColorRe = regexp.MustCompile(`^#(?:[0-9a-fA-F]{3}){1,2}$`)
+)
+
 func RegisterBrandingRoutes(app *fiber.App, api fiber.Router) {
-	// Public branding config
+	// Public branding config — picks the tenant from the request's subdomain
+	// (resolved by ResolveTenantFromHost) and falls back to MSP default.
 	app.Get("/api/branding/", func(c *fiber.Ctx) error {
+		hostTenant, _ := c.Locals("host_tenant_id").(string)
 		var brandingConfig models.BrandingConfig
+		if hostTenant != "" {
+			if err := db.DB.QueryRow(
+				`SELECT app_name, icon_url, company_name, primary_color FROM branding WHERE id = ?`, hostTenant,
+			).Scan(&brandingConfig.AppName, &brandingConfig.IconURL, &brandingConfig.CompanyName, &brandingConfig.PrimaryColor); err == nil && brandingConfig.AppName != "" {
+				return c.JSON(brandingConfig)
+			}
+		}
 		err := db.DB.QueryRow(`SELECT app_name, icon_url, company_name, primary_color FROM branding WHERE id = 'default'`).Scan(
 			&brandingConfig.AppName, &brandingConfig.IconURL, &brandingConfig.CompanyName, &brandingConfig.PrimaryColor,
 		)
@@ -51,20 +70,77 @@ func RegisterBrandingRoutes(app *fiber.App, api fiber.Router) {
 		return serveAgentInstall(c)
 	})
 
-	// Protected branding update
+	// Protected branding (per-tenant)
 	branding := api.Group("/branding")
+
+	// Authenticated GET returns the caller's tenant branding
+	branding.Get("/", func(c *fiber.Ctx) error {
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		var bc models.BrandingConfig
+		err := db.DB.QueryRow(`SELECT app_name, icon_url, company_name, primary_color FROM branding WHERE id = ?`, tenantID).Scan(
+			&bc.AppName, &bc.IconURL, &bc.CompanyName, &bc.PrimaryColor)
+		if err != nil {
+			// Fallback to MSP default if tenant has no row yet
+			err = db.DB.QueryRow(`SELECT app_name, icon_url, company_name, primary_color FROM branding WHERE id = 'default'`).Scan(
+				&bc.AppName, &bc.IconURL, &bc.CompanyName, &bc.PrimaryColor)
+			if err != nil {
+				return c.JSON(models.BrandingConfig{AppName: "vaporRMM", IconURL: "", CompanyName: "Vaporware RMM", PrimaryColor: "#3b82f6"})
+			}
+		}
+		return c.JSON(bc)
+	})
+
 	branding.Put("/", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		var req models.BrandingConfig
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
-		_, err := db.DB.Exec(`UPDATE branding SET app_name = ?, icon_url = ?, company_name = ?, primary_color = ? WHERE id = 'default'`,
-			req.AppName, req.IconURL, req.CompanyName, req.PrimaryColor)
+		// AppName is interpolated into shell scripts (install.sh) AND systemd
+		// unit names. Restrict to a strict charset to prevent template / shell
+		// injection. Operators who want fancy display names should use CompanyName.
+		if req.AppName != "" && !brandAppNameRe.MatchString(req.AppName) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "app_name must be 1-64 chars, ASCII letters/digits/dash/underscore only"})
+		}
+		// CompanyName appears in the install-script comment header. Reject
+		// shell metacharacters and CRLF to keep the comment a comment.
+		if req.CompanyName != "" {
+			if len(req.CompanyName) > 128 {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "company_name must be 128 chars or fewer"})
+			}
+			if strings.ContainsAny(req.CompanyName, "\r\n\"'`$\\;|&") {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "company_name contains forbidden characters"})
+			}
+		}
+		// PrimaryColor must look like a CSS hex color (#RGB or #RRGGBB).
+		if req.PrimaryColor != "" && !brandColorRe.MatchString(req.PrimaryColor) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "primary_color must be a hex color, e.g. #3b82f6"})
+		}
+		if req.IconURL != "" {
+			parsed, err := url.Parse(req.IconURL)
+			if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "icon_url must be a valid https:// URL"})
+			}
+		}
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		var upsert string
+		if db.DB.Dialect == "postgres" {
+			upsert = `INSERT INTO branding (id, app_name, icon_url, company_name, primary_color, tenant_id) VALUES (?, ?, ?, ?, ?, ?)
+				ON CONFLICT (id) DO UPDATE SET app_name = EXCLUDED.app_name, icon_url = EXCLUDED.icon_url, company_name = EXCLUDED.company_name, primary_color = EXCLUDED.primary_color`
+		} else {
+			upsert = `INSERT OR REPLACE INTO branding (id, app_name, icon_url, company_name, primary_color, tenant_id) VALUES (?, ?, ?, ?, ?, ?)`
+		}
+		_, err := db.DB.Exec(upsert, tenantID, req.AppName, req.IconURL, req.CompanyName, req.PrimaryColor, tenantID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update branding"})
 		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "branding.update", "branding", "default", "updated branding", c.IP())
+		events.AuditLogTenant(tenantID, userID, "branding.update", "branding", tenantID, "updated branding", c.IP())
 		return c.JSON(fiber.Map{"message": "Branding updated successfully", "branding": req})
 	})
 }
@@ -141,7 +217,32 @@ func serveAgentInstall(c *fiber.Ctx) error {
 	return c.SendString(script)
 }
 
+// shellSafeOrFallback returns s if it matches brandAppNameRe, otherwise "vaporrmm".
+// Defense in depth: even if a row in the branding table has somehow been
+// populated with shell metacharacters, the rendered install script stays safe.
+func shellSafeOrFallback(s string) string {
+	if brandAppNameRe.MatchString(s) {
+		return s
+	}
+	return "vaporrmm"
+}
+
+// scrubForComment strips bytes that could break out of a `#` shell comment line
+// (newlines) or be confused for shell control characters in a defense-in-depth
+// pass over the comment header.
+func scrubForComment(s string) string {
+	out := strings.NewReplacer("\r", " ", "\n", " ", "`", "'", "$", " ", "\\", " ").Replace(s)
+	if len(out) > 128 {
+		out = out[:128]
+	}
+	return out
+}
+
 func generateInstallScript(appName, companyName, iconURL, serverURL string) string {
+	appName = shellSafeOrFallback(appName)
+	companyName = scrubForComment(companyName)
+	// iconURL is validated as https:// at write time; scrub anyway.
+	iconURL = strings.NewReplacer("\r", "", "\n", "", "\"", "", "'", "", "`", "", "$", "", "\\", "").Replace(iconURL)
 	return fmt.Sprintf(`#!/bin/bash
 # %s Agent Installation Script
 # Generated by %s
@@ -161,6 +262,10 @@ ICON_URL="%s"
 INSTALL_DIR="/usr/local/bin"
 SERVICE_NAME="${APP_NAME,,}-agent"
 CONFIG_DIR="/etc/${APP_NAME,,}"
+ENV_FILE="${CONFIG_DIR}/agent.env"
+
+# REGISTRATION_SECRET may be passed in env (preferred) or via --registration-secret
+: "${REGISTRATION_SECRET:=}"
 
 # Optional extras
 INSTALL_SUNSHINE=""
@@ -184,6 +289,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tailscale-auth-key)
       TAILSCALE_AUTH_KEY="$2"
+      shift 2
+      ;;
+    --registration-secret)
+      REGISTRATION_SECRET="$2"
       shift 2
       ;;
     *)
@@ -328,10 +437,36 @@ echo "$SERVER_URL" > "${CONFIG_DIR}/server_url"
 if [ -n "$ICON_URL" ]; then
   echo "$ICON_URL" > "${CONFIG_DIR}/icon_url"
 fi
-# Write moonlight-web URL if server exposes it
-if [ -n "$SERVER_URL" ]; then
-  echo "${SERVER_URL}" > "${CONFIG_DIR}/server_url"
+
+# Persist a stable VAPOR_AGENT_TOKEN so the agent uses the same bearer across restarts.
+# Generated once on install; reused thereafter. File is mode 0600.
+if [ ! -f "${CONFIG_DIR}/agent_token" ]; then
+  if command -v openssl &> /dev/null; then
+    openssl rand -hex 32 > "${CONFIG_DIR}/agent_token"
+  elif command -v xxd &> /dev/null; then
+    head -c 32 /dev/urandom | xxd -p -c 64 > "${CONFIG_DIR}/agent_token"
+  elif command -v od &> /dev/null; then
+    # od is part of coreutils — present on every Linux + BSD + macOS we care about.
+    head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n' > "${CONFIG_DIR}/agent_token"
+  else
+    # Last resort: base64. Not hex, but cryptographically equivalent.
+    head -c 32 /dev/urandom | base64 | tr -d '/+=\n' | head -c 64 > "${CONFIG_DIR}/agent_token"
+  fi
+  chmod 600 "${CONFIG_DIR}/agent_token"
 fi
+AGENT_TOKEN="$(cat "${CONFIG_DIR}/agent_token")"
+
+# Write env file consumed by the systemd / OpenRC service.
+# REGISTRATION_SECRET only used on first run; kept in the file so re-registration
+# after a wipe of the server-side agent_tokens row works without re-running install.
+{
+  echo "VAPOR_SERVER_URL=${SERVER_URL}"
+  echo "VAPOR_AGENT_TOKEN=${AGENT_TOKEN}"
+  if [ -n "${REGISTRATION_SECRET}" ]; then
+    echo "REGISTRATION_SECRET=${REGISTRATION_SECRET}"
+  fi
+} > "${ENV_FILE}"
+chmod 600 "${ENV_FILE}"
 
 # Detect init system and install service accordingly
 INIT_SYSTEM=""
@@ -346,6 +481,7 @@ After=network.target
 
 [Service]
 Type=simple
+EnvironmentFile=${ENV_FILE}
 ExecStart=${BINARY_PATH} --server-url=${SERVER_URL}
 Restart=always
 RestartSec=10
@@ -365,6 +501,11 @@ EOF
 elif command -v rc-update &> /dev/null && [ -d /etc/init.d ]; then
   INIT_SYSTEM="openrc"
   echo "Installing OpenRC service..."
+  cat > "/etc/conf.d/${SERVICE_NAME}" <<EOF
+# Sourced by the OpenRC init script. Keep secrets in ${ENV_FILE} (mode 0600).
+. ${ENV_FILE}
+export VAPOR_SERVER_URL VAPOR_AGENT_TOKEN REGISTRATION_SECRET
+EOF
   cat > "/etc/init.d/${SERVICE_NAME}" <<'EOF'
 #!/sbin/openrc-run
 

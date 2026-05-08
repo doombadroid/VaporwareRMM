@@ -3,8 +3,10 @@ package auth
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -42,10 +44,11 @@ var (
 )
 
 // GenerateJWT creates a JWT token signed with HMAC-SHA256 using golang-jwt/jwt/v5.
-func GenerateJWT(userID string, role string, expiryHours int) (string, error) {
+func GenerateJWT(userID, tenantID, role string, expiryHours int) (string, error) {
 	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":  userID,
+		"tid":  tenantID,
 		"role": role,
 		"exp":  now.Add(time.Duration(expiryHours) * time.Hour).Unix(),
 		"iat":  now.Unix(),
@@ -55,8 +58,79 @@ func GenerateJWT(userID string, role string, expiryHours int) (string, error) {
 	return token.SignedString([]byte(JWTSecret))
 }
 
+// GenerateImpersonationJWT issues a session token where a super_admin acts as
+// a tenant_admin inside another tenant. The original identity is embedded so
+// EndImpersonation can restore it without trusting client-supplied state.
+//
+// claims:
+//   sub  - super_admin's user_id (audit trail)
+//   tid  - target tenant
+//   role - "admin" (NOT super_admin — impersonator only has tenant_admin powers
+//          inside the target tenant; super_admin endpoints stay locked)
+//   imp_for       - same as sub, makes the impersonation explicit for /users/me
+//   imp_orig_tid  - super_admin's home tenant (to return to)
+//   imp_orig_role - "super_admin" (to restore on end)
+func GenerateImpersonationJWT(superUserID, targetTenantID, originalTenantID, originalRole string, expiryHours int) (string, error) {
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":           superUserID,
+		"tid":           targetTenantID,
+		"role":          "admin",
+		"imp_for":       superUserID,
+		"imp_orig_tid":  originalTenantID,
+		"imp_orig_role": originalRole,
+		"exp":           now.Add(time.Duration(expiryHours) * time.Hour).Unix(),
+		"iat":           now.Unix(),
+		"iss":           "vaporrmm",
+		"jti":           uuid.New().String(),
+	})
+	return token.SignedString([]byte(JWTSecret))
+}
+
+// ParseImpersonationClaims returns (impFor, origTid, origRole, isImpersonating).
+// Returns ("", "", "", false) when the token has no impersonation claims.
+func ParseImpersonationClaims(tokenString string) (string, string, string, bool) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method")
+		}
+		return []byte(JWTSecret), nil
+	})
+	if err != nil {
+		return "", "", "", false
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || !token.Valid {
+		return "", "", "", false
+	}
+	impFor, _ := claims["imp_for"].(string)
+	if impFor == "" {
+		return "", "", "", false
+	}
+	origTid, _ := claims["imp_orig_tid"].(string)
+	origRole, _ := claims["imp_orig_role"].(string)
+	return impFor, origTid, origRole, true
+}
+
+// GenerateTOTPChallenge creates a short-lived (5 min) token used during TOTP login.
+// role is set to "totp_pending" so AuthMiddleware rejects it on all protected endpoints.
+func GenerateTOTPChallenge(userID, tenantID string) (string, error) {
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":  userID,
+		"tid":  tenantID,
+		"role": "totp_pending",
+		"exp":  now.Add(5 * time.Minute).Unix(),
+		"iat":  now.Unix(),
+		"iss":  "vaporrmm",
+		"jti":  uuid.New().String(),
+	})
+	return token.SignedString([]byte(JWTSecret))
+}
+
 // ValidateJWT validates a JWT token signed with HMAC-SHA256 using golang-jwt/jwt/v5.
-func ValidateJWT(tokenString string) (string, string, error) {
+// Returns (userID, tenantID, role, error).
+func ValidateJWT(tokenString string) (string, string, string, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
@@ -64,21 +138,105 @@ func ValidateJWT(tokenString string) (string, string, error) {
 		return []byte(JWTSecret), nil
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("invalid token: %w", err)
+		return "", "", "", fmt.Errorf("invalid token: %w", err)
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok || !token.Valid {
-		return "", "", fmt.Errorf("invalid token claims")
+		return "", "", "", fmt.Errorf("invalid token claims")
 	}
 
 	userID, _ := claims["sub"].(string)
+	tenantID, _ := claims["tid"].(string)
+	if tenantID == "" {
+		tenantID = "default"
+	}
 	role, _ := claims["role"].(string)
 	if role == "" {
 		role = "admin"
 	}
 
-	return userID, role, nil
+	return userID, tenantID, role, nil
+}
+
+// IsSuperAdmin reports whether the role grants cross-tenant access.
+func IsSuperAdmin(role string) bool { return role == "super_admin" }
+
+// TenantAllowed reports whether the named tenant is permitted to use the system.
+// Honors a grace period after suspension: if SUSPENSION_GRACE_HOURS > 0,
+// suspended tenants remain functional during that window so users see in-app
+// warnings rather than a hard lock-out. After the window, full block.
+//
+// Returns false for missing tenants. Fails open on DB errors so a transient
+// DB issue does not lock all tenants out at once.
+func TenantAllowed(tenantID string) bool {
+	if tenantID == "" {
+		return false
+	}
+	var status string
+	var suspendedAt sql.NullInt64
+	err := db.DB.QueryRow(`SELECT status, suspended_at FROM tenants WHERE id = ?`, tenantID).Scan(&status, &suspendedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false
+		}
+		slog.Warn("tenant status lookup failed", "tenant_id", tenantID, "error", err)
+		return true
+	}
+	if status == "active" {
+		return true
+	}
+	// suspended: allow only if still within grace
+	if status == "suspended" {
+		graceHours := suspensionGraceHours()
+		if graceHours > 0 && suspendedAt.Valid {
+			deadline := suspendedAt.Int64 + int64(graceHours)*3600
+			if time.Now().Unix() < deadline {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TenantInGrace reports whether the tenant is suspended but still within the
+// grace window. Used by the dashboard to render an in-app warning banner.
+func TenantInGrace(tenantID string) (bool, int64) {
+	if tenantID == "" {
+		return false, 0
+	}
+	var status string
+	var suspendedAt sql.NullInt64
+	if err := db.DB.QueryRow(`SELECT status, suspended_at FROM tenants WHERE id = ?`, tenantID).Scan(&status, &suspendedAt); err != nil {
+		return false, 0
+	}
+	if status != "suspended" || !suspendedAt.Valid {
+		return false, 0
+	}
+	graceHours := suspensionGraceHours()
+	if graceHours <= 0 {
+		return false, 0
+	}
+	deadline := suspendedAt.Int64 + int64(graceHours)*3600
+	if time.Now().Unix() >= deadline {
+		return false, 0
+	}
+	return true, deadline
+}
+
+func suspensionGraceHours() int {
+	v := os.Getenv("SUSPENSION_GRACE_HOURS")
+	if v == "" {
+		return 0
+	}
+	n := 0
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // GenerateCSRFToken creates a random 32-byte hex token.
@@ -152,11 +310,19 @@ func AuthMiddleware() fiber.Handler {
 		}
 		TokenMu.RUnlock()
 
-		userID, role, err := ValidateJWT(token)
+		userID, tenantID, role, err := ValidateJWT(token)
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error":   "Invalid token",
 				"message": err.Error(),
+				"code":    401,
+			})
+		}
+
+		if role == "totp_pending" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "TOTP verification required",
+				"message": "Complete TOTP verification at /api/auth/login/totp",
 				"code":    401,
 			})
 		}
@@ -199,18 +365,45 @@ func AuthMiddleware() fiber.Handler {
 			})
 		}
 
+		// Block all access for suspended (or deleted) tenants. super_admin bypasses
+		// so the platform owner can always reach the admin endpoints to fix it.
+		if !IsSuperAdmin(role) && !TenantAllowed(tenantID) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error":   "Tenant inactive",
+				"message": "Your organization's account is not currently active. Contact your administrator.",
+				"code":    403,
+			})
+		}
+
 		c.Locals("auth_type", "user")
 		c.Locals("user_id", userID)
 		c.Locals("user_role", role)
+		c.Locals("tenant_id", tenantID)
 		return c.Next()
 	}
 }
 
-// AdminMiddleware blocks non-admin users.
+// SuperAdminMiddleware blocks any caller who is not a super_admin.
+// Use for cross-tenant management endpoints.
+func SuperAdminMiddleware() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		role, _ := c.Locals("user_role").(string)
+		if !IsSuperAdmin(role) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error":   "Forbidden",
+				"message": "Super-admin access required",
+				"code":    403,
+			})
+		}
+		return c.Next()
+	}
+}
+
+// AdminMiddleware blocks non-admin users. super_admin and admin both pass.
 func AdminMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		role := c.Locals("user_role")
-		if role != "admin" {
+		role, _ := c.Locals("user_role").(string)
+		if role != "admin" && role != "super_admin" {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 				"error":   "Forbidden",
 				"message": "Admin access required",
@@ -221,11 +414,37 @@ func AdminMiddleware() fiber.Handler {
 	}
 }
 
-// RateLimiter limits requests per IP using a sliding window.
-// Uses Redis for distributed rate limiting when REDIS_URL is configured.
+// rateLimitKey returns the bucket key for rate limiting.
+// Priority order:
+//
+//	device_id  (per-agent — set by AgentAuthMiddleware) — keeps one noisy
+//	           agent from blocking the rest of its tenant's fleet.
+//	tenant_id  (per-tenant — set by AuthMiddleware) — one tenant can't
+//	           exhaust another's allowance behind a shared egress IP.
+//	IP         (unauthenticated fallback for /auth/login, /agent/register, etc.)
+func rateLimitKey(c *fiber.Ctx) string {
+	if did, _ := c.Locals("device_id").(string); did != "" {
+		return "agent:" + did
+	}
+	if tid, _ := c.Locals("tenant_id").(string); tid != "" {
+		return "tenant:" + tid
+	}
+	return "ip:" + c.IP()
+}
+
+// RateLimiter limits requests using a sliding window.
+// Bucket key prefers tenant_id (when set by AuthMiddleware) so a noisy tenant
+// can't exhaust the per-IP allowance for unrelated tenants sharing an egress.
+// Falls back to client IP for unauthenticated routes.
+// Uses Redis when REDIS_URL is configured for cross-instance correctness.
+// Set DISABLE_RATE_LIMIT=1 in tests to bypass entirely.
 func RateLimiter(maxRequests int, window time.Duration) fiber.Handler {
+	bypass := os.Getenv("DISABLE_RATE_LIMIT") == "1"
 	return func(c *fiber.Ctx) error {
-		ip := c.IP()
+		if bypass {
+			return c.Next()
+		}
+		ip := rateLimitKey(c)
 
 		// Try Redis first for distributed rate limiting
 		if redis.IsEnabled() {
@@ -310,14 +529,27 @@ func AgentAuthMiddleware() fiber.Handler {
 			})
 		}
 
+		// Block agents whose tenant has been suspended or deleted.
+		if !TenantAllowed(agentTok.TenantID) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error":   "Tenant inactive",
+				"message": "This tenant is not currently active.",
+				"code":    403,
+			})
+		}
+
 		c.Locals("device_id", agentTok.DeviceID)
 		c.Locals("hostname", agentTok.Hostname)
+		c.Locals("tenant_id", agentTok.TenantID)
 		return c.Next()
 	}
 }
 
 // RegisterAgentToken stores an agent token in memory and persists it to the database.
-func RegisterAgentToken(token, deviceID, hostname string) {
+func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
+	if tenantID == "" {
+		tenantID = "default"
+	}
 	tokenHash := HashToken(token)
 	now := time.Now().Unix()
 	// Default agent token expiry: 90 days
@@ -328,26 +560,28 @@ func RegisterAgentToken(token, deviceID, hostname string) {
 		TokenHash: tokenHash,
 		DeviceID:  deviceID,
 		Hostname:  hostname,
+		TenantID:  tenantID,
 		ExpiresAt: expiresAt,
 	}
 	var upsertToken string
 	if db.DB.Dialect == "postgres" {
-		upsertToken = `INSERT INTO agent_tokens (token_hash, device_id, hostname, created_at, expires_at) VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (token_hash) DO UPDATE SET device_id=EXCLUDED.device_id, hostname=EXCLUDED.hostname, created_at=EXCLUDED.created_at, expires_at=EXCLUDED.expires_at`
+		upsertToken = `INSERT INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT (token_hash) DO UPDATE SET device_id=EXCLUDED.device_id, hostname=EXCLUDED.hostname, tenant_id=EXCLUDED.tenant_id, created_at=EXCLUDED.created_at, expires_at=EXCLUDED.expires_at`
 	} else {
-		upsertToken = `INSERT OR REPLACE INTO agent_tokens (token_hash, device_id, hostname, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`
+		upsertToken = `INSERT OR REPLACE INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`
 	}
-	_, err := db.DB.Exec(upsertToken, tokenHash, deviceID, hostname, now, expiresAt)
+	_, err := db.DB.Exec(upsertToken, tokenHash, deviceID, hostname, tenantID, now, expiresAt)
 	if err != nil {
 		slog.Warn("could not persist agent token", "error", err)
 	}
 }
 
-// LoadAgentTokens restores persisted agent tokens from the database into memory.
+// LoadAgentTokens restores persisted agent tokens from the database into memory
+// and starts a background goroutine to prune expired tokens hourly.
 func LoadAgentTokens() {
 	MigrateLegacyTokens()
 
-	rows, err := db.DB.Query(`SELECT token_hash, device_id, hostname, expires_at FROM agent_tokens`)
+	rows, err := db.DB.Query(`SELECT token_hash, device_id, hostname, COALESCE(tenant_id,'default'), expires_at FROM agent_tokens`)
 	if err != nil {
 		slog.Warn("could not load agent tokens", "error", err)
 		return
@@ -360,7 +594,7 @@ func LoadAgentTokens() {
 	count := 0
 	for rows.Next() {
 		var tok models.AgentToken
-		if err := rows.Scan(&tok.TokenHash, &tok.DeviceID, &tok.Hostname, &tok.ExpiresAt); err != nil {
+		if err := rows.Scan(&tok.TokenHash, &tok.DeviceID, &tok.Hostname, &tok.TenantID, &tok.ExpiresAt); err != nil {
 			continue
 		}
 		RegisteredTokens[tok.TokenHash] = &tok
@@ -370,6 +604,29 @@ func LoadAgentTokens() {
 		slog.Warn("rows iteration error", "error", err)
 	}
 	slog.Info("loaded persisted agent tokens", "count", count)
+
+	go pruneExpiredTokens()
+}
+
+// pruneExpiredTokens removes expired tokens from the in-memory map every hour.
+func pruneExpiredTokens() {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now().Unix()
+		TokenMu.Lock()
+		pruned := 0
+		for hash, tok := range RegisteredTokens {
+			if tok.ExpiresAt > 0 && now > tok.ExpiresAt {
+				delete(RegisteredTokens, hash)
+				pruned++
+			}
+		}
+		TokenMu.Unlock()
+		if pruned > 0 {
+			slog.Info("pruned expired agent tokens", "count", pruned)
+		}
+	}
 }
 
 // MigrateLegacyTokens hashes any plaintext tokens still in the DB.
@@ -460,8 +717,8 @@ func CreateDefaultAdmin() {
 
 		userID := uuid.New().String()
 		_, err = db.DB.Exec(
-			`INSERT INTO users (id, email, password_hash, name, role, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			userID, "admin@vaporrmm.local", string(hashedPassword), "Admin", "admin", time.Now().Unix(),
+			`INSERT INTO users (id, email, password_hash, name, role, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			userID, "admin@vaporrmm.local", string(hashedPassword), "Admin", "super_admin", time.Now().Unix(), "default",
 		)
 		if err != nil {
 			slog.Warn("could not create default admin user", "error", err)

@@ -19,6 +19,7 @@ func initTestDB(t *testing.T) {
 	if err := db.Init(); err != nil {
 		t.Fatalf("db.Init failed: %v", err)
 	}
+	db.EnsureDefaultTenant()
 	t.Cleanup(func() { db.DB.Close() })
 }
 
@@ -26,7 +27,7 @@ func TestGenerateJWT_ValidateJWT(t *testing.T) {
 	JWTSecret = "test-secret-key-that-is-long-enough"
 
 	t.Run("valid token", func(t *testing.T) {
-		token, err := GenerateJWT("user-123", "admin", 1)
+		token, err := GenerateJWT("user-123", "default", "admin", 1)
 		if err != nil {
 			t.Fatalf("GenerateJWT failed: %v", err)
 		}
@@ -34,7 +35,7 @@ func TestGenerateJWT_ValidateJWT(t *testing.T) {
 			t.Fatal("expected non-empty token")
 		}
 
-		userID, role, err := ValidateJWT(token)
+		userID, _, role, err := ValidateJWT(token)
 		if err != nil {
 			t.Fatalf("ValidateJWT failed: %v", err)
 		}
@@ -47,12 +48,12 @@ func TestGenerateJWT_ValidateJWT(t *testing.T) {
 	})
 
 	t.Run("expired token", func(t *testing.T) {
-		token, err := GenerateJWT("user-123", "admin", -1)
+		token, err := GenerateJWT("user-123", "default", "admin", -1)
 		if err != nil {
 			t.Fatalf("GenerateJWT failed: %v", err)
 		}
 
-		_, _, err = ValidateJWT(token)
+		_, _, _, err = ValidateJWT(token)
 		if err == nil {
 			t.Fatal("expected error for expired token")
 		}
@@ -62,17 +63,17 @@ func TestGenerateJWT_ValidateJWT(t *testing.T) {
 	})
 
 	t.Run("invalid signature", func(t *testing.T) {
-		token, _ := GenerateJWT("user-123", "admin", 1)
+		token, _ := GenerateJWT("user-123", "default", "admin", 1)
 		token += "tampered"
 
-		_, _, err := ValidateJWT(token)
+		_, _, _, err := ValidateJWT(token)
 		if err == nil {
 			t.Fatal("expected error for tampered token")
 		}
 	})
 
 	t.Run("malformed token", func(t *testing.T) {
-		_, _, err := ValidateJWT("not.a.jwt")
+		_, _, _, err := ValidateJWT("not.a.jwt")
 		if err == nil {
 			t.Fatal("expected error for malformed token")
 		}
@@ -85,7 +86,7 @@ func TestAgentAuthMiddleware(t *testing.T) {
 	RegisteredTokens = make(map[string]*models.AgentToken)
 	HashToken = func(token string) string { return "hash-" + token }
 
-	RegisterAgentToken("valid-token", "device-1", "host-a")
+	RegisterAgentToken("valid-token", "device-1", "host-a", "default")
 
 	app := fiber.New()
 	app.Use(AgentAuthMiddleware())

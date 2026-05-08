@@ -235,7 +235,7 @@ func RunMigrations(dialect string) error {
 		{
 			Version: "013",
 			Name:    "add_agent_token_expires_at",
-			SQL:     `ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS expires_at INTEGER DEFAULT 0;`,
+			SQL:     `ALTER TABLE agent_tokens ADD COLUMN expires_at INTEGER DEFAULT 0;`,
 		},
 		{
 			Version: "014",
@@ -255,6 +255,104 @@ func RunMigrations(dialect string) error {
 			);
 			CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
 			CREATE INDEX IF NOT EXISTS idx_tickets_priority ON tickets(priority);`,
+		},
+		{
+			Version: "015",
+			Name:    "add_user_totp_table",
+			SQL: `CREATE TABLE IF NOT EXISTS user_totp (
+				user_id TEXT PRIMARY KEY,
+				secret TEXT NOT NULL,
+				enabled INTEGER DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				enabled_at INTEGER
+			);`,
+		},
+		{
+			Version: "016",
+			Name:    "add_user_totp_backup_codes_table",
+			SQL: `CREATE TABLE IF NOT EXISTS user_totp_backup_codes (
+				id TEXT PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				code_hash TEXT NOT NULL,
+				used INTEGER DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				used_at INTEGER
+			);
+			CREATE INDEX IF NOT EXISTS idx_totp_backup_user ON user_totp_backup_codes(user_id);`,
+		},
+		{
+			Version: "017",
+			Name:    "add_tenants_and_tenant_id_columns",
+			SQL: `CREATE TABLE IF NOT EXISTS tenants (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL,
+				slug TEXT,
+				plan TEXT DEFAULT 'free',
+				status TEXT DEFAULT 'active',
+				registration_secret TEXT,
+				max_devices INTEGER DEFAULT 0,
+				max_users INTEGER DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER
+			);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
+			CREATE INDEX IF NOT EXISTS idx_tenants_reg_secret ON tenants(registration_secret);
+			ALTER TABLE users ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE devices ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE agent_tokens ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE scripts ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE alert_rules ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE alert_settings ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE webhooks ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE audit_logs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE patches ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE tickets ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE branding ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
+			CREATE INDEX IF NOT EXISTS idx_devices_tenant ON devices(tenant_id);
+			CREATE INDEX IF NOT EXISTS idx_agent_tokens_tenant ON agent_tokens(tenant_id);
+			CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant ON audit_logs(tenant_id);
+			UPDATE users SET role = 'super_admin' WHERE role = 'admin';`,
+		},
+		{
+			Version: "018",
+			Name:    "add_tenant_id_to_child_tables",
+			SQL: `ALTER TABLE device_commands ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE file_transfers ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE compliance_results ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			ALTER TABLE metrics_history ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';
+			CREATE INDEX IF NOT EXISTS idx_device_commands_tenant ON device_commands(tenant_id);
+			CREATE INDEX IF NOT EXISTS idx_file_transfers_tenant ON file_transfers(tenant_id);
+			CREATE INDEX IF NOT EXISTS idx_compliance_results_tenant ON compliance_results(tenant_id);
+			CREATE INDEX IF NOT EXISTS idx_metrics_history_tenant ON metrics_history(tenant_id);`,
+		},
+		{
+			Version: "019",
+			Name:    "add_user_invites_table",
+			SQL: `CREATE TABLE IF NOT EXISTS user_invites (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				email TEXT NOT NULL,
+				role TEXT NOT NULL DEFAULT 'user',
+				token_hash TEXT NOT NULL,
+				invited_by TEXT NOT NULL,
+				expires_at INTEGER NOT NULL,
+				accepted_at INTEGER,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_user_invites_tenant ON user_invites(tenant_id);
+			CREATE INDEX IF NOT EXISTS idx_user_invites_token ON user_invites(token_hash);`,
+		},
+		{
+			Version: "020",
+			Name:    "add_tenant_suspension_grace",
+			SQL:     `ALTER TABLE tenants ADD COLUMN suspended_at INTEGER;`,
+		},
+		{
+			Version: "021",
+			Name:    "add_uniqueness_constraints",
+			SQL: `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_tenant ON users(email, tenant_id);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_user_invites_token_hash ON user_invites(token_hash);`,
 		},
 	}
 
@@ -295,6 +393,28 @@ func RunMigrations(dialect string) error {
 	}
 
 	return nil
+}
+
+// EnsureDefaultTenant inserts the 'default' tenant row if missing.
+// Idempotent: safe to call on every startup.
+func EnsureDefaultTenant() {
+	var count int
+	if err := DB.QueryRow(`SELECT COUNT(*) FROM tenants WHERE id = 'default'`).Scan(&count); err != nil {
+		slog.Warn("could not check default tenant", "error", err)
+		return
+	}
+	if count > 0 {
+		return
+	}
+	now := time.Now().Unix()
+	if _, err := DB.Exec(
+		`INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) VALUES ('default', 'Default', 'default', 'free', 'active', ?, ?)`,
+		now, now,
+	); err != nil {
+		slog.Warn("could not create default tenant", "error", err)
+		return
+	}
+	slog.Info("created default tenant")
 }
 var DB *Wrapper
 
@@ -414,7 +534,7 @@ func Init() error {
 
 	// Add tags column to devices table (migration)
 	if DB.Dialect == "postgres" {
-		if _, err := DB.Exec(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS tags TEXT DEFAULT ''`); err != nil {
+		if _, err := DB.Exec(`ALTER TABLE devices ADD COLUMN tags TEXT DEFAULT ''`); err != nil {
 			slog.Warn("db exec failed", "error", err)
 		}
 	} else {
@@ -483,7 +603,7 @@ func Init() error {
 	// PostgreSQL supports IF NOT EXISTS; SQLite ignores the error.
 	addColFmt := "ALTER TABLE devices ADD COLUMN %s"
 	if DB.Dialect == "postgres" {
-		addColFmt = "ALTER TABLE devices ADD COLUMN IF NOT EXISTS %s"
+		addColFmt = "ALTER TABLE devices ADD COLUMN %s"
 	}
 	for _, col := range []string{
 		"sunshine_installed INTEGER DEFAULT 0",
@@ -517,10 +637,10 @@ func Init() error {
 	}
 
 	// Migrate legacy schema: add token_hash if missing
-	if _, err := DB.Exec(`ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS token_hash TEXT`); err != nil {
+	if _, err := DB.Exec(`ALTER TABLE agent_tokens ADD COLUMN token_hash TEXT`); err != nil {
 		slog.Warn("db exec failed", "error", err)
 	}
-	if _, err := DB.Exec(`ALTER TABLE agent_tokens ADD COLUMN IF NOT EXISTS token TEXT DEFAULT ''`); err != nil {
+	if _, err := DB.Exec(`ALTER TABLE agent_tokens ADD COLUMN token TEXT DEFAULT ''`); err != nil {
 		slog.Warn("db exec failed", "error", err)
 	}
 

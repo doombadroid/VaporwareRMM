@@ -95,7 +95,7 @@ func BenchmarkJWTGeneration(b *testing.B) {
 	auth.JWTSecret = "benchmark-jwt-secret"
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := auth.GenerateJWT("user-123", "admin", 24)
+		_, err := auth.GenerateJWT("user-123", "default", "admin", 24)
 		if err != nil {
 			b.Fatal(err)
 		}

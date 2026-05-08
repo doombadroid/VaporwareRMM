@@ -16,12 +16,21 @@ import {
   Bell,
   Search,
   LogOut,
+  Building2,
 } from 'lucide-react'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { useBranding } from '@/components/BrandingProvider'
+import { useCurrentUser } from '@/components/CurrentUserProvider'
 import api from '@/lib/api'
 
-const navItems = [
+type NavItem = {
+  label: string
+  href: string
+  icon: typeof BarChart3
+  superAdminOnly?: boolean
+}
+
+const navItems: NavItem[] = [
   { label: 'Dashboard', href: '/', icon: BarChart3 },
   { label: 'Agents', href: '/agents', icon: Server },
   { label: 'Tickets', href: '/tickets', icon: Ticket },
@@ -29,6 +38,7 @@ const navItems = [
   { label: 'Network Map', href: '/network', icon: Globe },
   { label: 'Patches', href: '/patches', icon: Package },
   { label: 'Settings', href: '/settings', icon: Settings },
+  { label: 'Tenants', href: '/admin/tenants', icon: Building2, superAdminOnly: true },
 ]
 
 export default function DashboardShell({
@@ -42,6 +52,20 @@ export default function DashboardShell({
   const [time, setTime] = useState<Date | null>(null)
   const pathname = usePathname()
   const { branding } = useBranding()
+  const { user, refresh } = useCurrentUser()
+  const isSuperAdmin = user?.role === 'super_admin'
+  const isImpersonating = !!user?.impersonating
+
+  const handleEndImpersonation = async () => {
+    try {
+      const { tenantsApi } = await import('@/lib/api')
+      await tenantsApi.endImpersonation()
+      await refresh()
+      window.location.href = '/'
+    } catch {
+      // ignore — UI shows state, user can retry
+    }
+  }
 
   useEffect(() => {
     setTime(new Date())
@@ -55,14 +79,50 @@ export default function DashboardShell({
     } catch {
       // ignore
     }
-    localStorage.removeItem('auth_token')
+    localStorage.removeItem('auth_expiry')
     localStorage.removeItem('user_id')
     localStorage.removeItem('user_email')
     window.location.href = '/login'
   }
 
   return (
-    <div className="min-h-screen bg-[#030308] text-white flex">
+    <div className={`min-h-screen bg-[#030308] text-white flex relative ${isImpersonating || user?.tenant_in_grace ? 'pt-9' : ''}`}>
+      {isSuperAdmin && !isImpersonating && (
+        <div
+          className="fixed top-0 left-0 right-0 h-px bg-amber-500/50 z-50 pointer-events-none"
+          aria-hidden="true"
+        />
+      )}
+      {isImpersonating && (
+        <div className="fixed top-0 left-0 right-0 z-50 bg-amber-500/95 text-amber-950 text-xs font-medium px-4 py-2 flex items-center justify-between shadow-lg">
+          <span className="flex items-center gap-2">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-950 animate-pulse" />
+            Viewing as <span className="font-semibold">{user?.tenant_name}</span> · super-admin powers temporarily reduced to tenant_admin
+          </span>
+          <button
+            onClick={handleEndImpersonation}
+            className="bg-amber-950 text-amber-100 hover:bg-amber-800 px-3 py-1 rounded font-medium text-xs transition-colors"
+          >
+            End impersonation
+          </button>
+        </div>
+      )}
+      {user?.tenant_in_grace && !isImpersonating && (
+        <div className="fixed top-0 left-0 right-0 z-50 bg-rose-500/95 text-rose-50 text-xs font-medium px-4 py-2 flex items-center justify-center shadow-lg">
+          <span className="flex items-center gap-2">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-50 animate-pulse" />
+            <span>
+              Account suspended. Access ends{' '}
+              <strong>
+                {user.grace_deadline
+                  ? new Date(user.grace_deadline * 1000).toLocaleString()
+                  : 'soon'}
+              </strong>
+              . Contact your administrator.
+            </span>
+          </span>
+        </div>
+      )}
       {/* Desktop Sidebar */}
       <aside className="hidden md:flex w-60 flex-col border-r border-white/[0.06] bg-[#030308] fixed h-screen z-40">
         {/* Logo */}
@@ -94,7 +154,7 @@ export default function DashboardShell({
 
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-          {navItems.map((item) => {
+          {navItems.filter((item) => !item.superAdminOnly || isSuperAdmin).map((item) => {
             const active =
               pathname === item.href || pathname.startsWith(item.href + '/')
             return (
@@ -114,15 +174,31 @@ export default function DashboardShell({
           })}
         </nav>
 
-        {/* Bottom branding */}
-        <div className="p-4 border-t border-white/[0.06]">
+        {/* Tenant + user footer */}
+        <div className="px-4 py-3 border-t border-white/[0.06] space-y-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-[0.14em] text-white/30 mb-0.5">
+              Tenant
+            </p>
+            <p
+              className={`text-xs font-medium truncate ${
+                isSuperAdmin ? 'text-amber-300/90' : 'text-white/85'
+              }`}
+            >
+              {isSuperAdmin ? 'All tenants' : user?.tenant_name || '—'}
+            </p>
+          </div>
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center text-xs font-bold">
-              A
+              {user?.name?.charAt(0).toUpperCase() || '?'}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-white truncate">Admin</p>
-              <p className="text-[10px] text-white/30 truncate">Administrator</p>
+              <p className="text-xs font-medium text-white truncate">
+                {user?.name || '—'}
+              </p>
+              <p className="text-[10px] text-white/30 truncate capitalize">
+                {user?.role?.replace('_', ' ') || '—'}
+              </p>
             </div>
             <button
               onClick={handleSignOut}
@@ -159,7 +235,7 @@ export default function DashboardShell({
           </button>
         </div>
         <nav className="p-3 space-y-1">
-          {navItems.map((item) => {
+          {navItems.filter((item) => !item.superAdminOnly || isSuperAdmin).map((item) => {
             const active =
               pathname === item.href || pathname.startsWith(item.href + '/')
             return (

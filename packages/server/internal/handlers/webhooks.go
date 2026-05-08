@@ -2,19 +2,24 @@ package handlers
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"vaporrmm/server/internal/auth"
+	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
-	"log/slog"
 )
 
 func RegisterWebhookRoutes(api fiber.Router) {
 	api.Get("/webhooks", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
-		rows, err := db.DB.Query(`SELECT id, url, secret, events, enabled, created_at FROM webhooks ORDER BY created_at DESC`)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		rows, err := db.DB.Query(`SELECT id, url, secret, events, enabled, created_at FROM webhooks WHERE tenant_id = ? ORDER BY created_at DESC`, tenantID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query webhooks"})
 		}
@@ -63,24 +68,43 @@ func RegisterWebhookRoutes(api fiber.Router) {
 		if req.Enabled {
 			enabled = 1
 		}
-		_, err := db.DB.Exec(`INSERT INTO webhooks (id, url, secret, events, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			id, req.URL, req.Secret, req.Events, enabled, time.Now().Unix())
+		encSecret, err := crypto.Encrypt(req.Secret)
+		if err != nil {
+			slog.Warn("failed to encrypt webhook secret", "error", err)
+			encSecret = req.Secret
+		}
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		_, err = db.DB.Exec(`INSERT INTO webhooks (id, url, secret, events, enabled, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			id, req.URL, encSecret, req.Events, enabled, time.Now().Unix(), tenantID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create webhook"})
 		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "webhook.create", "webhook", id, fmt.Sprintf("created webhook %s", req.URL), c.IP())
+		events.AuditLogTenant(tenantID, userID, "webhook.create", "webhook", id, fmt.Sprintf("created webhook %s", req.URL), c.IP())
 		return c.JSON(fiber.Map{"id": id, "message": "Webhook created"})
 	})
 
 	api.Delete("/webhooks/:id", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		id := c.Params("id")
-		_, err := db.DB.Exec(`DELETE FROM webhooks WHERE id = ?`, id)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		role, _ := c.Locals("user_role").(string)
+		var err error
+		if auth.IsSuperAdmin(role) {
+			_, err = db.DB.Exec(`DELETE FROM webhooks WHERE id = ?`, id)
+		} else {
+			_, err = db.DB.Exec(`DELETE FROM webhooks WHERE id = ? AND tenant_id = ?`, id, tenantID)
+		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete webhook"})
 		}
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLog(userID, "webhook.delete", "webhook", id, "deleted webhook", c.IP())
+		events.AuditLogTenant(tenantID, userID, "webhook.delete", "webhook", id, "deleted webhook", c.IP())
 		return c.JSON(fiber.Map{"message": "Webhook deleted"})
 	})
 }

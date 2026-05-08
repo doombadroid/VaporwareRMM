@@ -1,6 +1,6 @@
 module vaporrmm/server
 
-go 1.25.0
+go 1.23.0
 
 require (
 	github.com/gofiber/fiber/v2 v2.52.0
@@ -12,6 +12,7 @@ require (
 require (
 	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/fasthttp/websocket v1.5.3 // indirect
 	github.com/gofiber/websocket/v2 v2.2.1 // indirect
@@ -22,6 +23,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.15 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/pquerna/otp v1.5.0 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect

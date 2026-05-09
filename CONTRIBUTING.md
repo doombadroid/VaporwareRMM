@@ -10,7 +10,7 @@ discussed in an issue first so we can agree on scope before code is written.
 **Security issues:** do not file them as a regular issue or PR. Email
 `security@tcitsys.com`. See [SECURITY.md](SECURITY.md).
 
-**Code of conduct:** see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+**Code of ethics:** see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Getting Started
 

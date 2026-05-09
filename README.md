@@ -105,7 +105,7 @@ Prerequisites: Docker + Docker Compose, a domain with DNS control if you want re
 ### 1. Clone + secrets
 
 ```bash
-git clone https://github.com/<you>/vaporRMM /srv/vaporrmm
+git clone https://github.com/tabiznet/VaporwareRMM /srv/vaporrmm
 cd /srv/vaporrmm
 
 mkdir -p secrets

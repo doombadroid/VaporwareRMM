@@ -9,7 +9,7 @@ body:
         Thanks for taking the time to file a bug report.
 
         **Security issues:** do not file them here. Email `security@tcitsys.com`.
-        See [SECURITY.md](https://github.com/Doomba/vaporRMM/blob/main/SECURITY.md).
+        See [SECURITY.md](https://github.com/tabiznet/VaporwareRMM/blob/main/SECURITY.md).
 
   - type: input
     id: version

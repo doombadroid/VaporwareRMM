@@ -1,85 +1,100 @@
+# Code of Ethics for Vaporware RMM
 
-# Contributor Covenant Code of Conduct
+## 1. History and Purpose
 
-## Our Pledge
+This document serves as a Code of Ethics for the developers, contributors,
+and maintainers of Vaporware RMM. It governs our interactions with each
+other, with users, and with the broader community.
 
-We as members, contributors, and leaders pledge to make participation in our community a harassment-free experience for everyone, regardless of age, body size, visible or invisible disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, caste, color, religion, or sexual identity and orientation.
+We prioritize technical excellence, honesty, and long-term reliability over
+social or political considerations. Contributions, decisions, and leadership
+are based on merit — demonstrated competence, quality of work, and positive
+impact on the project — rather than identity, status, or external
+affiliations.
 
-We pledge to act and interact in ways that contribute to an open, welcoming, diverse, inclusive, and healthy community.
+This is a voluntary covenant from the project maintainers to the community:
+we pledge to behave according to these principles regardless of how others
+treat us. No one is required to agree with or follow every aspect personally,
+but project participants are expected to align with its spirit in their
+contributions and conduct.
 
-## Our Standards
+## 2. Core Principles
 
-Examples of behavior that contributes to a positive environment for our community include:
+- **Meritocracy.** The best ideas, code, and solutions win. Decisions on
+  features, architecture, bug fixes, and project direction are made based on
+  technical merit, evidence, and benefit to users. Contributions are judged
+  by their quality, correctness, efficiency, and maintainability.
+- **Truth-Seeking and Honesty.** We prioritize facts, evidence, and what
+  works. We reject dogma, hype, or unproven claims. Code and documentation
+  must be truthful and accurate; we do not ship known-broken features or
+  misleading information.
+- **Simplicity and Reliability.** Favor simple, understandable, and robust
+  solutions. Avoid unnecessary complexity. Reliability and correctness take
+  precedence over flashy features or short-term gains.
+- **Humility and Continuous Improvement.** Recognize that even excellent code
+  can be improved. Be open to criticism backed by evidence. Attribute success
+  to good ideas and hard work, and take responsibility for errors.
+- **Respect for Effort and Competence.** Honor those who contribute
+  high-quality work. Respect is earned through consistent value to the
+  project, not demanded.
 
-* Demonstrating empathy and kindness toward other people
-* Being respectful of differing opinions, viewpoints, and experiences
-* Giving and gracefully accepting constructive feedback
-* Accepting responsibility and apologizing to those affected by our mistakes, and learning from the experience
-* Focusing on what is best not just for us as individuals, but for the overall community
+## 3. Expected Behavior
 
-Examples of unacceptable behavior include:
+Inspired by time-tested principles of disciplined, productive communities
+(such as those in the SQLite Code of Ethics), we adapt the following
+guidelines with a strong focus on merit and technical focus:
 
-* The use of sexualized language or imagery, and sexual attention or advances of any kind
-* Trolling, insulting or derogatory comments, and personal or political attacks
-* Public or private harassment
-* Publishing others' private information, such as a physical or email address, without their explicit permission
-* Other conduct which could reasonably be considered inappropriate in a professional setting
+- Prioritize the project's health, users, and long-term quality above
+  personal ego or external agendas.
+- Judge contributions, proposals, and disputes on technical merit, evidence,
+  and alignment with project goals.
+- Communicate clearly, truthfully, and constructively. Avoid personal
+  attacks, gossip, or unsubstantiated claims. Focus on ideas and code.
+- Give credit where due and acknowledge good work from others.
+- Resolve disagreements through reasoned discussion, testing, and evidence.
+  Make peace where possible, but do not sacrifice correctness for harmony.
+- Be diligent, reliable, and accountable. Deliver on commitments or
+  communicate delays honestly.
+- Shun laziness, grumbling, and unnecessary drama. Focus on solving problems.
+- Do not harbor grudges or pursue personal vendettas. Address issues
+  directly and factually.
+- Be a stranger to irrelevant "world's ways" (e.g., corporate politics,
+  social signaling, or identity-based demands) within the project. Technical
+  excellence is the standard.
+- Support newcomers and juniors who demonstrate potential and willingness to
+  learn, while maintaining high standards. Mentor based on merit and effort.
+- Respect maintainers' authority on project direction while allowing open
+  discussion and merit-based challenges.
 
-## Enforcement Responsibilities
+## 4. Unacceptable Behavior
 
-Community leaders are responsible for clarifying and enforcing our standards of acceptable behavior and will take appropriate and fair corrective action in response to any behavior that they deem inappropriate, threatening, offensive, or harmful.
+While we emphasize freedom and merit over heavy policing, the following
+undermine the project and will not be tolerated in project spaces (code,
+issues, discussions, forums, etc.):
 
-Community leaders have the right and responsibility to remove, edit, or reject comments, commits, code, wiki edits, issues, and other contributions that are not aligned to this Code of Conduct, and will communicate reasons for moderation decisions when appropriate.
+- Disruptive or off-topic activism that distracts from technical work.
+- Harassment, threats, or repeated personal attacks.
+- Deliberate sabotage, introducing backdoors, or malicious code.
+- Plagiarism or claiming undue credit for others' work.
+- Persistent bad-faith argumentation that ignores evidence or project goals.
+- Discrimination against competence (e.g., rejecting good contributions due
+  to the contributor's background).
 
-## Scope
+Project maintainers enforce these standards with discretion, prioritizing
+the project's merit and health. Bans or removals are based on impact to the
+project, not viewpoint disagreements.
 
-This Code of Conduct applies within all community spaces, and also applies when an individual is officially representing the community in public spaces. Examples of representing our community include using an official e-mail address, posting via an official social media account, or acting as an appointed representative at an online or offline event.
+## 5. Contributions and Governance
 
-## Enforcement
+- **Pull Requests and Issues.** Welcomed from anyone. They are evaluated
+  strictly on merit: Does this improve the software? Is it correct,
+  efficient, and maintainable?
+- **Leadership.** Maintainers and key roles are chosen based on sustained
+  high-quality contributions, deep understanding of the codebase, and
+  alignment with project values. No quotas or unrelated criteria.
+- **Diversity of Thought.** We value varied perspectives that improve the
+  code. Conformity is not required — competence is.
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at conduct@tcitsys.com. All complaints will be reviewed and investigated promptly and fairly.
-
-All community leaders are obligated to respect the privacy and security of the reporter of any incident.
-
-## Enforcement Guidelines
-
-Community leaders will follow these Community Impact Guidelines in determining the consequences for any action they deem in violation of this Code of Conduct:
-
-### 1. Correction
-
-**Community Impact**: Use of inappropriate language or other behavior deemed unprofessional or unwelcome in the community.
-
-**Consequence**: A private, written warning from community leaders, providing clarity around the nature of the violation and an explanation of why the behavior was inappropriate. A public apology may be requested.
-
-### 2. Warning
-
-**Community Impact**: A violation through a single incident or series of actions.
-
-**Consequence**: A warning with consequences for continued behavior. No interaction with the people involved, including unsolicited interaction with those enforcing the Code of Conduct, for a specified period of time. This includes avoiding interactions in community spaces as well as external channels like social media. Violating these terms may lead to a temporary or permanent ban.
-
-### 3. Temporary Ban
-
-**Community Impact**: A serious violation of community standards, including sustained inappropriate behavior.
-
-**Consequence**: A temporary ban from any sort of interaction or public communication with the community for a specified period of time. No public or private interaction with the people involved, including unsolicited interaction with those enforcing the Code of Conduct, is allowed during this period. Violating these terms may lead to a permanent ban.
-
-### 4. Permanent Ban
-
-**Community Impact**: Demonstrating a pattern of violation of community standards, including sustained inappropriate behavior, harassment of an individual, or aggression toward or disparagement of classes of individuals.
-
-**Consequence**: A permanent ban from any sort of public interaction within the community.
-
-## Attribution
-
-This Code of Conduct is adapted from the [Contributor Covenant][homepage], version 2.1, available at [https://www.contributor-covenant.org/version/2/1/code_of_conduct.html][v2.1].
-
-Community Impact Guidelines were inspired by [Mozilla's code of conduct enforcement ladder][Mozilla CoC].
-
-For answers to common questions about this code of conduct, see the FAQ at [https://www.contributor-covenant.org/faq][FAQ]. Translations are available at [https://www.contributor-covenant.org/translations][translations].
-
-[homepage]: https://www.contributor-covenant.org
-[v2.1]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
-[Mozilla CoC]: https://github.com/mozilla/diversity
-[FAQ]: https://www.contributor-covenant.org/faq
-[translations]: https://www.contributor-covenant.org/translations
-
+This Code of Ethics is not a legal document and does not create new rights
+or obligations. It reflects our commitment to building excellent software
+through ethical, merit-based collaboration.

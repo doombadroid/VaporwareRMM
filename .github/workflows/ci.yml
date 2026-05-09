@@ -111,8 +111,27 @@ jobs:
         with:
           go-version: '1.23'
           cache: true
+          # Cache key has to include every per-module go.sum, not just the
+          # workspace sum — without these the dep cache misses and tools
+          # like golangci-lint fall back to typechecking against unresolved
+          # imports, which manifests as bogus "undefined: fiber" /
+          # "undefined: websocket" errors and a phantom "v2 redeclared"
+          # collision (the typechecker uses the last path segment when it
+          # can't load the package itself).
           cache-dependency-path: |
             go.work.sum
+            packages/server/go.sum
+            packages/agent/go.sum
+            packages/cli/go.sum
+
+      # golangci-lint loads packages and their deps; without this download
+      # the lint container starts with an empty module cache and typecheck
+      # fails on every external import.
+      - name: Download Go modules
+        run: |
+          cd packages/server && go mod download
+          cd ../agent && go mod download
+          cd ../cli && go mod download
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
@@ -120,6 +139,9 @@ jobs:
           version: latest
           working-directory: packages/server
           args: --timeout=5m
+          # Skip the action's own download step — we did it above with the
+          # workspace context, which is what cross-module imports need.
+          skip-cache: true
 
   go-test:
     name: Go Tests & Coverage
@@ -134,8 +156,24 @@ jobs:
         with:
           go-version: '1.23'
           cache: true
+          # Cache key has to include every per-module go.sum, not just the
+          # workspace sum — without these the dep cache misses and tools
+          # like golangci-lint fall back to typechecking against unresolved
+          # imports, which manifests as bogus "undefined: fiber" /
+          # "undefined: websocket" errors and a phantom "v2 redeclared"
+          # collision (the typechecker uses the last path segment when it
+          # can't load the package itself).
           cache-dependency-path: |
             go.work.sum
+            packages/server/go.sum
+            packages/agent/go.sum
+            packages/cli/go.sum
+
+      - name: Download Go modules
+        run: |
+          cd packages/server && go mod download
+          cd ../agent && go mod download
+          cd ../cli && go mod download
 
       - name: Run server tests with coverage
         run: |

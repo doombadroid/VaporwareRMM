@@ -31,9 +31,9 @@ type ResponseWriter struct {
 	Code       int
 }
 
-func (w *ResponseWriter) Header() http.Header       { return w.HTTPHeader }
+func (w *ResponseWriter) Header() http.Header         { return w.HTTPHeader }
 func (w *ResponseWriter) Write(b []byte) (int, error) { return w.Body.Write(b) }
-func (w *ResponseWriter) WriteHeader(code int)       { w.Code = code }
+func (w *ResponseWriter) WriteHeader(code int)        { w.Code = code }
 
 // agentHTTPClient is a shared client with optional TLS config for agent communication.
 var agentHTTPClient = &http.Client{Timeout: 30 * time.Second}

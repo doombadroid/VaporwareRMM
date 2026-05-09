@@ -74,7 +74,7 @@ func GenerateScript(ctx context.Context, tenantID, customerID, language, query s
 - Include a one-paragraph explanation of what the script does and what it doesn't.
 - Output strict JSON: {"language":"...","code":"...","explanation":"..."}.
 - If the request is impossible, ambiguous, or would require any banned command, set code to "" and explain why in the explanation field.`).
-		TrustedContext("requested language: " + language).
+		TrustedContext("requested language: "+language).
 		UntrustedInput("operator_request", query)
 
 	var out ScriptOut

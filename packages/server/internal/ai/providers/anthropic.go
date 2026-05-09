@@ -46,11 +46,11 @@ type anthMsg struct {
 	Content []anthContent `json:"content"`
 }
 type anthContent struct {
-	Type      string          `json:"type"`            // "text" | "tool_use" | "tool_result"
+	Type      string          `json:"type"` // "text" | "tool_use" | "tool_result"
 	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`     // for tool_use
-	Name      string          `json:"name,omitempty"`   // for tool_use
-	Input     json.RawMessage `json:"input,omitempty"`  // for tool_use
+	ID        string          `json:"id,omitempty"`          // for tool_use
+	Name      string          `json:"name,omitempty"`        // for tool_use
+	Input     json.RawMessage `json:"input,omitempty"`       // for tool_use
 	ToolUseID string          `json:"tool_use_id,omitempty"` // for tool_result
 }
 type anthTool struct {
@@ -67,11 +67,11 @@ type anthChatReq struct {
 	Tools       []anthTool `json:"tools,omitempty"`
 }
 type anthChatResp struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Content []anthContent `json:"content"`
-	StopReason string `json:"stop_reason"`
-	Usage   struct {
+	ID         string        `json:"id"`
+	Model      string        `json:"model"`
+	Content    []anthContent `json:"content"`
+	StopReason string        `json:"stop_reason"`
+	Usage      struct {
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	} `json:"usage"`

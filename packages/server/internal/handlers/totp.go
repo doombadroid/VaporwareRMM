@@ -8,15 +8,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
-	"github.com/pquerna/otp/totp"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
 	"vaporrmm/server/internal/redis"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/pquerna/otp/totp"
 )
 
 // generateBackupCodes creates 8 single-use recovery codes (format XXXXXXXX-XXXXXXXX).

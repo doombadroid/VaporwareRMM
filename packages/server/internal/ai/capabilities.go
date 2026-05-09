@@ -16,8 +16,8 @@ type Capability struct {
 	Category         Category
 	Description      string
 	Stage            int
-	RequiredCaps     Capabilities       // what the chosen Provider must support
-	DependsOn        []string           // other capability names OR system features ("device_classification")
+	RequiredCaps     Capabilities // what the chosen Provider must support
+	DependsOn        []string     // other capability names OR system features ("device_classification")
 	DefaultRung      Rung
 	DefaultScope     ScopeFilter
 	DefaultPromotion PromotionCriteria
@@ -118,8 +118,8 @@ func CheckDependencies(name string) (unmet []string, err error) {
 
 // ScopeFilterJSON is a small helper so handlers can persist/parse scope
 // filters consistently.
-func ScopeFilterJSON(s ScopeFilter) ([]byte, error)            { return json.Marshal(s) }
-func ParseScopeFilter(raw []byte) (ScopeFilter, error)         {
+func ScopeFilterJSON(s ScopeFilter) ([]byte, error) { return json.Marshal(s) }
+func ParseScopeFilter(raw []byte) (ScopeFilter, error) {
 	var s ScopeFilter
 	if len(raw) == 0 {
 		return s, nil

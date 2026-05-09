@@ -20,10 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/ai"
 	"vaporrmm/server/internal/ai/prompt"
 	"vaporrmm/server/internal/db"
+
+	"github.com/google/uuid"
 )
 
 // AlertContext is the input the dedup capability needs. Callers (the
@@ -46,7 +47,7 @@ type AlertContext struct {
 // without applying it to the ticket_clusters table.
 type AlertCluster struct {
 	ClusterID   string `json:"cluster_id"`
-	Action      string `json:"action"`        // "join_existing" | "open_new"
+	Action      string `json:"action"` // "join_existing" | "open_new"
 	Signature   string `json:"signature"`
 	Name        string `json:"name,omitempty"`
 	LikelyCause string `json:"likely_cause,omitempty"`

@@ -15,12 +15,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gofiber/websocket/v2"
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/email"
 	"vaporrmm/server/internal/redis"
+
+	"github.com/gofiber/websocket/v2"
+	"github.com/google/uuid"
 )
 
 // WSClientInfo holds metadata for a connected WebSocket client.
@@ -39,10 +40,10 @@ var (
 // the filter against THEIR local connections. We can't filter at publish time
 // because the publisher doesn't know which clients are connected on other nodes.
 type wsEnvelope struct {
-	Kind     string          `json:"k"`            // "all" | "filtered"
-	TenantID string          `json:"t,omitempty"`  // for "filtered"
-	OwnerID  string          `json:"o,omitempty"`  // for "filtered"
-	Payload  json.RawMessage `json:"p"`            // the original message
+	Kind     string          `json:"k"`           // "all" | "filtered"
+	TenantID string          `json:"t,omitempty"` // for "filtered"
+	OwnerID  string          `json:"o,omitempty"` // for "filtered"
+	Payload  json.RawMessage `json:"p"`           // the original message
 }
 
 // WSBroadcastMessage sends msg to all connected clients (system-level events).
@@ -71,6 +72,7 @@ func WSBroadcastMessage(msg map[string]interface{}) {
 //   - any super_admin (cross-tenant)
 //   - admins of the same tenant
 //   - the device owner (matching userID)
+//
 // Skips clients in other tenants. Same Redis-vs-local dispatch as WSBroadcastMessage.
 func WSBroadcastFiltered(tenantID, ownerID string, msg map[string]interface{}) {
 	payload, err := json.Marshal(msg)
@@ -95,14 +97,14 @@ func wsFilteredLocal(tenantID, ownerID string, data []byte) {
 	defer WSMu.RUnlock()
 	for conn, info := range WSClients {
 		if info.Role == "super_admin" {
-			conn.WriteMessage(websocket.TextMessage, data)
+			_ = conn.WriteMessage(websocket.TextMessage, data)
 			continue
 		}
 		if info.TenantID != tenantID {
 			continue
 		}
 		if info.Role == "admin" || (ownerID != "" && info.UserID == ownerID) {
-			conn.WriteMessage(websocket.TextMessage, data)
+			_ = conn.WriteMessage(websocket.TextMessage, data)
 		}
 	}
 }
@@ -111,7 +113,7 @@ func wsBroadcastLocal(data []byte) {
 	WSMu.RLock()
 	defer WSMu.RUnlock()
 	for conn := range WSClients {
-		conn.WriteMessage(websocket.TextMessage, data)
+		_ = conn.WriteMessage(websocket.TextMessage, data)
 	}
 }
 

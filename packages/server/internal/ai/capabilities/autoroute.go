@@ -210,7 +210,7 @@ func scoreCandidates(ctx context.Context, tenantID, customerID, title, body stri
 // part-time, on PTO) without setting their workload to zero.
 func computeScore(c RouteCandidate, weight int) float64 {
 	loadInv := 1.0 / (1.0 + float64(c.OpenLoad)) // 1.0 with no load, 0.5 with 1 ticket, 0.33 with 2, etc.
-	affinity := float64(c.CustomerWins30) / 10.0  // saturates at 1.0 with 10+ wins
+	affinity := float64(c.CustomerWins30) / 10.0 // saturates at 1.0 with 10+ wins
 	if affinity > 1.0 {
 		affinity = 1.0
 	}
@@ -324,4 +324,3 @@ func SaveRouteToTicket(ctx context.Context, tenantID, ticketID string, res Route
 	}
 	return nil
 }
-

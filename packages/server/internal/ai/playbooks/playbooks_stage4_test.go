@@ -1,6 +1,9 @@
 package playbooks
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestClearPrintSpoolerAppliesTo(t *testing.T) {
 	c := clearPrintSpooler{}
@@ -28,7 +31,7 @@ func TestFreeDiskSpaceRollbackAlwaysSkipped(t *testing.T) {
 	// always return ErrPreconditionsNotMet so the orchestrator records
 	// outcome=unclear instead of attempting impossible undo.
 	f := freeDiskSpace{}
-	if err := f.Rollback(nil, Target{OSClass: "linux-server"}, "any"); err != ErrPreconditionsNotMet {
+	if err := f.Rollback(context.Background(), Target{OSClass: "linux-server"}, "any"); err != ErrPreconditionsNotMet {
 		t.Errorf("free_disk_space.Rollback should always return ErrPreconditionsNotMet, got %v", err)
 	}
 }
@@ -39,7 +42,7 @@ func TestFreeDiskSpaceApplyRollbackWindowZero(t *testing.T) {
 	// the playbook constructs ApplyResult with the right field via the
 	// RollbackOK signal in Plan.
 	f := freeDiskSpace{}
-	plan, err := f.Plan(nil, Target{OSClass: "linux-server"}, nil)
+	plan, err := f.Plan(context.Background(), Target{OSClass: "linux-server"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

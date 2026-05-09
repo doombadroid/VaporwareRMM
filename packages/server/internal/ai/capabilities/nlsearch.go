@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	"vaporrmm/server/internal/ai"
 	"vaporrmm/server/internal/ai/prompt"
@@ -39,15 +38,15 @@ func init() {
 
 // SearchResult is what the capability returns. The dashboard renders this.
 type SearchResult struct {
-	Answer  string         `json:"answer"`            // human-readable summary
-	Tables  []SearchTable  `json:"tables,omitempty"`  // 0+ structured result tables
-	ToolLog []ToolLogEntry `json:"tool_log"`          // every tool call the model made
+	Answer  string         `json:"answer"`           // human-readable summary
+	Tables  []SearchTable  `json:"tables,omitempty"` // 0+ structured result tables
+	ToolLog []ToolLogEntry `json:"tool_log"`         // every tool call the model made
 }
 
 type SearchTable struct {
-	Title   string           `json:"title"`
-	Columns []string         `json:"columns"`
-	Rows    [][]string       `json:"rows"`
+	Title   string     `json:"title"`
+	Columns []string   `json:"columns"`
+	Rows    [][]string `json:"rows"`
 }
 
 type ToolLogEntry struct {
@@ -235,17 +234,4 @@ func truncateForLog(s string, n int) string {
 		return s
 	}
 	return s[:n] + "...[truncated]"
-}
-
-// formatToolList is a tiny helper used by the NL search prompt — kept here
-// rather than as a method so the prompt construction reads top-down.
-func formatToolList(tools []ai.ToolDef) string {
-	if len(tools) == 0 {
-		return "(no tools available)"
-	}
-	out := "available tools:\n"
-	for _, t := range tools {
-		out += fmt.Sprintf("- %s — %s\n", t.Name, t.Description)
-	}
-	return out
 }

@@ -20,11 +20,11 @@ import (
 type Rung string
 
 const (
-	RungShadow     Rung = "shadow"      // logs prediction, no surfacing
-	RungSuggest    Rung = "suggest"     // surfaces in tech queue, requires explicit approve
-	RungActLow     Rung = "act_low"     // auto-acts on low-blast-radius scope
-	RungActPolicy  Rung = "act_policy"  // auto-acts on operator-defined policies
-	RungAutonomous Rung = "autonomous"  // broadly autonomous within scope filter
+	RungShadow     Rung = "shadow"     // logs prediction, no surfacing
+	RungSuggest    Rung = "suggest"    // surfaces in tech queue, requires explicit approve
+	RungActLow     Rung = "act_low"    // auto-acts on low-blast-radius scope
+	RungActPolicy  Rung = "act_policy" // auto-acts on operator-defined policies
+	RungAutonomous Rung = "autonomous" // broadly autonomous within scope filter
 )
 
 // Category groups capabilities for UI + onboarding.
@@ -73,20 +73,20 @@ const (
 // ScopeFilter constrains which targets a capability may act on. All four
 // dimensions are AND-combined; excludes always win over includes.
 type ScopeFilter struct {
-	CustomerIDs          []string `json:"customer_ids,omitempty"`
-	DeviceClassIncludes  []string `json:"device_class_includes,omitempty"`
-	DeviceClassExcludes  []string `json:"device_class_excludes,omitempty"`
-	DeviceTagExcludes    []string `json:"device_tag_excludes,omitempty"`
+	CustomerIDs         []string `json:"customer_ids,omitempty"`
+	DeviceClassIncludes []string `json:"device_class_includes,omitempty"`
+	DeviceClassExcludes []string `json:"device_class_excludes,omitempty"`
+	DeviceTagExcludes   []string `json:"device_tag_excludes,omitempty"`
 }
 
 // PromotionCriteria is checked by the metrics layer before any rung promotion.
 // Promotion is always manual; demotion is automatic.
 type PromotionCriteria struct {
-	PrecisionMin           float64 `json:"precision_min"`
-	FalsePositiveRateMax   float64 `json:"fpr_max"`
-	LabelingRateMin        float64 `json:"labeling_rate_min"` // techs must label at least this fraction
-	WeeksCleanRequired     int     `json:"weeks_clean_required"`
-	MinSamples             int     `json:"min_samples"` // never promote on N<this
+	PrecisionMin         float64 `json:"precision_min"`
+	FalsePositiveRateMax float64 `json:"fpr_max"`
+	LabelingRateMin      float64 `json:"labeling_rate_min"` // techs must label at least this fraction
+	WeeksCleanRequired   int     `json:"weeks_clean_required"`
+	MinSamples           int     `json:"min_samples"` // never promote on N<this
 }
 
 // Capabilities advertises what a Provider implementation supports. The
@@ -104,24 +104,24 @@ type Capabilities struct {
 // ChatMessage is one turn in a chat exchange. Role is one of
 // "system" | "user" | "assistant" | "tool".
 type ChatMessage struct {
-	Role      string         `json:"role"`
-	Content   string         `json:"content,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	ToolCalls []ToolCall     `json:"tool_calls,omitempty"`
-	ToolID    string         `json:"tool_call_id,omitempty"` // when role=tool
+	Role      string     `json:"role"`
+	Content   string     `json:"content,omitempty"`
+	Name      string     `json:"name,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	ToolID    string     `json:"tool_call_id,omitempty"` // when role=tool
 }
 
 // ChatRequest is provider-neutral. Each Provider translates to its native
 // schema. JSONSchema (when set) requests structured output; providers without
 // JSONMode will reject the request.
 type ChatRequest struct {
-	Model            string
-	Messages         []ChatMessage
-	MaxOutputTokens  int
-	Temperature      float32
-	Tools            []ToolDef
-	JSONSchema       []byte // raw JSON schema; empty = unstructured
-	Stream           bool
+	Model           string
+	Messages        []ChatMessage
+	MaxOutputTokens int
+	Temperature     float32
+	Tools           []ToolDef
+	JSONSchema      []byte // raw JSON schema; empty = unstructured
+	Stream          bool
 }
 
 // ChatResponse carries the model's completion + telemetry needed to bill the
@@ -183,15 +183,15 @@ type Provider interface {
 
 // ProviderConfig is the row from ai_providers, decrypted, ready to instantiate.
 type ProviderConfig struct {
-	ID              string
-	TenantID        string
-	Kind            string
-	Name            string
-	BaseURL         string
-	APIKey          string // decrypted; never log
-	Region          string
-	TrustLevel      TrustLevel
-	Enabled         bool
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID         string
+	TenantID   string
+	Kind       string
+	Name       string
+	BaseURL    string
+	APIKey     string // decrypted; never log
+	Region     string
+	TrustLevel TrustLevel
+	Enabled    bool
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }

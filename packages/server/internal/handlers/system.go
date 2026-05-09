@@ -9,10 +9,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/websocket/v2"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
@@ -20,6 +16,11 @@ import (
 	"vaporrmm/server/internal/middleware"
 	"vaporrmm/server/internal/redis"
 	"vaporrmm/server/internal/utils"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/websocket/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func RegisterSystemRoutes(app *fiber.App, cfg Config, openAPISpec []byte) {
@@ -165,7 +166,7 @@ func RegisterSystemRoutes(app *fiber.App, cfg Config, openAPISpec []byte) {
 			events.WSMu.Unlock()
 			c.Close()
 		}()
-		c.WriteJSON(map[string]interface{}{"type": "connected", "message": "WebSocket connected"})
+		_ = c.WriteJSON(map[string]interface{}{"type": "connected", "message": "WebSocket connected"})
 		for {
 			_, _, err := c.ReadMessage()
 			if err != nil {

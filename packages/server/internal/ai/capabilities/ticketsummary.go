@@ -35,10 +35,10 @@ func init() {
 
 // TriageOut is what we persist to tickets.ai_triage and surface in the UI.
 type TriageOut struct {
-	Summary           string         `json:"summary"`
-	SuggestedPriority string         `json:"suggested_priority"` // low|medium|high|critical
-	SuggestedTags     []string       `json:"suggested_tags,omitempty"`
-	RelatedHits       []rag.Hit      `json:"related_hits,omitempty"`
+	Summary           string    `json:"summary"`
+	SuggestedPriority string    `json:"suggested_priority"` // low|medium|high|critical
+	SuggestedTags     []string  `json:"suggested_tags,omitempty"`
+	RelatedHits       []rag.Hit `json:"related_hits,omitempty"`
 }
 
 // SummariseTicket is the intake entry point. Synchronous so the dashboard

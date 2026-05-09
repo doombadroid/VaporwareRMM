@@ -20,9 +20,11 @@ type freeDiskSpace struct{}
 
 func init() { Register(&freeDiskSpace{}) }
 
-func (freeDiskSpace) Name() string        { return "free_disk_space" }
-func (freeDiskSpace) Description() string { return "Clear safe temp locations + package caches + old journal logs. Non-rollbackable." }
-func (freeDiskSpace) Severity() Severity  { return SeverityMedium }
+func (freeDiskSpace) Name() string { return "free_disk_space" }
+func (freeDiskSpace) Description() string {
+	return "Clear safe temp locations + package caches + old journal logs. Non-rollbackable."
+}
+func (freeDiskSpace) Severity() Severity { return SeverityMedium }
 
 func (freeDiskSpace) AppliesTo(t Target) bool {
 	for _, tag := range t.Tags {

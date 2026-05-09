@@ -13,8 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"vaporrmm/server/internal/auth"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 // safeProbeClient returns an http.Client whose Transport refuses to dial
@@ -78,7 +79,8 @@ func rejectPrivateHost(rawURL string) error {
 // Tailscale CLI, Sunshine release availability, and Moonlight web URL.
 //
 // Each probe returns:
-//   { ok: bool, detail: "...", checked_at: <unix> }
+//
+//	{ ok: bool, detail: "...", checked_at: <unix> }
 func RegisterIntegrationProbes(api fiber.Router) {
 	probes := api.Group("/admin/probes", auth.SuperAdminMiddleware())
 

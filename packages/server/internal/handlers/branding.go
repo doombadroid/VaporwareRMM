@@ -6,11 +6,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gofiber/fiber/v2"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 var (
@@ -147,7 +148,7 @@ func RegisterBrandingRoutes(app *fiber.App, api fiber.Router) {
 
 func getBrandingAndServerURL(c *fiber.Ctx) (models.BrandingConfig, string) {
 	var bc models.BrandingConfig
-	db.DB.QueryRow(`SELECT app_name, icon_url, company_name, primary_color FROM branding WHERE id = 'default'`).Scan(
+	_ = db.DB.QueryRow(`SELECT app_name, icon_url, company_name, primary_color FROM branding WHERE id = 'default'`).Scan(
 		&bc.AppName, &bc.IconURL, &bc.CompanyName, &bc.PrimaryColor,
 	)
 	if bc.AppName == "" {

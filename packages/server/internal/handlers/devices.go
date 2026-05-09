@@ -11,13 +11,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
 	"vaporrmm/server/internal/utils"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 var tsAuthKeyRe = regexp.MustCompile(`^[a-zA-Z0-9_:-]+$`)
@@ -435,7 +436,7 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		var req struct {
 			AuthKey string `json:"auth_key,omitempty"`
 		}
-		c.BodyParser(&req)
+		_ = c.BodyParser(&req)
 
 		var installCmd string
 		switch d.OSName {
@@ -545,9 +546,7 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			Ephemeral bool     `json:"ephemeral,omitempty"`
 			Tags      []string `json:"tags,omitempty"`
 		}
-		if err := c.BodyParser(&req); err != nil {
-			// continue with empty
-		}
+		_ = c.BodyParser(&req)
 		args := []string{"tailscale", "auth-key", "create"}
 		if req.Reusable {
 			args = append(args, "--reusable")

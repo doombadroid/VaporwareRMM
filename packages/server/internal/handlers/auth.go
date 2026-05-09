@@ -10,9 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
@@ -20,6 +17,10 @@ import (
 	"vaporrmm/server/internal/events"
 	"vaporrmm/server/internal/redis"
 	"vaporrmm/server/internal/utils"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type loginAttempt struct {
@@ -29,13 +30,13 @@ type loginAttempt struct {
 }
 
 var (
-	loginAttempts  = make(map[string]*loginAttempt)
-	ipAttempts     = make(map[string]*loginAttempt)
-	loginMu        sync.Mutex
-	maxAttempts    = 5
-	blockDuration  = 15 * time.Minute
-	windowDuration = 5 * time.Minute
-	ipMaxAttempts  = 20
+	loginAttempts    = make(map[string]*loginAttempt)
+	ipAttempts       = make(map[string]*loginAttempt)
+	loginMu          sync.Mutex
+	maxAttempts      = 5
+	blockDuration    = 15 * time.Minute
+	windowDuration   = 5 * time.Minute
+	ipMaxAttempts    = 20
 	ipWindowDuration = 5 * time.Minute
 )
 
@@ -410,16 +411,16 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 	api.Get("/users/me", func(c *fiber.Ctx) error {
 		userID := c.Locals("user_id").(string)
 		var u struct {
-			ID                  string `json:"id"`
-			Email               string `json:"email"`
-			Name                string `json:"name"`
-			Role                string `json:"role"`
-			CreatedAt           int64  `json:"created_at"`
-			TenantID            string `json:"tenant_id"`
-			TenantName          string `json:"tenant_name"`
-			Impersonating       bool   `json:"impersonating"`
-			OriginalRole        string `json:"original_role,omitempty"`
-			OriginalTenantID    string `json:"original_tenant_id,omitempty"`
+			ID               string `json:"id"`
+			Email            string `json:"email"`
+			Name             string `json:"name"`
+			Role             string `json:"role"`
+			CreatedAt        int64  `json:"created_at"`
+			TenantID         string `json:"tenant_id"`
+			TenantName       string `json:"tenant_name"`
+			Impersonating    bool   `json:"impersonating"`
+			OriginalRole     string `json:"original_role,omitempty"`
+			OriginalTenantID string `json:"original_tenant_id,omitempty"`
 		}
 		err := db.DB.QueryRow(
 			`SELECT u.id, u.email, u.name, u.role, u.created_at, COALESCE(u.tenant_id,'default'), COALESCE(t.name,'Default')

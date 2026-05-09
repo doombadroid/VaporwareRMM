@@ -17,8 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"vaporrmm/server/internal/db"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 type cachedTenant struct {

@@ -5,12 +5,13 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 func RegisterWebhookRoutes(api fiber.Router) {

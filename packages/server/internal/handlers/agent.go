@@ -9,14 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/ai/sysfeatures"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
 	"vaporrmm/server/internal/utils"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 func RegisterAgentRoutes(app *fiber.App, cfg Config) {

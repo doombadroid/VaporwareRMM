@@ -7,12 +7,13 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/ai/capabilities"
 	"vaporrmm/server/internal/ai/rag"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 func RegisterTicketRoutes(api fiber.Router, cfg Config) {

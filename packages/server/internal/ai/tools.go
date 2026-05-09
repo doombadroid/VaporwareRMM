@@ -121,11 +121,11 @@ func ValidateToolCallArgs(name string, args []byte) error {
 // the snapshot at execution time. If a device's tags changed mid-flight,
 // the handler refuses rather than acting on stale authorisation.
 type ScopeSnapshot struct {
-	TenantID    string             `json:"tenant_id"`
-	CustomerID  string             `json:"customer_id,omitempty"`
-	Devices     []DeviceSnapshot   `json:"devices,omitempty"`
-	CapturedAt  int64              `json:"captured_at"`
-	Hash        string             `json:"hash"` // computed by the gate, audited
+	TenantID   string           `json:"tenant_id"`
+	CustomerID string           `json:"customer_id,omitempty"`
+	Devices    []DeviceSnapshot `json:"devices,omitempty"`
+	CapturedAt int64            `json:"captured_at"`
+	Hash       string           `json:"hash"` // computed by the gate, audited
 }
 
 // DeviceSnapshot captures the parts of a device record that scope decisions

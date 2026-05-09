@@ -144,8 +144,8 @@ func targetTenant(c *fiber.Ctx) string {
 func aiGetTenant(c *fiber.Ctx) error {
 	tid := targetTenant(c)
 	var (
-		enabled, dpa  sql.NullInt64
-		billing       sql.NullString
+		enabled, dpa    sql.NullInt64
+		billing         sql.NullString
 		chatCap, embCap sql.NullInt64
 	)
 	err := db.DB.QueryRow(`
@@ -159,21 +159,21 @@ func aiGetTenant(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "tenant not found"})
 	}
 	return c.JSON(fiber.Map{
-		"tenant_id":                       tid,
-		"ai_enabled":                      enabled.Int64 == 1,
-		"ai_billing_mode":                 billing.String,
-		"ai_max_chat_cost_per_day_micros": chatCap.Int64,
+		"tenant_id":                            tid,
+		"ai_enabled":                           enabled.Int64 == 1,
+		"ai_billing_mode":                      billing.String,
+		"ai_max_chat_cost_per_day_micros":      chatCap.Int64,
 		"ai_max_embedding_cost_per_day_micros": embCap.Int64,
-		"ai_dpa_acknowledged_at":          nullableInt(dpa),
+		"ai_dpa_acknowledged_at":               nullableInt(dpa),
 	})
 }
 
 type tenantPatch struct {
-	AIEnabled              *bool   `json:"ai_enabled,omitempty"`
-	AIBillingMode          *string `json:"ai_billing_mode,omitempty"`
-	AIMaxChatCostPerDay    *int64  `json:"ai_max_chat_cost_per_day_micros,omitempty"`
-	AIMaxEmbedCostPerDay   *int64  `json:"ai_max_embedding_cost_per_day_micros,omitempty"`
-	AcknowledgeDPA         *bool   `json:"acknowledge_dpa,omitempty"`
+	AIEnabled            *bool   `json:"ai_enabled,omitempty"`
+	AIBillingMode        *string `json:"ai_billing_mode,omitempty"`
+	AIMaxChatCostPerDay  *int64  `json:"ai_max_chat_cost_per_day_micros,omitempty"`
+	AIMaxEmbedCostPerDay *int64  `json:"ai_max_embedding_cost_per_day_micros,omitempty"`
+	AcknowledgeDPA       *bool   `json:"acknowledge_dpa,omitempty"`
 }
 
 func aiPatchTenant(c *fiber.Ctx) error {
@@ -441,7 +441,7 @@ func aiListRouting(c *fiber.Ctx) error {
 	out := []fiber.Map{}
 	for rows.Next() {
 		var (
-			id, task, pp, fp, model, embedModel string
+			id, task, pp, fp, model, embedModel     string
 			maxCost, inTok, outTok, inRate, outRate int64
 		)
 		if err := rows.Scan(&id, &task, &pp, &fp, &model, &embedModel,
@@ -621,34 +621,34 @@ func aiListCapabilities(c *fiber.Ctx) error {
 		}
 		unmet, _ := ai.CheckDependencies(cap.Name)
 		out = append(out, fiber.Map{
-			"name":                       cap.Name,
-			"category":                   string(cap.Category),
-			"description":                cap.Description,
-			"stage":                      cap.Stage,
-			"depends_on":                 cap.DependsOn,
-			"unmet_dependencies":         unmet,
-			"required_caps":              cap.RequiredCaps,
-			"preferred_task_type":        string(cap.PreferredTaskType),
-			"enabled":                    enabled == 1,
-			"rung":                       rung,
-			"scope_filter":               scope,
-			"confidence_threshold":       conf,
-			"blast_radius_max_devices":   blastMax,
+			"name":                        cap.Name,
+			"category":                    string(cap.Category),
+			"description":                 cap.Description,
+			"stage":                       cap.Stage,
+			"depends_on":                  cap.DependsOn,
+			"unmet_dependencies":          unmet,
+			"required_caps":               cap.RequiredCaps,
+			"preferred_task_type":         string(cap.PreferredTaskType),
+			"enabled":                     enabled == 1,
+			"rung":                        rung,
+			"scope_filter":                scope,
+			"confidence_threshold":        conf,
+			"blast_radius_max_devices":    blastMax,
 			"blast_radius_window_minutes": blastWin,
-			"kill_switch":                killSwitch,
+			"kill_switch":                 killSwitch,
 		})
 	}
 	return c.JSON(fiber.Map{"capabilities": out})
 }
 
 type capabilityPatch struct {
-	Enabled                  *bool             `json:"enabled,omitempty"`
-	Rung                     *string           `json:"rung,omitempty"`
-	ScopeFilter              *ai.ScopeFilter   `json:"scope_filter,omitempty"`
-	ConfidenceThreshold      *int              `json:"confidence_threshold,omitempty"`
-	BlastRadiusMaxDevices    *int              `json:"blast_radius_max_devices,omitempty"`
-	BlastRadiusWindowMinutes *int              `json:"blast_radius_window_minutes,omitempty"`
-	KillSwitch               *bool             `json:"kill_switch,omitempty"`
+	Enabled                  *bool           `json:"enabled,omitempty"`
+	Rung                     *string         `json:"rung,omitempty"`
+	ScopeFilter              *ai.ScopeFilter `json:"scope_filter,omitempty"`
+	ConfidenceThreshold      *int            `json:"confidence_threshold,omitempty"`
+	BlastRadiusMaxDevices    *int            `json:"blast_radius_max_devices,omitempty"`
+	BlastRadiusWindowMinutes *int            `json:"blast_radius_window_minutes,omitempty"`
+	KillSwitch               *bool           `json:"kill_switch,omitempty"`
 }
 
 func aiPatchCapability(c *fiber.Ctx) error {
@@ -854,10 +854,10 @@ func aiVerifyRun(c *fiber.Ctx) error {
 	}
 	expected := ai.RecomputeSignature(row)
 	return c.JSON(fiber.Map{
-		"run_id":    id,
-		"stored":    row.Signed,
+		"run_id":     id,
+		"stored":     row.Signed,
 		"recomputed": expected,
-		"valid":     expected == row.Signed,
+		"valid":      expected == row.Signed,
 	})
 }
 
@@ -957,9 +957,9 @@ func aiCapabilityMetrics(c *fiber.Ctx) error {
 	out := []fiber.Map{}
 	for rows.Next() {
 		var (
-			capID                                                     string
-			calls, lc, li, lu                                         int
-			cost                                                      int64
+			capID             string
+			calls, lc, li, lu int
+			cost              int64
 		)
 		if err := rows.Scan(&capID, &calls, &lc, &li, &lu, &cost); err != nil {
 			continue
@@ -974,15 +974,15 @@ func aiCapabilityMetrics(c *fiber.Ctx) error {
 			precision = float64(lc) / float64(labelled)
 		}
 		out = append(out, fiber.Map{
-			"capability_id":     capID,
-			"window_days":       days,
-			"calls":             calls,
-			"labelled_correct":  lc,
+			"capability_id":      capID,
+			"window_days":        days,
+			"calls":              calls,
+			"labelled_correct":   lc,
 			"labelled_incorrect": li,
-			"labelled_unclear":  lu,
-			"labelling_rate":    labelRate,
-			"precision":         precision,
-			"cost_usd_micros":   cost,
+			"labelled_unclear":   lu,
+			"labelling_rate":     labelRate,
+			"precision":          precision,
+			"cost_usd_micros":    cost,
 		})
 	}
 	return c.JSON(fiber.Map{"metrics": out, "since": since})

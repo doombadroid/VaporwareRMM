@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/db"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 func initTestDB(t *testing.T) {

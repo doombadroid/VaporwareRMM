@@ -53,10 +53,10 @@ func init() {
 // RemediationDecision is the model's structured output. The chokepoint reads
 // this from action_taken on the audit row.
 type RemediationDecision struct {
-	Playbook      string         `json:"playbook"`
-	Args          map[string]any `json:"args"`
-	Reason        string         `json:"reason"`
-	Decline       bool           `json:"decline"` // true = the model refused to remediate
+	Playbook string         `json:"playbook"`
+	Args     map[string]any `json:"args"`
+	Reason   string         `json:"reason"`
+	Decline  bool           `json:"decline"` // true = the model refused to remediate
 	// RollbackToken is set after a successful Apply so the rollback
 	// orchestrator can find the originating run row by token-substring
 	// search on action_taken. Empty for shadow runs and decline-paths.
@@ -66,10 +66,10 @@ type RemediationDecision struct {
 // RemediationResult bundles decision + execution outcome (when run at
 // act_low+) so the audit log + dashboard see one row per attempt.
 type RemediationResult struct {
-	Decision        RemediationDecision `json:"decision"`
-	Applied         bool                `json:"applied"`
-	RollbackToken   string              `json:"rollback_token,omitempty"`
-	OutcomeAt       int64               `json:"outcome_check_at,omitempty"`
+	Decision      RemediationDecision `json:"decision"`
+	Applied       bool                `json:"applied"`
+	RollbackToken string              `json:"rollback_token,omitempty"`
+	OutcomeAt     int64               `json:"outcome_check_at,omitempty"`
 }
 
 // Remediate runs the capability for a given alert context. The chokepoint's
@@ -114,7 +114,7 @@ Rules:
 - Choose only from the listed playbooks; do not invent commands.
 - args must match the playbook's expected schema (e.g., restart_service expects {"service":"<name>"}).
 - Refuse if the alert mentions a domain controller, hypervisor, file server, or anything tagged "regulated"/"critical".`).
-		TrustedContext("available playbooks: " + string(choicesJSON)).
+		TrustedContext("available playbooks: "+string(choicesJSON)).
 		TrustedContext(fmt.Sprintf("device: id=%s os_class=%s tags=%s", target.DeviceID, target.OSClass, strings.Join(target.Tags, ","))).
 		UntrustedInput("alert_title", alert.Title).
 		UntrustedInput("alert_body", alert.Body).

@@ -6,12 +6,13 @@ import (
 	"os"
 	"testing"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // setupTestServer creates a test server with an in-memory SQLite database.

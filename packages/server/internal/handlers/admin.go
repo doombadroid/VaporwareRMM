@@ -6,9 +6,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 func RegisterAdminRoutes(api fiber.Router) {

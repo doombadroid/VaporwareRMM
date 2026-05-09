@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/db"
+
+	"github.com/google/uuid"
 )
 
 // runOnPostgres skips the test if DATABASE_URL is not a postgres URL.

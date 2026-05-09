@@ -7,11 +7,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 func RegisterComplianceRoutes(api fiber.Router, cfg Config) {

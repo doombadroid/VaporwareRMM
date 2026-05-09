@@ -641,13 +641,6 @@ func RunMigrations(dialect string) error {
 			continue
 		}
 
-		// For PostgreSQL, we need to handle IF NOT EXISTS differently
-		// For simplicity, we skip errors on duplicate columns
-		if dialect == "postgres" {
-			// PostgreSQL supports IF NOT EXISTS for some ALTER TABLE ops
-			// but not all. We just try to run and ignore certain errors.
-		}
-
 		_, err := DB.Exec(m.SQL)
 		if err != nil {
 			// Tolerate idempotent re-runs (duplicate column, already exists)
@@ -704,6 +697,7 @@ func EnsureDefaultTenant() {
 	}
 	slog.Info("created default tenant")
 }
+
 var DB *Wrapper
 
 func Init() error {
@@ -1161,7 +1155,7 @@ func BackupSQLite(dstPath string) error {
 			if err != nil {
 				return fmt.Errorf("failed to initialize backup: %w", err)
 			}
-			defer backup.Finish()
+			defer func() { _ = backup.Finish() }()
 			_, err = backup.Step(-1)
 			return err
 		})

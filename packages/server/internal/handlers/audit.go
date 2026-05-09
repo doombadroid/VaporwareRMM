@@ -5,9 +5,10 @@ import (
 	"log/slog"
 	"strconv"
 
-	"github.com/gofiber/fiber/v2"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 func RegisterAuditRoutes(api fiber.Router, cfg Config) {

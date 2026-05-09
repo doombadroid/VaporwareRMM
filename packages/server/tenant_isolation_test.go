@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+
+	"github.com/google/uuid"
 )
 
 // setupTenantTestDB initializes a clean DB with two tenants and one device per tenant.

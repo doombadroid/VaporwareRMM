@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -157,11 +156,4 @@ func GetCachedDeviceMetrics(deviceID string) (string, error) {
 		return "", nil
 	}
 	return Client.Get(Ctx, "metrics:"+deviceID).Result()
-}
-
-func parseInt(s string, fallback int) int {
-	if v, err := strconv.Atoi(s); err == nil {
-		return v
-	}
-	return fallback
 }

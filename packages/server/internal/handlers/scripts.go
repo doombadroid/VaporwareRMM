@@ -7,13 +7,14 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
 	"vaporrmm/server/internal/utils"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 func RegisterScriptRoutes(api fiber.Router, cfg Config) {

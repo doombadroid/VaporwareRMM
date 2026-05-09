@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/db"
+
+	"github.com/google/uuid"
 )
 
 // agentbridge is the playbook framework's interface to the existing
@@ -20,14 +21,6 @@ import (
 // queueAgentCommand returns the command_id so the orchestrator can poll
 // status / retrieve output later. Polling is the orchestrator's job; this
 // helper is fire-and-record.
-
-type agentCommand struct {
-	ID         string
-	DeviceID   string
-	Type       string
-	Payload    string // JSON
-	TenantID   string
-}
 
 // queueAgentCommand inserts into device_commands. The command type is one of
 // the existing types the agent already understands (shell|powershell|update|

@@ -12,13 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/email"
 	"vaporrmm/server/internal/events"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // inviteTTL is how long a tenant invite is valid before requiring a fresh send.
@@ -304,7 +305,7 @@ func hashInviteToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// publicBaseURL returns the URL the dashboard is hosted on, prefering PUBLIC_URL.
+// publicBaseURL returns the URL the dashboard is hosted on, preferring PUBLIC_URL.
 func publicBaseURL(c *fiber.Ctx) string {
 	if u := os.Getenv("PUBLIC_URL"); u != "" {
 		return u

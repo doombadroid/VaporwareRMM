@@ -19,9 +19,11 @@ type clearPrintSpooler struct{}
 
 func init() { Register(&clearPrintSpooler{}) }
 
-func (clearPrintSpooler) Name() string        { return "clear_print_spooler" }
-func (clearPrintSpooler) Description() string { return "Cancel queued print jobs + restart the print spooler service. Idempotent (no jobs = no-op delete)." }
-func (clearPrintSpooler) Severity() Severity  { return SeverityLow }
+func (clearPrintSpooler) Name() string { return "clear_print_spooler" }
+func (clearPrintSpooler) Description() string {
+	return "Cancel queued print jobs + restart the print spooler service. Idempotent (no jobs = no-op delete)."
+}
+func (clearPrintSpooler) Severity() Severity { return SeverityLow }
 
 func (clearPrintSpooler) AppliesTo(t Target) bool {
 	for _, tag := range t.Tags {

@@ -18,7 +18,7 @@ import (
 // The goal is to catch the "developer added an os.Getenv fallback for
 // testing" mistake at PR time rather than at first incident.
 
-const aiPkgRel = "."          // tests run with cwd = packages/server/internal/ai
+const aiPkgRel = "." // tests run with cwd = packages/server/internal/ai
 const providersRel = "providers"
 
 var forbiddenPatterns = []string{

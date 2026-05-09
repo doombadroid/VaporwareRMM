@@ -14,13 +14,14 @@ import (
 	"sync"
 	"time"
 
+	"vaporrmm/models"
+	"vaporrmm/server/internal/db"
+	"vaporrmm/server/internal/redis"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
-	"vaporrmm/models"
-	"vaporrmm/server/internal/db"
-	"vaporrmm/server/internal/redis"
 )
 
 var (
@@ -63,13 +64,14 @@ func GenerateJWT(userID, tenantID, role string, expiryHours int) (string, error)
 // EndImpersonation can restore it without trusting client-supplied state.
 //
 // claims:
-//   sub  - super_admin's user_id (audit trail)
-//   tid  - target tenant
-//   role - "admin" (NOT super_admin — impersonator only has tenant_admin powers
-//          inside the target tenant; super_admin endpoints stay locked)
-//   imp_for       - same as sub, makes the impersonation explicit for /users/me
-//   imp_orig_tid  - super_admin's home tenant (to return to)
-//   imp_orig_role - "super_admin" (to restore on end)
+//
+//	sub  - super_admin's user_id (audit trail)
+//	tid  - target tenant
+//	role - "admin" (NOT super_admin — impersonator only has tenant_admin powers
+//	       inside the target tenant; super_admin endpoints stay locked)
+//	imp_for       - same as sub, makes the impersonation explicit for /users/me
+//	imp_orig_tid  - super_admin's home tenant (to return to)
+//	imp_orig_role - "super_admin" (to restore on end)
 func GenerateImpersonationJWT(superUserID, targetTenantID, originalTenantID, originalRole string, expiryHours int) (string, error) {
 	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{

@@ -13,9 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
+
+	"github.com/google/uuid"
 )
 
 // modelVersionRe is what we accept from a provider's reported model name
@@ -47,13 +48,13 @@ func sanitizeModelVersion(s string) string {
 
 // Sentinels the chokepoint can return. Callers map these to HTTP statuses.
 var (
-	ErrAIDisabled         = errors.New("ai: disabled for this tenant")
-	ErrCapabilityKilled   = errors.New("ai: capability or tenant kill switch is active")
-	ErrCapabilityDisabled = errors.New("ai: capability not enabled for this tenant")
-	ErrNoProvider         = errors.New("ai: no provider configured for this routing rule")
-	ErrCapNotFound        = errors.New("ai: capability not registered in this build")
-	ErrUnmetDependency    = errors.New("ai: capability has unmet dependencies")
-	ErrTenantSuspended    = errors.New("ai: tenant suspended")
+	ErrAIDisabled          = errors.New("ai: disabled for this tenant")
+	ErrCapabilityKilled    = errors.New("ai: capability or tenant kill switch is active")
+	ErrCapabilityDisabled  = errors.New("ai: capability not enabled for this tenant")
+	ErrNoProvider          = errors.New("ai: no provider configured for this routing rule")
+	ErrCapNotFound         = errors.New("ai: capability not registered in this build")
+	ErrUnmetDependency     = errors.New("ai: capability has unmet dependencies")
+	ErrTenantSuspended     = errors.New("ai: tenant suspended")
 	ErrProviderCapMismatch = errors.New("ai: chosen provider does not support a capability the requested feature requires")
 )
 
@@ -84,10 +85,10 @@ func NewChainID() string { return uuid.New().String() }
 // so callers cannot mis-specify the operative rung or scope.
 type Input struct {
 	TenantID     string
-	CapabilityID string         // matches Capability.Name
-	CustomerID   string         // optional
-	DeviceID     string         // optional
-	TicketID     string         // optional
+	CapabilityID string // matches Capability.Name
+	CustomerID   string // optional
+	DeviceID     string // optional
+	TicketID     string // optional
 	RunType      RunType
 	Devices      []DeviceSnapshot // captured by caller, audited by gate
 	// Estimate is the caller's pre-call cost estimate in micros. The chokepoint
@@ -108,6 +109,7 @@ type Output struct {
 //   - the resolved Provider
 //   - the model name the operator pinned in the routing rule for this
 //     capability's preferred task type
+//
 // The closure must use the supplied modelName when building the request;
 // otherwise the operator's routing config is silently ignored. Returning
 // ChatResp / EmbedResp (whichever applies) lets Run record token counts
@@ -116,19 +118,19 @@ type Func func(ctx context.Context, p Provider, modelName string) (*ChatResponse
 
 // runtimeConfig is what we resolve up front so nothing changes mid-run.
 type runtimeConfig struct {
-	tenantStatus      string
-	rung              Rung
-	enabled           bool
-	scopeFilter       ScopeFilter
-	confidence        int
-	blastMax          int
-	blastWindow       int
-	providerCfg       ProviderConfig
-	costKind          CostKind
-	modelName         string
-	maxCostMicros     int64
-	costPerKInput     int64 // copied from routing rule so we don't re-query mid-call
-	costPerKOutput    int64
+	tenantStatus   string
+	rung           Rung
+	enabled        bool
+	scopeFilter    ScopeFilter
+	confidence     int
+	blastMax       int
+	blastWindow    int
+	providerCfg    ProviderConfig
+	costKind       CostKind
+	modelName      string
+	maxCostMicros  int64
+	costPerKInput  int64 // copied from routing rule so we don't re-query mid-call
+	costPerKOutput int64
 }
 
 // Run is the chokepoint. Every provider call in the codebase goes through

@@ -9,15 +9,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/email"
 	"vaporrmm/server/internal/events"
 	"vaporrmm/server/internal/middleware"
 	"vaporrmm/server/internal/redis"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Self-serve signup is off by default. Operator opts in by setting:
@@ -34,19 +35,19 @@ func RegisterSignupRoutes(publicAPI fiber.Router) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Not found"})
 		}
 		var req struct {
-			TenantName  string `json:"tenant_name"`
-			TenantSlug  string `json:"tenant_slug"`
-			AdminName   string `json:"admin_name"`
-			AdminEmail  string `json:"admin_email"`
-			Password    string `json:"password"`
-			InviteCode  string `json:"invite_code"`
+			TenantName string `json:"tenant_name"`
+			TenantSlug string `json:"tenant_slug"`
+			AdminName  string `json:"admin_name"`
+			AdminEmail string `json:"admin_email"`
+			Password   string `json:"password"`
+			InviteCode string `json:"invite_code"`
 		}
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid body"})
 		}
 		// Constant-time invite-code check when configured
 		if expected := os.Getenv("SIGNUP_INVITE_CODE"); expected != "" {
-			if subtleEq(req.InviteCode, expected) != true {
+			if !subtleEq(req.InviteCode, expected) {
 				return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Invalid invite code"})
 			}
 		}

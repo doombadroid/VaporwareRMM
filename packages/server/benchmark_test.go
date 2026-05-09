@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"golang.org/x/crypto/bcrypt"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+
+	"github.com/gofiber/fiber/v2"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // setupBenchmarkServer creates a minimal server for benchmarking.

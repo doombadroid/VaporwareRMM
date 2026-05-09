@@ -14,9 +14,11 @@ type forceGpupdate struct{}
 
 func init() { Register(&forceGpupdate{}) }
 
-func (forceGpupdate) Name() string        { return "force_gpupdate" }
-func (forceGpupdate) Description() string { return "Force Group Policy refresh via gpupdate /force. Windows only. Excludes domain controllers." }
-func (forceGpupdate) Severity() Severity  { return SeverityLow }
+func (forceGpupdate) Name() string { return "force_gpupdate" }
+func (forceGpupdate) Description() string {
+	return "Force Group Policy refresh via gpupdate /force. Windows only. Excludes domain controllers."
+}
+func (forceGpupdate) Severity() Severity { return SeverityLow }
 
 func (forceGpupdate) AppliesTo(t Target) bool {
 	if t.OSClass != "windows-server" && t.OSClass != "windows-workstation" {

@@ -95,10 +95,10 @@ type CommandRequest struct {
 
 // CommandResult represents the result of a command execution.
 type CommandResult struct {
-	CommandID string    `json:"command_id"`
-	Success   bool      `json:"success"`
-	Output    string    `json:"output,omitempty"`
-	Error     string    `json:"error,omitempty"`
+	CommandID string      `json:"command_id"`
+	Success   bool        `json:"success"`
+	Output    string      `json:"output,omitempty"`
+	Error     string      `json:"error,omitempty"`
 	Timestamp interface{} `json:"timestamp"` // time.Time or int64
 }
 

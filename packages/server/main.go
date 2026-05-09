@@ -14,10 +14,6 @@ import (
 
 	_ "embed"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/logger"
-	"github.com/gofiber/fiber/v2/middleware/recover"
 	"vaporrmm/server/internal/ai"
 	"vaporrmm/server/internal/ai/capabilities"
 	_ "vaporrmm/server/internal/ai/playbooks"
@@ -33,6 +29,11 @@ import (
 	"vaporrmm/server/internal/middleware"
 	"vaporrmm/server/internal/redis"
 	"vaporrmm/server/internal/utils"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
 //go:embed openapi.json

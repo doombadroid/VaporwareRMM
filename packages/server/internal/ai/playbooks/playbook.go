@@ -53,28 +53,28 @@ type Target struct {
 	TenantID   string
 	CustomerID string
 	DeviceID   string
-	OSClass    string  // populated from devices.os_class
+	OSClass    string // populated from devices.os_class
 	Tags       []string
 }
 
 // PlanResult describes what Apply would do without doing it. The dashboard
 // renders this as an operator confirmation sheet.
 type PlanResult struct {
-	Description string         // human-readable
-	Steps       []string       // ordered list of agent commands or API calls
-	WillModify  []string       // service names, file paths, registry keys, etc.
-	RollbackOK  bool           // false = irreversible
+	Description string   // human-readable
+	Steps       []string // ordered list of agent commands or API calls
+	WillModify  []string // service names, file paths, registry keys, etc.
+	RollbackOK  bool     // false = irreversible
 }
 
 // ApplyResult is what Apply returned. The orchestrator schedules a regression
 // check at OutcomeCheckAt and attempts Rollback if the alert that triggered
 // the playbook re-fires within RollbackWindow.
 type ApplyResult struct {
-	Success           bool
-	Detail            string
-	RollbackToken     string         // opaque blob the playbook needs to reverse the change
-	RollbackPreconditions string     // human-readable description; orchestrator stores it
-	RollbackWindow    time.Duration  // how long to watch for regression
+	Success               bool
+	Detail                string
+	RollbackToken         string        // opaque blob the playbook needs to reverse the change
+	RollbackPreconditions string        // human-readable description; orchestrator stores it
+	RollbackWindow        time.Duration // how long to watch for regression
 }
 
 // Playbook is the contract. Implementations live in this package alongside
@@ -120,8 +120,8 @@ type Playbook interface {
 var ErrPreconditionsNotMet = errors.New("playbooks: rollback preconditions no longer met; skipping")
 
 var (
-	pbMu       sync.RWMutex
-	registry   = map[string]Playbook{}
+	pbMu     sync.RWMutex
+	registry = map[string]Playbook{}
 )
 
 // Register adds a playbook. Called from init() in each playbook file.

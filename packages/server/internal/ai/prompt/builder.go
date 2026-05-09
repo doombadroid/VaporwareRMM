@@ -39,13 +39,13 @@ type Scope struct {
 // SystemRules / TrustedContext / UntrustedInput / RAGSnippet in any order.
 // Render() returns the assembled messages + a stable hash.
 type Builder struct {
-	scope    Scope
-	system   []string
-	trusted  []string
-	untrust  []taggedInput
-	rag      []ragSnippet
-	tools    []ai.ToolDef
-	scheme   string // optional JSON schema for structured outputs
+	scope   Scope
+	system  []string
+	trusted []string
+	untrust []taggedInput
+	rag     []ragSnippet
+	tools   []ai.ToolDef
+	scheme  string // optional JSON schema for structured outputs
 }
 
 type taggedInput struct {

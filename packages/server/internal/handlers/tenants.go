@@ -12,13 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/ai"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
 	"vaporrmm/server/internal/middleware"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 // hashRegistrationSecret returns the SHA-256 hex digest used to store / look up registration secrets.

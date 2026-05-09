@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 // Tables we export. agent_tokens is included (hashes only — never the
@@ -139,11 +140,11 @@ func writeTenantExport(c *fiber.Ctx, tenantID string) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Tenant not found"})
 	}
 	out := map[string]interface{}{
-		"format_version":  1,
-		"exported_at":     time.Now().Unix(),
-		"tenant_id":       tenantID,
-		"tenant_name":     name,
-		"server_version":  "vaporrmm",
+		"format_version": 1,
+		"exported_at":    time.Now().Unix(),
+		"tenant_id":      tenantID,
+		"tenant_name":    name,
+		"server_version": "vaporrmm",
 		"sensitive_omitted": []string{
 			"alert_settings.smtp_password (encrypted)",
 			"webhooks.secret (encrypted)",

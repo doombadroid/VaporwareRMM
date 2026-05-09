@@ -7,10 +7,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/ai"
 	"vaporrmm/server/internal/ai/playbooks"
 	"vaporrmm/server/internal/db"
+
+	"github.com/google/uuid"
 )
 
 // The rollback orchestrator turns auto_remediate's "fire and forget" Apply

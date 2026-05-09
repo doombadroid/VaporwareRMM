@@ -127,7 +127,7 @@ func reserveViaDB(ctx context.Context, tenantID string, kind CostKind, micros, c
 	if err != nil {
 		return fmt.Errorf("ai: cost reserve begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.Exec(`SELECT id FROM tenants WHERE id = ? FOR UPDATE`, tenantID); err != nil {
 		return fmt.Errorf("ai: cost reserve lock: %w", err)

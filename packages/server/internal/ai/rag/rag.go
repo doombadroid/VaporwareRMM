@@ -26,9 +26,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"vaporrmm/server/internal/ai"
 	"vaporrmm/server/internal/db"
+
+	"github.com/google/uuid"
 )
 
 // Defaults. Operators can pin a different embedding model per routing rule;

@@ -42,9 +42,9 @@ func (p *googleProvider) base() string {
 }
 
 type gPart struct {
-	Text         string          `json:"text,omitempty"`
-	FunctionCall *gFunctionCall  `json:"functionCall,omitempty"`
-	FunctionResp *gFunctionResp  `json:"functionResponse,omitempty"`
+	Text         string         `json:"text,omitempty"`
+	FunctionCall *gFunctionCall `json:"functionCall,omitempty"`
+	FunctionResp *gFunctionResp `json:"functionResponse,omitempty"`
 }
 type gFunctionCall struct {
 	Name string          `json:"name"`
@@ -67,16 +67,16 @@ type gTool struct {
 	FunctionDeclarations []gFnDecl `json:"functionDeclarations"`
 }
 type gGenConfig struct {
-	MaxOutputTokens  int     `json:"maxOutputTokens,omitempty"`
-	Temperature      float32 `json:"temperature,omitempty"`
-	ResponseMimeType string  `json:"responseMimeType,omitempty"`
+	MaxOutputTokens  int             `json:"maxOutputTokens,omitempty"`
+	Temperature      float32         `json:"temperature,omitempty"`
+	ResponseMimeType string          `json:"responseMimeType,omitempty"`
 	ResponseSchema   json.RawMessage `json:"responseSchema,omitempty"`
 }
 type gChatReq struct {
-	Contents         []gContent  `json:"contents"`
-	SystemInstruction *gContent  `json:"systemInstruction,omitempty"`
-	Tools            []gTool     `json:"tools,omitempty"`
-	GenerationConfig *gGenConfig `json:"generationConfig,omitempty"`
+	Contents          []gContent  `json:"contents"`
+	SystemInstruction *gContent   `json:"systemInstruction,omitempty"`
+	Tools             []gTool     `json:"tools,omitempty"`
+	GenerationConfig  *gGenConfig `json:"generationConfig,omitempty"`
 }
 type gChatResp struct {
 	ModelVersion string `json:"modelVersion"`

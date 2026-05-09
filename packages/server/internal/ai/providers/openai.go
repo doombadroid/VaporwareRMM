@@ -48,19 +48,19 @@ func (p *openaiProvider) base() string {
 }
 
 type oaiChatReq struct {
-	Model       string         `json:"model"`
-	Messages    []oaiMsg       `json:"messages"`
-	MaxTokens   int            `json:"max_tokens,omitempty"`
-	Temperature float32        `json:"temperature,omitempty"`
-	Tools       []oaiTool      `json:"tools,omitempty"`
+	Model       string          `json:"model"`
+	Messages    []oaiMsg        `json:"messages"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature float32         `json:"temperature,omitempty"`
+	Tools       []oaiTool       `json:"tools,omitempty"`
 	ResponseFmt *oaiResponseFmt `json:"response_format,omitempty"`
 }
 type oaiMsg struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
-	Name       string         `json:"name,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	ToolCalls  []oaiToolCall  `json:"tool_calls,omitempty"`
+	Role       string        `json:"role"`
+	Content    string        `json:"content,omitempty"`
+	Name       string        `json:"name,omitempty"`
+	ToolCallID string        `json:"tool_call_id,omitempty"`
+	ToolCalls  []oaiToolCall `json:"tool_calls,omitempty"`
 }
 type oaiTool struct {
 	Type     string         `json:"type"` // always "function"
@@ -84,8 +84,8 @@ type oaiResponseFmt struct {
 	Schema json.RawMessage `json:"schema,omitempty"`
 }
 type oaiChatResp struct {
-	ID      string  `json:"id"`
-	Model   string  `json:"model"`
+	ID      string `json:"id"`
+	Model   string `json:"model"`
 	Choices []struct {
 		Message      oaiMsg `json:"message"`
 		FinishReason string `json:"finish_reason"`

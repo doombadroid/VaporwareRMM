@@ -7,11 +7,12 @@ import (
 	"os"
 	"testing"
 
-	"github.com/gofiber/fiber/v2"
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/utils"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 func TestMain(m *testing.M) {

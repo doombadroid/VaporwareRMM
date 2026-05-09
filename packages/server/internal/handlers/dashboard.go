@@ -3,9 +3,10 @@ package handlers
 import (
 	"time"
 
-	"github.com/gofiber/fiber/v2"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 func RegisterDashboardRoutes(api fiber.Router, cfg Config) {

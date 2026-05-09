@@ -19,9 +19,11 @@ func init() {
 	Register(&restartService{})
 }
 
-func (restartService) Name() string        { return "restart_service" }
-func (restartService) Description() string { return "Restart a single service on a single device. Idempotent. Rollback stops the service if it was previously stopped." }
-func (restartService) Severity() Severity  { return SeverityLow }
+func (restartService) Name() string { return "restart_service" }
+func (restartService) Description() string {
+	return "Restart a single service on a single device. Idempotent. Rollback stops the service if it was previously stopped."
+}
+func (restartService) Severity() Severity { return SeverityLow }
 
 func (restartService) AppliesTo(t Target) bool {
 	// Conservative: skip anything tagged regulated/critical/dc; require an

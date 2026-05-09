@@ -46,9 +46,9 @@ func (p *ollamaProvider) base() string {
 }
 
 type ollMsg struct {
-	Role      string         `json:"role"`
-	Content   string         `json:"content,omitempty"`
-	ToolCalls []ollToolCall  `json:"tool_calls,omitempty"`
+	Role      string        `json:"role"`
+	Content   string        `json:"content,omitempty"`
+	ToolCalls []ollToolCall `json:"tool_calls,omitempty"`
 }
 type ollToolCall struct {
 	Function struct {
@@ -76,11 +76,11 @@ type ollChatReq struct {
 	} `json:"options,omitempty"`
 }
 type ollChatResp struct {
-	Model              string `json:"model"`
-	Message            ollMsg `json:"message"`
-	DoneReason         string `json:"done_reason"`
-	PromptEvalCount    int    `json:"prompt_eval_count"`
-	EvalCount          int    `json:"eval_count"`
+	Model           string `json:"model"`
+	Message         ollMsg `json:"message"`
+	DoneReason      string `json:"done_reason"`
+	PromptEvalCount int    `json:"prompt_eval_count"`
+	EvalCount       int    `json:"eval_count"`
 }
 
 func (p *ollamaProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.ChatResponse, error) {

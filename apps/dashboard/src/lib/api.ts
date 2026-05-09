@@ -524,6 +524,24 @@ export const aiApi = {
     api.get<{ kill_switches: AIKillSwitch[] }>('/admin/ai/kill').then((r) => r.data.kill_switches),
   setKill: (scope: string, killed: boolean, reason: string) =>
     api.put('/admin/ai/kill', { scope, killed, reason }).then((r) => r.data),
+
+  // Stage 2 assistance entry points.
+  search: (query: string, customerID?: string) =>
+    api.post<{
+      answer: string
+      tables?: { title: string; columns: string[]; rows: string[][] }[]
+      tool_log: { tool: string; args: any; result: string; success: boolean }[]
+    }>('/admin/ai/assist/search', { query, customer_id: customerID }).then((r) => r.data),
+
+  generateScript: (query: string, language: 'bash' | 'powershell', customerID?: string) =>
+    api.post<{
+      language: string
+      code: string
+      explanation: string
+      danger_score: 'low' | 'medium' | 'high'
+      danger_hits?: string[]
+      warnings?: string[]
+    }>('/admin/ai/assist/script', { query, language, customer_id: customerID }).then((r) => r.data),
 };
 
 export default api;

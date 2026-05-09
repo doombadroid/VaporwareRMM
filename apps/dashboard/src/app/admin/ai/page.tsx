@@ -163,7 +163,204 @@ function AIAdminInner() {
         onReload={reloadAll}
       />
 
+      <AssistSection />
+
       <RunsSection runs={runs} />
+    </div>
+  )
+}
+
+// ── Assistance ───────────────────────────────────────────────────────────
+
+function AssistSection() {
+  const [tab, setTab] = useState<'search' | 'script'>('search')
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Assistance (Stage 2)</CardTitle>
+        <CardDescription>
+          Try the new natural-language fleet search and the script generator. Both
+          run at the <code>suggest</code> rung — output is shown for review and
+          never auto-executed.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex gap-2 mb-4 text-sm">
+          <button
+            className={`px-3 py-1 rounded ${tab === 'search' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
+            onClick={() => setTab('search')}
+          >
+            NL search
+          </button>
+          <button
+            className={`px-3 py-1 rounded ${tab === 'script' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}
+            onClick={() => setTab('script')}
+          >
+            Script generator
+          </button>
+        </div>
+        {tab === 'search' ? <SearchPanel /> : <ScriptPanel />}
+      </CardContent>
+    </Card>
+  )
+}
+
+function SearchPanel() {
+  const [query, setQuery] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<Awaited<ReturnType<typeof aiApi.search>> | null>(null)
+
+  async function run() {
+    if (!query.trim()) return
+    setBusy(true)
+    setResult(null)
+    try {
+      setResult(await aiApi.search(query))
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error ?? 'Search failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        <input
+          className="border rounded px-2 py-1.5 bg-background flex-1"
+          placeholder="show me Windows servers offline > 1 day, grouped by customer"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && !busy && run()}
+        />
+        <Button onClick={run} disabled={busy || !query.trim()}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Search'}
+        </Button>
+      </div>
+
+      {result && (
+        <div className="space-y-3 text-sm">
+          <div className="p-3 rounded border bg-muted/30">
+            <p className="font-medium">{result.answer}</p>
+          </div>
+          {(result.tables ?? []).map((t, i) => (
+            <div key={i} className="border rounded">
+              <div className="px-3 py-2 border-b text-xs uppercase tracking-wide text-muted-foreground">
+                {t.title}
+              </div>
+              <table className="w-full text-sm">
+                <thead className="bg-muted/30">
+                  <tr>{t.columns.map((c) => <th key={c} className="px-3 py-1 text-left">{c}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {t.rows.map((r, j) => (
+                    <tr key={j} className="border-t">{r.map((cell, k) => <td key={k} className="px-3 py-1">{cell}</td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+          {result.tool_log.length > 0 && (
+            <details className="text-xs text-muted-foreground">
+              <summary className="cursor-pointer">tool log ({result.tool_log.length} step{result.tool_log.length === 1 ? '' : 's'})</summary>
+              <ul className="mt-1 space-y-1 font-mono">
+                {result.tool_log.map((e, i) => (
+                  <li key={i}>
+                    <span className={e.success ? 'text-emerald-600' : 'text-red-600'}>
+                      {e.success ? '✓' : '✗'}
+                    </span>{' '}
+                    {e.tool}({JSON.stringify(e.args)})
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ScriptPanel() {
+  const [query, setQuery] = useState('')
+  const [language, setLanguage] = useState<'bash' | 'powershell'>('bash')
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<Awaited<ReturnType<typeof aiApi.generateScript>> | null>(null)
+
+  async function run() {
+    if (!query.trim()) return
+    setBusy(true)
+    setResult(null)
+    try {
+      setResult(await aiApi.generateScript(query, language))
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error ?? 'Script generation failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        <select
+          className="border rounded px-2 py-1.5 bg-background"
+          value={language}
+          onChange={(e) => setLanguage(e.target.value as 'bash' | 'powershell')}
+        >
+          <option value="bash">bash</option>
+          <option value="powershell">powershell</option>
+        </select>
+        <input
+          className="border rounded px-2 py-1.5 bg-background flex-1"
+          placeholder="rotate the IIS app pool credentials on web-01"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && !busy && run()}
+        />
+        <Button onClick={run} disabled={busy || !query.trim()}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Generate'}
+        </Button>
+      </div>
+
+      {result && (
+        <div className="space-y-3 text-sm">
+          {result.danger_score === 'high' && (
+            <div className="p-3 rounded border border-red-500/60 bg-red-500/5 text-red-700">
+              <p className="font-semibold flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" /> Dangerous patterns detected
+              </p>
+              <ul className="mt-1 list-disc list-inside text-xs">
+                {(result.danger_hits ?? []).map((h, i) => <li key={i}><code>{h}</code></li>)}
+              </ul>
+              <p className="mt-2 text-xs text-muted-foreground">
+                The agent-side blocklist will reject this script. Edit it before sending.
+              </p>
+            </div>
+          )}
+          {(result.warnings ?? []).length > 0 && (
+            <div className="p-2 rounded border border-amber-500/40 bg-amber-500/5 text-xs text-amber-700">
+              {result.warnings!.map((w, i) => <p key={i}>{w}</p>)}
+            </div>
+          )}
+          <div className="border rounded">
+            <div className="px-3 py-2 border-b text-xs uppercase tracking-wide text-muted-foreground flex items-center justify-between">
+              <span>{result.language}</span>
+              <span className={
+                result.danger_score === 'high' ? 'text-red-600'
+                : result.danger_score === 'medium' ? 'text-amber-600'
+                : 'text-emerald-600'
+              }>
+                danger: {result.danger_score}
+              </span>
+            </div>
+            <pre className="p-3 text-xs font-mono overflow-x-auto whitespace-pre-wrap">{result.code || '(model declined to generate)'}</pre>
+          </div>
+          {result.explanation && (
+            <p className="text-xs text-muted-foreground">{result.explanation}</p>
+          )}
+        </div>
+      )}
     </div>
   )
 }

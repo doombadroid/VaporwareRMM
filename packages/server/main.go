@@ -23,6 +23,7 @@ import (
 	_ "vaporrmm/server/internal/ai/providers"
 	_ "vaporrmm/server/internal/ai/rag"
 	_ "vaporrmm/server/internal/ai/sysfeatures"
+	_ "vaporrmm/server/internal/ai/tools"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"

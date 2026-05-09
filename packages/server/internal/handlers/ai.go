@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"vaporrmm/server/internal/ai"
+	"vaporrmm/server/internal/ai/capabilities"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
@@ -94,6 +95,10 @@ func RegisterAIRoutes(api fiber.Router) {
 
 	// ── Metrics (rolled up from ai_runs lazily on GET) ────────────────
 	g.Get("/metrics", aiCapabilityMetrics)
+
+	// ── Assistance entry points ──────────────────────────────────────
+	g.Post("/assist/search", aiAssistSearch)
+	g.Post("/assist/script", aiAssistScript)
 
 	// ── Kill switches ─────────────────────────────────────────────────
 	g.Get("/kill", aiListKill)
@@ -973,6 +978,72 @@ func aiCapabilityMetrics(c *fiber.Ctx) error {
 		})
 	}
 	return c.JSON(fiber.Map{"metrics": out, "since": since})
+}
+
+// aiMapErr maps every chokepoint sentinel to the right HTTP status. Without
+// this each handler ends up with its own ad-hoc switch and operators see
+// "500 internal server error" when the real cause is "you forgot to add a
+// routing rule for embed". One mapper means one place to update.
+func aiMapErr(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, ai.ErrAINotSupported):
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ai.ErrAIDisabled), errors.Is(err, ai.ErrCapabilityDisabled):
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ai.ErrCapabilityKilled):
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ai.ErrCostCap):
+		return c.Status(fiber.StatusPaymentRequired).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ai.ErrTenantSuspended):
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ai.ErrUnmetDependency), errors.Is(err, ai.ErrProviderCapMismatch), errors.Is(err, ai.ErrCapNotFound):
+		return c.Status(fiber.StatusFailedDependency).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ai.ErrNoProvider):
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": err.Error()})
+	default:
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+}
+
+// aiAssistSearch wires the NL fleet-search capability to an HTTP request.
+// The dashboard's search box POSTs the operator's query; we synchronously
+// run the capability and return the structured result. Capability gates
+// (rung, scope, cost) are enforced inside the chokepoint — this handler
+// just adapts the HTTP shape.
+func aiAssistSearch(c *fiber.Ctx) error {
+	tid := targetTenant(c)
+	var req struct {
+		Query      string `json:"query"`
+		CustomerID string `json:"customer_id,omitempty"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.Query == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "query required"})
+	}
+	res, err := capabilities.Search(c.Context(), tid, req.CustomerID, req.Query)
+	if err != nil {
+		return aiMapErr(c, err)
+	}
+	return c.JSON(res)
+}
+
+// aiAssistScript wires the script-generator capability. Output includes a
+// danger_score the dashboard uses to decide whether the one-click "send to
+// agent" button is enabled.
+func aiAssistScript(c *fiber.Ctx) error {
+	tid := targetTenant(c)
+	var req struct {
+		Query      string `json:"query"`
+		Language   string `json:"language"`
+		CustomerID string `json:"customer_id,omitempty"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.Query == "" || req.Language == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "query and language required"})
+	}
+	res, err := capabilities.GenerateScript(c.Context(), tid, req.CustomerID, req.Language, req.Query)
+	if err != nil {
+		return aiMapErr(c, err)
+	}
+	return c.JSON(res)
 }
 
 // ── Kill switches ─────────────────────────────────────────────────────────

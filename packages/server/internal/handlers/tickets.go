@@ -1,12 +1,16 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"vaporrmm/server/internal/ai/capabilities"
+	"vaporrmm/server/internal/ai/rag"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 )
@@ -99,6 +103,39 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 			slog.Error("ticket insert failed", "error", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create ticket"})
 		}
+
+		// Fire-and-forget AI triage. The capability is gated by the
+		// chokepoint (returns ErrCapabilityDisabled when off), so this is
+		// safe to call unconditionally; the audit log will show "disabled"
+		// for tenants that haven't opted in. We persist the JSON result to
+		// tickets.ai_triage so the dashboard can render it without re-running
+		// the call.
+		go func(ticketID, title, body string) {
+			// Belt-and-suspenders panic guard. The chokepoint's callSafely
+			// recovers panics inside the AI provider closure, but a panic
+			// in code that runs BEFORE the closure (rag.Retrieve nil-deref,
+			// for example) would crash the goroutine. We swallow it here so
+			// a buggy capability can't take down the server.
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Warn("ticket triage goroutine panicked", "ticket_id", ticketID, "panic", r)
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			triage, err := capabilities.SummariseTicket(ctx, tenantID, "", ticketID, title, body)
+			if err != nil {
+				return // chokepoint already audited; nothing more to do
+			}
+			payload, _ := json.Marshal(triage)
+			// Tenant-scoped UPDATE so a UUID collision (astronomically
+			// unlikely but possible) cannot write triage data into another
+			// tenant's ticket. Every other ticket-table mutation in this
+			// file is tenant-scoped; this one must be too.
+			_, _ = db.DB.Exec(`UPDATE tickets SET ai_triage = ? WHERE id = ? AND tenant_id = ?`,
+				string(payload), ticketID, tenantID)
+		}(id, req.Title, req.Description)
+
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": id, "message": "Ticket created"})
 	})
 
@@ -162,6 +199,26 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update ticket"})
 		}
+
+		// On status transition to resolved/closed, fire-and-forget RAG
+		// indexing of the ticket so future tickets in this tenant can use
+		// it as a reference. We embed the title + description + any
+		// resolution_summary the ticket carried; the rag indexer
+		// short-circuits if the text hash matches (idempotent).
+		if req.Status == "resolved" || req.Status == "closed" {
+			go func(ticketID string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				var t, d, r sql.NullString
+				_ = db.DB.QueryRow(`SELECT title, description, COALESCE(resolution_summary,'') FROM tickets WHERE id = ? AND tenant_id = ?`, ticketID, tenantID).Scan(&t, &d, &r)
+				body := t.String + "\n\n" + d.String
+				if r.String != "" {
+					body += "\n\nresolution: " + r.String
+				}
+				_ = rag.New().Index(ctx, rag.Scope{TenantID: tenantID}, rag.SourceTicket, ticketID, body)
+			}(id)
+		}
+
 		return c.JSON(fiber.Map{"message": "Ticket updated"})
 	})
 

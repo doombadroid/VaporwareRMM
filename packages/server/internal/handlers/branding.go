@@ -54,10 +54,15 @@ func RegisterBrandingRoutes(app *fiber.App, api fiber.Router) {
 		return serveAgentInstall(c)
 	})
 
-	// Serve pre-built agent binary
+	// Serve pre-built agent binary. The :os and :arch path params are
+	// captured for URL routing only — the file path passed to SendFile
+	// is hardcoded so a future refactor must NOT interpolate the params
+	// into the path without filepath.Clean + base-directory enforcement
+	// (otherwise a request like /download/agent-../../etc/passwd-x
+	// would traverse). When per-platform binaries land, build a strict
+	// allowlist map (linux-amd64 -> /opt/agents/linux-amd64) instead of
+	// templating the filename.
 	app.Get("/download/agent-:os-:arch", func(c *fiber.Ctx) error {
-		// For now, serve the linux-amd64 binary regardless of requested platform
-		// In production, you'd have separate binaries per platform
 		c.Set("Content-Type", "application/octet-stream")
 		c.Set("Content-Disposition", "attachment; filename=vaporrmm-agent")
 		return c.SendFile("/tmp/vaporrmm-agent")

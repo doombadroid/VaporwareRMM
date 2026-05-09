@@ -40,6 +40,34 @@ var (
 	ipWindowDuration = 5 * time.Minute
 )
 
+func init() {
+	// Background pruner. loginAttempts is keyed by email (bounded by user
+	// count) and ipAttempts by source IP (unbounded over time as crawlers
+	// come and go). Without this the maps grow forever; the values are
+	// only relevant inside windowDuration / blockDuration anyway. Pruning
+	// every 10 minutes — well above both windows — preserves an entry
+	// while it still blocks but reclaims memory afterwards.
+	go func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			now := time.Now()
+			loginMu.Lock()
+			for k, v := range loginAttempts {
+				if now.Sub(v.lastTime) > windowDuration && (v.blockedAt.IsZero() || now.Sub(v.blockedAt) > blockDuration) {
+					delete(loginAttempts, k)
+				}
+			}
+			for k, v := range ipAttempts {
+				if now.Sub(v.lastTime) > ipWindowDuration {
+					delete(ipAttempts, k)
+				}
+			}
+			loginMu.Unlock()
+		}
+	}()
+}
+
 func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 	// Login
 	publicAPI.Post("/auth/login", func(c *fiber.Ctx) error {

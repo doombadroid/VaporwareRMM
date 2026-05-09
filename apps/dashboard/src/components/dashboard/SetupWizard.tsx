@@ -38,6 +38,7 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
     { title: 'Welcome', icon: Sparkles },
     { title: 'Branding', icon: Palette },
     { title: 'Install Agent', icon: Server },
+    { title: 'AI (optional)', icon: Sparkles },
     { title: 'Complete', icon: CheckCircle },
   ]
 
@@ -247,6 +248,31 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
           )}
 
           {step === 3 && (
+            <div className="space-y-5">
+              <div className="space-y-2">
+                <h3 className="text-lg font-semibold text-white">AI agent layer (optional)</h3>
+                <p className="text-sm text-white/50 leading-relaxed">
+                  vaporRMM ships an opt-in AI layer for alert deduplication, ticket triage,
+                  natural-language fleet search, and (later) auto-remediation. You bring
+                  your own API keys (OpenAI, Anthropic, Google, xAI, Mistral, or self-hosted
+                  Ollama / vLLM). Nothing runs until a super_admin enables AI for a tenant.
+                </p>
+              </div>
+              <div className="bg-white/[0.03] rounded-xl p-4 space-y-2 border border-white/[0.06] text-sm text-white/60">
+                <p className="text-xs text-white/40 uppercase tracking-wider font-medium">Notes</p>
+                <ul className="space-y-1 list-disc list-inside">
+                  <li>AI features need PostgreSQL (the SQLite default doesn&apos;t support pgvector).</li>
+                  <li>Every capability defaults to <code className="text-white/70">shadow</code> mode and can&apos;t act until you promote it.</li>
+                  <li>Tenant data leaves your network for whichever provider you choose. Verify your DPAs.</li>
+                </ul>
+              </div>
+              <p className="text-xs text-white/30">
+                Skip this for now and configure it from the <strong>AI</strong> nav entry whenever you&apos;re ready.
+              </p>
+            </div>
+          )}
+
+          {step === 4 && (
             <div className="space-y-4 text-center">
               <div className="w-20 h-20 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto border border-emerald-500/20">
                 <CheckCircle className="w-10 h-10 text-emerald-400" />

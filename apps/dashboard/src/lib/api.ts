@@ -407,4 +407,123 @@ export const dashboard = {
     }),
 };
 
+// ── AI ───────────────────────────────────────────────────────────────────
+
+export interface AITenantSettings {
+  tenant_id: string;
+  ai_enabled: boolean;
+  ai_billing_mode: 'absorb' | 'passthrough';
+  ai_max_chat_cost_per_day_micros: number;
+  ai_max_embedding_cost_per_day_micros: number;
+  ai_dpa_acknowledged_at: number | null;
+}
+
+export interface AIProvider {
+  id: string;
+  kind: string;
+  name: string;
+  base_url: string;
+  region: string;
+  model_trust_level: 'local' | 'external' | 'self_hosted';
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface AIRoutingRule {
+  id: string;
+  task_type: 'classify' | 'reason' | 'summarize' | 'embed' | 'generate';
+  preferred_provider_id: string;
+  fallback_provider_id: string;
+  model_name: string;
+  embedding_model_name: string;
+  max_cost_per_call_micros: number;
+  max_input_tokens: number;
+  max_output_tokens: number;
+  cost_per_1k_input_micros: number;
+  cost_per_1k_output_micros: number;
+}
+
+export interface AICapability {
+  name: string;
+  category: 'observation' | 'assistance' | 'action';
+  description: string;
+  stage: number;
+  depends_on: string[];
+  unmet_dependencies: string[];
+  required_caps: { Streaming: boolean; ToolCalling: boolean; Embeddings: boolean; JSONMode: boolean; MaxContext: number };
+  preferred_task_type: string;
+  enabled: boolean;
+  rung: 'shadow' | 'suggest' | 'act_low' | 'act_policy' | 'autonomous';
+  scope_filter: { customer_ids?: string[]; device_class_includes?: string[]; device_class_excludes?: string[]; device_tag_excludes?: string[] };
+  confidence_threshold: number;
+  blast_radius_max_devices: number;
+  blast_radius_window_minutes: number;
+  kill_switch: boolean;
+}
+
+export interface AIRun {
+  id: string;
+  capability_id: string;
+  run_type: 'chat' | 'embed' | 'tool_call';
+  model_name: string;
+  model_version: string;
+  model_trust_level: string;
+  prompt_tokens: number;
+  output_tokens: number;
+  cost_usd_micros: number;
+  latency_ms: number;
+  rung_at_call: string;
+  outcome: string;
+  rollback_attempted: boolean;
+  rollback_succeeded: boolean;
+  created_at: number;
+}
+
+export interface AIKillSwitch {
+  scope: string;
+  enabled: boolean;
+  reason: string;
+  set_by_user_id: string;
+  set_at: number;
+}
+
+export const aiApi = {
+  getTenant: () =>
+    api.get<AITenantSettings>('/admin/ai/tenant').then((r) => r.data),
+  patchTenant: (data: Partial<{ ai_enabled: boolean; ai_billing_mode: string; ai_max_chat_cost_per_day_micros: number; ai_max_embedding_cost_per_day_micros: number; acknowledge_dpa: boolean }>) =>
+    api.patch('/admin/ai/tenant', data).then((r) => r.data),
+
+  listProviders: () =>
+    api.get<{ providers: AIProvider[]; kinds: string[] }>('/admin/ai/providers').then((r) => r.data),
+  createProvider: (data: { kind: string; name: string; base_url?: string; api_key?: string; region?: string; model_trust_level?: string; enabled?: boolean }) =>
+    api.post<{ id: string }>('/admin/ai/providers', data).then((r) => r.data),
+  patchProvider: (id: string, data: Partial<{ name: string; base_url: string; api_key: string; region: string; model_trust_level: string; enabled: boolean }>) =>
+    api.patch(`/admin/ai/providers/${id}`, data).then((r) => r.data),
+  deleteProvider: (id: string) =>
+    api.delete(`/admin/ai/providers/${id}`).then((r) => r.data),
+
+  listRouting: () =>
+    api.get<{ routing_rules: AIRoutingRule[] }>('/admin/ai/routing').then((r) => r.data.routing_rules),
+  createRouting: (data: Partial<AIRoutingRule>) =>
+    api.post<{ id: string }>('/admin/ai/routing', data).then((r) => r.data),
+  patchRouting: (id: string, data: Partial<AIRoutingRule>) =>
+    api.patch(`/admin/ai/routing/${id}`, data).then((r) => r.data),
+  deleteRouting: (id: string) =>
+    api.delete(`/admin/ai/routing/${id}`).then((r) => r.data),
+
+  listCapabilities: () =>
+    api.get<{ capabilities: AICapability[] }>('/admin/ai/capabilities').then((r) => r.data.capabilities),
+  patchCapability: (name: string, data: Partial<Omit<AICapability, 'name' | 'category' | 'description' | 'stage' | 'depends_on' | 'unmet_dependencies' | 'required_caps' | 'preferred_task_type'>>) =>
+    api.patch(`/admin/ai/capabilities/${name}`, data).then((r) => r.data),
+
+  listRuns: (params?: { limit?: number; offset?: number; capability_id?: string }) =>
+    api.get<{ runs: AIRun[]; limit: number; offset: number }>('/admin/ai/runs', { params }).then((r) => r.data),
+
+  listKill: () =>
+    api.get<{ kill_switches: AIKillSwitch[] }>('/admin/ai/kill').then((r) => r.data.kill_switches),
+  setKill: (scope: string, killed: boolean, reason: string) =>
+    api.put('/admin/ai/kill', { scope, killed, reason }).then((r) => r.data),
+};
+
 export default api;

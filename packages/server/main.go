@@ -249,6 +249,10 @@ func main() {
 	// Operational readiness probes (Tailscale CLI, Sunshine releases, Moonlight web)
 	handlers.RegisterIntegrationProbes(api)
 
+	// AI surface (providers, routing, capabilities, runs, kill switches).
+	// All routes inside dialect-gated; SQLite deployments get 503 from this group.
+	handlers.RegisterAIRoutes(api)
+
 	// Branding routes
 	handlers.RegisterBrandingRoutes(app, api)
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"vaporrmm/server/internal/ai"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
@@ -202,6 +203,17 @@ func RegisterTenantRoutes(api fiber.Router) {
 		}
 		adminID, _ := c.Locals("user_id").(string)
 		middleware.InvalidateSlugCache()
+		// Mirror suspension into the AI kill-switch cache. The chokepoint
+		// already refuses runs when tenants.status != 'active', but the cache
+		// guarantees in-flight + freshly-arriving requests short-circuit
+		// before any DB load. Reactivation clears the kill switch.
+		if req.Status != nil {
+			if *req.Status == "suspended" {
+				_ = ai.SetKill("tenant:"+id, true, "tenant suspended", adminID)
+			} else {
+				_ = ai.SetKill("tenant:"+id, false, "tenant reactivated", adminID)
+			}
+		}
 		events.AuditLogTenant(id, adminID, "tenant.update", "tenant", id, "updated tenant", c.IP())
 		return c.JSON(fiber.Map{"message": "Tenant updated"})
 	})

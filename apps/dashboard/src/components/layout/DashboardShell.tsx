@@ -17,6 +17,7 @@ import {
   Search,
   LogOut,
   Building2,
+  Sparkles,
 } from 'lucide-react'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { useBranding } from '@/components/BrandingProvider'
@@ -38,6 +39,7 @@ const navItems: NavItem[] = [
   { label: 'Network Map', href: '/network', icon: Globe },
   { label: 'Patches', href: '/patches', icon: Package },
   { label: 'Settings', href: '/settings', icon: Settings },
+  { label: 'AI', href: '/admin/ai', icon: Sparkles },
   { label: 'Tenants', href: '/admin/tenants', icon: Building2, superAdminOnly: true },
 ]
 

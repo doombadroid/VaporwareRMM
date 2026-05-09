@@ -14,6 +14,14 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Opt JavaScript-based actions (actions/checkout, actions/setup-node,
+  # pnpm/action-setup) into the Node 24 runtime now. Node 20 is deprecated
+  # in GitHub Actions and forced-off June 2 2026; flipping this flag early
+  # surfaces any incompatibility now instead of on the deadline morning.
+  # When Node 24 becomes the default we can drop this; if Node 24 ever
+  # breaks an action we depend on, set ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true
+  # as a temporary fallback.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   lint:

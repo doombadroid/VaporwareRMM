@@ -137,7 +137,7 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
                 You can always change these settings later from the Settings page.
               </p>
               <div className="bg-white/[0.03] rounded-xl p-4 text-left space-y-2 border border-white/[0.06]">
-                <p className="text-xs text-white/40 uppercase tracking-wider font-medium">What we'll set up</p>
+                <p className="text-xs text-white/40 uppercase tracking-wider font-medium">What we&apos;ll set up</p>
                 <ul className="space-y-2 text-sm text-white/60">
                   <li className="flex items-center gap-2"><Palette className="w-4 h-4 text-cyan-400" /> Branding & appearance</li>
                   <li className="flex items-center gap-2"><Server className="w-4 h-4 text-violet-400" /> First agent installation</li>
@@ -277,7 +277,7 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
               <div className="w-20 h-20 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto border border-emerald-500/20">
                 <CheckCircle className="w-10 h-10 text-emerald-400" />
               </div>
-              <h3 className="text-xl font-bold text-white">You're All Set!</h3>
+              <h3 className="text-xl font-bold text-white">You&apos;re All Set!</h3>
               <p className="text-sm text-white/50 leading-relaxed">
                 Your RMM dashboard is configured and ready. You can now manage devices,
                 send commands, and monitor your fleet from one place.

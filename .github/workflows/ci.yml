@@ -23,6 +23,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # pnpm has to land BEFORE setup-node, otherwise `cache: 'pnpm'` can't
+      # locate the binary it needs to compute the cache key. The version is
+      # pinned (NOT @latest) so a pnpm 10/11 release can't silently change
+      # lockfile semantics under us.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -49,6 +58,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

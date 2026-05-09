@@ -642,7 +642,7 @@ function RegistrationSecretReveal({
           onClick={onDismiss}
           className="text-xs text-amber-300/70 hover:text-amber-200 transition-colors"
         >
-          I've saved it, dismiss
+          I&apos;ve saved it, dismiss
         </button>
       </div>
     </div>

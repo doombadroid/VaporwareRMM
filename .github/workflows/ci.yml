@@ -341,11 +341,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # GHCR rejects mixed-case repo names. github.repository preserves the
+      # original capitalisation (e.g. tabiznet/VaporwareRMM), so we lowercase
+      # it once here and feed the result to every tag below.
+      - name: Compute lowercase image name
+        id: img
+        run: echo "name=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
 
       - name: Build and push server image
         uses: docker/build-push-action@v5
@@ -354,8 +361,8 @@ jobs:
           file: ./packages/server/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:latest
+            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}/server:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}/server:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -366,8 +373,8 @@ jobs:
           file: ./apps/dashboard/Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/dashboard:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/dashboard:latest
+            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}/dashboard:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}/dashboard:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -379,8 +386,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # docker-compose.yml uses ${VAR:?msg} interpolation for the secrets
+      # the server needs at boot. Generate ephemeral values for the smoke
+      # test instead of committing real ones. Includes JWT_SECRET (>=32
+      # chars per the new auth gate), SECRETS_ENCRYPTION_KEY (base64 32B),
+      # ADMIN_PASSWORD (matches complexity rules), and POSTGRES_PASSWORD.
       - name: Build and start services
         run: |
+          {
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+            echo "JWT_SECRET=$(openssl rand -base64 48)"
+            echo "SECRETS_ENCRYPTION_KEY=$(openssl rand -base64 32)"
+            echo "ADMIN_PASSWORD=CiSmoke#$(openssl rand -hex 8)"
+            # agent-example is in the dev profile and won't start, but
+            # `docker compose down` still validates env interpolation across
+            # every service in the file; provide a dummy value so teardown
+            # doesn't error.
+            echo "AGENT_TOKEN=ci-smoke-not-a-real-token"
+          } > .env
           docker compose up --build -d
 
       - name: Wait for services to be ready

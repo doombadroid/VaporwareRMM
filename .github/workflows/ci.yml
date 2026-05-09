@@ -221,7 +221,7 @@ jobs:
       - name: Build server binary
         run: |
           cd packages/server
-          go build -o vaporrmm-server ./main.go
+          go build -o vaporrmm-server .
 
       - name: Upload server binary
         uses: actions/upload-artifact@v4
@@ -250,27 +250,27 @@ jobs:
       - name: Build agent binary (Linux AMD64)
         run: |
           cd packages/agent
-          GOOS=linux GOARCH=amd64 go build -o vaporrmm-agent-linux-amd64 ./main.go
+          GOOS=linux GOARCH=amd64 go build -o vaporrmm-agent-linux-amd64 .
 
       - name: Build agent binary (Linux ARM64)
         run: |
           cd packages/agent
-          GOOS=linux GOARCH=arm64 go build -o vaporrmm-agent-linux-arm64 ./main.go
+          GOOS=linux GOARCH=arm64 go build -o vaporrmm-agent-linux-arm64 .
 
       - name: Build agent binary (Windows AMD64)
         run: |
           cd packages/agent
-          GOOS=windows GOARCH=amd64 go build -o vaporrmm-agent-windows-amd64.exe ./main.go
+          GOOS=windows GOARCH=amd64 go build -o vaporrmm-agent-windows-amd64.exe .
 
       - name: Build agent binary (macOS AMD64)
         run: |
           cd packages/agent
-          GOOS=darwin GOARCH=amd64 go build -o vaporrmm-agent-darwin-amd64 ./main.go
+          GOOS=darwin GOARCH=amd64 go build -o vaporrmm-agent-darwin-amd64 .
 
       - name: Build agent binary (macOS ARM64)
         run: |
           cd packages/agent
-          GOOS=darwin GOARCH=arm64 go build -o vaporrmm-agent-darwin-arm64 ./main.go
+          GOOS=darwin GOARCH=arm64 go build -o vaporrmm-agent-darwin-arm64 .
 
       - name: Upload Linux AMD64 agent
         uses: actions/upload-artifact@v4

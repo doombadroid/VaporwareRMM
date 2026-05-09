@@ -5,6 +5,11 @@ const repoRoot = path.resolve(__dirname, '../..');
 
 export default defineConfig({
   testDir: './e2e',
+  // Specs prefixed with _ are README screenshot helpers, not regression
+  // tests. They use a different ADMIN_PASSWORD and the AI variant
+  // requires Postgres+pgvector. Run them via the standalone
+  // playwright.screenshots.config.ts when capturing README assets.
+  testIgnore: ['**/_screenshots*.spec.ts'],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

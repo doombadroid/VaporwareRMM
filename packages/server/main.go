@@ -19,7 +19,8 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"vaporrmm/server/internal/ai"
-	_ "vaporrmm/server/internal/ai/capabilities"
+	"vaporrmm/server/internal/ai/capabilities"
+	_ "vaporrmm/server/internal/ai/playbooks"
 	_ "vaporrmm/server/internal/ai/providers"
 	_ "vaporrmm/server/internal/ai/rag"
 	_ "vaporrmm/server/internal/ai/sysfeatures"
@@ -117,6 +118,9 @@ func main() {
 	aiCtx, aiCancel := context.WithCancel(context.Background())
 	defer aiCancel()
 	ai.StartKillSwitchWatcher(aiCtx)
+	// Stage 3: rollback orchestrator polls every 30s for action-tier
+	// outcomes. No-op if the AI tab is hidden (no capabilities at act_low+).
+	capabilities.StartRollbackOrchestrator(aiCtx)
 
 	app := fiber.New(fiber.Config{
 		BodyLimit:             defaultBodyLimit,

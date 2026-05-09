@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 
 	"vaporrmm/server/internal/ai"
 	"vaporrmm/server/internal/ai/capabilities"
+	"vaporrmm/server/internal/ai/playbooks"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
@@ -99,6 +101,10 @@ func RegisterAIRoutes(api fiber.Router) {
 	// ── Assistance entry points ──────────────────────────────────────
 	g.Post("/assist/search", aiAssistSearch)
 	g.Post("/assist/script", aiAssistScript)
+
+	// ── Action / playbooks ───────────────────────────────────────────
+	g.Get("/playbooks", aiListPlaybooks)
+	g.Post("/playbooks/:name/run", aiRunPlaybook)
 
 	// ── Kill switches ─────────────────────────────────────────────────
 	g.Get("/kill", aiListKill)
@@ -1044,6 +1050,136 @@ func aiAssistScript(c *fiber.Ctx) error {
 		return aiMapErr(c, err)
 	}
 	return c.JSON(res)
+}
+
+// aiListPlaybooks returns the registered action-tier playbooks for the
+// dashboard's catalog. We expose name + description + severity only — the
+// per-tenant rung gate decides whether they can actually run.
+func aiListPlaybooks(c *fiber.Ctx) error {
+	all := playbooks.All()
+	out := make([]fiber.Map, 0, len(all))
+	for _, p := range all {
+		out = append(out, fiber.Map{
+			"name":        p.Name(),
+			"description": p.Description(),
+			"severity":    string(p.Severity()),
+		})
+	}
+	return c.JSON(fiber.Map{"playbooks": out})
+}
+
+// aiRunPlaybook is the manual-trigger entry point. Operator picks a
+// playbook, supplies args + target device, server runs it through the SAME
+// gates as auto_remediate (severity vs rung, blast radius, scope filter).
+// Manual runs are tenant_admin or super_admin only — already enforced by
+// the AdminMiddleware on the parent group; we re-check super_admin
+// requirement for SeverityHigh playbooks here.
+func aiRunPlaybook(c *fiber.Ctx) error {
+	tid := targetTenant(c)
+	role, _ := c.Locals("user_role").(string)
+	uid, _ := c.Locals("user_id").(string)
+	name := c.Params("name")
+
+	pbk, ok := playbooks.Lookup(name)
+	if !ok {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "unknown playbook"})
+	}
+
+	var req struct {
+		DeviceID   string         `json:"device_id"`
+		CustomerID string         `json:"customer_id"`
+		Args       map[string]any `json:"args"`
+		Confirm    bool           `json:"confirm"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.DeviceID == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "device_id required"})
+	}
+	if !req.Confirm {
+		// Operator must explicitly confirm. Without this guard a misclick
+		// in the dashboard could trigger a high-severity playbook. Plan is
+		// returned so the dashboard can render the confirm sheet.
+		target, err := loadTargetForPlaybook(c.Context(), tid, req.CustomerID, req.DeviceID)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+		plan, perr := pbk.Plan(c.Context(), target, req.Args)
+		if perr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": perr.Error()})
+		}
+		return c.JSON(fiber.Map{
+			"requires_confirm": true,
+			"plan":             plan,
+			"severity":         string(pbk.Severity()),
+		})
+	}
+
+	// High and critical severity require super_admin even for manual runs.
+	// Tenant_admin can trigger low/medium themselves.
+	switch pbk.Severity() {
+	case playbooks.SeverityHigh, playbooks.SeverityCritical:
+		if !auth.IsSuperAdmin(role) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "high/critical-severity playbooks require super_admin",
+			})
+		}
+	}
+
+	target, err := loadTargetForPlaybook(c.Context(), tid, req.CustomerID, req.DeviceID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// AppliesTo is the playbook's own opinion on whether it can act on this
+	// target (excluded tags, supported os_class). An operator manually
+	// triggering against an unsupported target would otherwise queue a
+	// command the agent rejects (or worse, an empty command).
+	if !pbk.AppliesTo(target) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "playbook is not applicable to this device (os_class or excluded tag)",
+		})
+	}
+
+	// Blast-radius gate. Manual runs share the auto_remediate budget — the
+	// cap is per-(tenant, capability), and a frantic operator clicking
+	// "rerun" twenty times shouldn't bypass the safety net the AI uses.
+	cfg := playbooks.LoadConfig(tid, "auto_remediate")
+	if err := playbooks.Reserve(c.Context(), "auto_remediate", tid, cfg); err != nil {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	applied, err := pbk.Apply(c.Context(), target, req.Args)
+	if err != nil {
+		events.AuditLogTenant(tid, uid, "playbook.run.fail", "playbook", name, err.Error(), c.IP())
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	events.AuditLogTenant(tid, uid, "playbook.run", "playbook", name,
+		fmt.Sprintf("device=%s success=%v", req.DeviceID, applied.Success), c.IP())
+	return c.JSON(fiber.Map{
+		"applied":         true,
+		"detail":          applied.Detail,
+		"rollback_token":  applied.RollbackToken,
+		"rollback_window": applied.RollbackWindow.Seconds(),
+	})
+}
+
+func loadTargetForPlaybook(ctx context.Context, tenantID, customerID, deviceID string) (playbooks.Target, error) {
+	t := playbooks.Target{TenantID: tenantID, CustomerID: customerID, DeviceID: deviceID}
+	var osClass, tagsCSV string
+	err := db.DB.QueryRow(`SELECT COALESCE(os_class,'unknown'), COALESCE(tags,'') FROM devices WHERE id = ? AND tenant_id = ?`,
+		deviceID, tenantID).Scan(&osClass, &tagsCSV)
+	if err != nil {
+		return t, errors.New("device not found in tenant")
+	}
+	t.OSClass = osClass
+	if tagsCSV != "" {
+		for _, tag := range strings.Split(tagsCSV, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				t.Tags = append(t.Tags, tag)
+			}
+		}
+	}
+	return t, nil
 }
 
 // ── Kill switches ─────────────────────────────────────────────────────────

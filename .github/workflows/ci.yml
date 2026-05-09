@@ -419,6 +419,13 @@ jobs:
           sleep 30
           curl -f http://localhost:8080/health || exit 1
 
+      # Surface container output when something failed earlier in the job
+      # so the failure log shows the actual error instead of just
+      # 'container is unhealthy'.
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
       - name: Stop services
         if: always()
         run: docker compose down

@@ -38,7 +38,11 @@ EXPOSE 3000
 
 USER nextjs
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+# Cold Node + Next standalone init can take 30+s on smaller runners
+# before /, /login etc. respond. Bumped start-period 15s->60s and
+# retries 3->8 so a slow CI runner doesn't trip the gate before
+# the server is genuinely listening.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=8 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
 
 CMD ["node", "apps/dashboard/server.js"]

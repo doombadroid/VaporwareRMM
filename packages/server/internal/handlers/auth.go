@@ -213,8 +213,10 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 		return c.JSON(fiber.Map{"message": "Logged out"})
 	})
 
-	// Forgot password
-	publicAPI.Post("/auth/forgot-password", func(c *fiber.Ctx) error {
+	// Forgot password. Rate-limited to prevent: (a) account enumeration via
+	// email-existence side channels (timing/log volume), (b) email-bombing a
+	// single user, (c) generic spam abuse of the SMTP relay.
+	publicAPI.Post("/auth/forgot-password", auth.RateLimiter(3, time.Hour), func(c *fiber.Ctx) error {
 		var req struct {
 			Email string `json:"email"`
 		}
@@ -263,23 +265,34 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 		tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.Token)))
-		var userID string
-		var expiresAt int64
-		err := db.DB.QueryRow(`SELECT user_id, expires_at FROM password_resets WHERE token_hash = ? AND used = 0`, tokenHash).Scan(&userID, &expiresAt)
+		// Atomically claim the token. The conditional UPDATE is the single
+		// race-safe gate: two concurrent requests with the same token can't
+		// both observe used=0. RowsAffected==1 proves we're the winner.
+		// expires_at is checked inside the same UPDATE so an expired-but-
+		// unclaimed token can't be used.
+		now := time.Now().Unix()
+		res, err := db.DB.Exec(
+			`UPDATE password_resets SET used = 1 WHERE token_hash = ? AND used = 0 AND expires_at >= ?`,
+			tokenHash, now,
+		)
 		if err != nil {
+			slog.Warn("db exec failed", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Internal error"})
+		}
+		affected, _ := res.RowsAffected()
+		if affected != 1 {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid or expired token"})
 		}
-		if time.Now().Unix() > expiresAt {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Token has expired"})
+		var userID string
+		if err := db.DB.QueryRow(`SELECT user_id FROM password_resets WHERE token_hash = ?`, tokenHash).Scan(&userID); err != nil {
+			slog.Warn("db query failed", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Internal error"})
 		}
-		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), 12)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to hash password"})
 		}
 		if _, err := db.DB.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(newHash), userID); err != nil {
-			slog.Warn("db exec failed", "error", err)
-		}
-		if _, err := db.DB.Exec("UPDATE password_resets SET used = 1 WHERE token_hash = ?", tokenHash); err != nil {
 			slog.Warn("db exec failed", "error", err)
 		}
 		if _, err := db.DB.Exec("DELETE FROM user_sessions WHERE user_id = ?", userID); err != nil {
@@ -489,7 +502,7 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 		if err := auth.ValidatePasswordStrength(req.Password); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
-		passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to hash password"})
 		}
@@ -555,7 +568,7 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 		if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.CurrentPassword)); err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Current password is incorrect"})
 		}
-		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), 12)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to hash password"})
 		}

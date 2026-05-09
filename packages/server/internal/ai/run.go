@@ -26,6 +26,13 @@ import (
 var modelVersionRe = regexp.MustCompile(`^[A-Za-z0-9._:/+-]{1,128}$`)
 
 func sanitizeModelVersion(s string) string {
+	// Cap input before any per-rune work. A self-hosted provider returning a
+	// 1MB model version string would otherwise burn ~1M loop iterations on
+	// every chokepoint call (cheap DoS vector).
+	const maxRawLen = 1024
+	if len(s) > maxRawLen {
+		s = s[:maxRawLen]
+	}
 	if modelVersionRe.MatchString(s) {
 		return s
 	}
@@ -308,9 +315,16 @@ func loadRuntime(ctx context.Context, in Input) (runtimeConfig, error) {
 	rc.blastMax = blastMax
 	rc.blastWindow = blastWin
 	if scopeRaw.Valid {
-		if s, err := ParseScopeFilter([]byte(scopeRaw.String)); err == nil {
-			rc.scopeFilter = s
+		// Fail closed on malformed JSON. The previous behaviour silently
+		// defaulted to an empty (no-op) ScopeFilter, which on a row that
+		// was supposed to restrict the capability to one customer would
+		// have widened it to the entire tenant. Better to refuse the run
+		// than silently expand blast radius.
+		s, err := ParseScopeFilter([]byte(scopeRaw.String))
+		if err != nil {
+			return rc, fmt.Errorf("ai: malformed scope_filter for capability %q: %w (refusing run; fix the row in ai_capability_tenant_config)", in.CapabilityID, err)
 		}
+		rc.scopeFilter = s
 	}
 
 	// Routing rule: pick provider + model for this capability's preferred task.
@@ -632,27 +646,25 @@ func LoadRunForVerification(runID, tenantID string) (RunForVerification, error) 
 // to ai_runs. Tampering with any of those fields after the fact yields a
 // different hex string from what was stored at insert time.
 func RecomputeSignature(r RunForVerification) string {
-	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%d|%s|%d",
+	msg := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%s|%d",
 		r.RunID, r.TenantID, r.CapabilityID, r.RunType,
 		r.ProviderID, r.ModelName, r.Rung,
 		r.Cost, r.SnapHash, r.CreatedAt)
-	return hex.EncodeToString(h.Sum(nil))
+	return crypto.HMACSHA256("ai_run_v1", msg)
 }
 
 func signRow(runID string, in Input, cfg runtimeConfig, cost int64, snapHash string, ts int64) string {
 	// Tamper-evidence over write-once fields. Provider id + model name are
 	// included so an audit-log mutation that swapped which provider made the
 	// call (or which model was used) invalidates the signature. The HMAC key
-	// is the same SECRETS_ENCRYPTION_KEY that protects provider keys;
-	// rotation invalidates historic signatures (operators must re-verify,
-	// which is the right behaviour for SOC2 audits).
-	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%d|%s|%d",
+	// is derived from SECRETS_ENCRYPTION_KEY with the "ai_run_v1" domain tag,
+	// so a future schema change can rotate signatures by bumping the domain
+	// without rotating the encryption key.
+	msg := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%s|%d",
 		runID, in.TenantID, in.CapabilityID, in.RunType,
 		cfg.providerCfg.ID, cfg.modelName, string(cfg.rung),
 		cost, snapHash, ts)
-	return hex.EncodeToString(h.Sum(nil))
+	return crypto.HMACSHA256("ai_run_v1", msg)
 }
 
 func nullable(s string) any {

@@ -740,7 +740,7 @@ func CreateDefaultAdmin() {
 			}
 		}
 
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), 12)
 		if err != nil {
 			slog.Warn("could not hash password", "error", err)
 			return

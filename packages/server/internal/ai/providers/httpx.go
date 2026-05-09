@@ -13,14 +13,21 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"vaporrmm/server/internal/httputil"
 )
 
-// httpClient is the shared timeout-bound client. We deliberately disable
-// keep-alive's default infinite re-use so a single long-lived process doesn't
-// pin TLS sessions to a stale provider host.
-var httpClient = &http.Client{
-	Timeout: 120 * time.Second,
-}
+// httpClient is the shared provider client. MetadataSafeClient enforces:
+//   - no redirect following (so an Authorization header bound for
+//     api.openai.com can't be replayed against 169.254.169.254 via 307)
+//   - dial-time refusal of cloud-metadata addresses (AWS/GCP/Azure
+//     link-local 169.254.x, Alibaba 100.100.100.200) so a misconfigured
+//     "self_hosted" provider can't be steered into a metadata exfil
+//
+// Private IPs are still permitted because operators legitimately host
+// Ollama / vLLM on 192.168.x.x — the trust-level UI flag is the operator's
+// own attestation that the destination is intentional.
+var httpClient = httputil.MetadataSafeClient(120 * time.Second)
 
 // doJSON is a tiny wrapper around http.Client.Do for JSON request/response
 // pairs. It owns the sanitisation contract: at no point do we log the

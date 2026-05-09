@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"vaporrmm/server/internal/ai/rag"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+	"vaporrmm/server/internal/events"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -200,6 +202,9 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update ticket"})
 		}
+		userID, _ := c.Locals("user_id").(string)
+		events.AuditLogTenant(tenantID, userID, "ticket.update", "ticket", id,
+			fmt.Sprintf("status=%s priority=%s assigned_to=%s", req.Status, req.Priority, req.AssignedTo), c.IP())
 
 		// On status transition to resolved/closed, fire-and-forget RAG
 		// indexing of the ticket so future tickets in this tenant can use

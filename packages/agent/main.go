@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -313,11 +314,15 @@ func buildAgentTLSServerConfig() *tls.Config {
 }
 
 // authMiddleware enforces Bearer token authentication on every handler.
+// Uses constant-time comparison so an attacker on the same network can't
+// derive the bearer token byte-by-byte through response-timing measurements.
 func (a *Agent) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
 		expected := "Bearer " + a.apiToken
-		if header != expected {
+		// ConstantTimeCompare returns 0 on length mismatch as well as content
+		// mismatch, so we don't leak token length either.
+		if subtle.ConstantTimeCompare([]byte(header), []byte(expected)) != 1 {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

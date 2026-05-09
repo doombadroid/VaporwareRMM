@@ -9,6 +9,7 @@ import (
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+	"vaporrmm/server/internal/httputil"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -64,11 +65,22 @@ func RegisterWebhookRoutes(api fiber.Router) {
 		if err := c.BodyParser(&req); err != nil || req.URL == "" || req.Events == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "URL and events are required"})
 		}
+		// Reject SSRF-relevant URLs at write time so the operator gets
+		// immediate feedback. The fetch path re-validates as well in case
+		// of DNS rebinding (where a public hostname later resolves to an
+		// internal IP).
+		if err := httputil.RejectPrivateHost(req.URL); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "url not allowed: " + err.Error()})
+		}
 		id := uuid.New().String()
 		enabled := 0
 		if req.Enabled {
 			enabled = 1
 		}
+		// Webhook secret is non-critical (HMAC verifier on receiver side).
+		// Failure to encrypt = operator hasn't set SECRETS_ENCRYPTION_KEY,
+		// which crypto.init now blocks on startup. The remaining path here
+		// is the explicit DEV_ALLOW_UNENCRYPTED_SECRETS=1 mode.
 		encSecret, err := crypto.Encrypt(req.Secret)
 		if err != nil {
 			slog.Warn("failed to encrypt webhook secret", "error", err)

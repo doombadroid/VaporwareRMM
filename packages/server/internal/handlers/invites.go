@@ -242,22 +242,43 @@ func RegisterInviteRoutes(publicAPI, api fiber.Router) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 		tokenHash := hashInviteToken(req.Token)
+		now := time.Now().Unix()
+		// Atomically claim the invite. The conditional UPDATE is the single
+		// race-safe gate: two concurrent accepts can't both observe
+		// accepted_at IS NULL. We mark it claimed FIRST, then look up the
+		// payload — if user creation later fails we still have the audit
+		// trail and the invite can be revoked + reissued by an admin (it
+		// can never be double-spent, which is the property that matters).
+		res, err := db.DB.Exec(
+			`UPDATE user_invites SET accepted_at = ? WHERE token_hash = ? AND accepted_at IS NULL AND expires_at >= ?`,
+			now, tokenHash, now,
+		)
+		if err != nil {
+			slog.Warn("invite claim failed", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Internal error"})
+		}
+		affected, _ := res.RowsAffected()
+		if affected != 1 {
+			// Distinguish not-found / already-used / expired with a separate
+			// SELECT. This adds one query but only on the failure path.
+			var accepted sql.NullInt64
+			var expiresAt int64
+			if qerr := db.DB.QueryRow(`SELECT accepted_at, expires_at FROM user_invites WHERE token_hash = ?`, tokenHash).Scan(&accepted, &expiresAt); qerr != nil {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "invite not found"})
+			}
+			if accepted.Valid {
+				return c.Status(fiber.StatusGone).JSON(fiber.Map{"error": "invite already used"})
+			}
+			return c.Status(fiber.StatusGone).JSON(fiber.Map{"error": "invite expired"})
+		}
 		var (
 			inviteID, inviteEmail, inviteRole, tenantID string
-			expiresAt                                   int64
-			accepted                                    sql.NullInt64
 		)
-		err := db.DB.QueryRow(
-			`SELECT id, email, role, tenant_id, expires_at, accepted_at FROM user_invites WHERE token_hash = ?`, tokenHash,
-		).Scan(&inviteID, &inviteEmail, &inviteRole, &tenantID, &expiresAt, &accepted)
-		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "invite not found"})
-		}
-		if accepted.Valid {
-			return c.Status(fiber.StatusGone).JSON(fiber.Map{"error": "invite already used"})
-		}
-		if expiresAt < time.Now().Unix() {
-			return c.Status(fiber.StatusGone).JSON(fiber.Map{"error": "invite expired"})
+		if err := db.DB.QueryRow(
+			`SELECT id, email, role, tenant_id FROM user_invites WHERE token_hash = ?`, tokenHash,
+		).Scan(&inviteID, &inviteEmail, &inviteRole, &tenantID); err != nil {
+			slog.Warn("invite re-read failed", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Internal error"})
 		}
 
 		// Reject if a user with this email already exists in the tenant (prevents accidental dup-create after manual creation)
@@ -266,12 +287,11 @@ func RegisterInviteRoutes(publicAPI, api fiber.Router) {
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "user already exists; ask an admin to revoke the invite"})
 		}
 
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to hash password"})
 		}
 		userID := uuid.New().String()
-		now := time.Now().Unix()
 		if _, err := db.DB.Exec(
 			`INSERT INTO users (id, email, password_hash, name, role, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			userID, inviteEmail, string(hash), req.Name, inviteRole, now, tenantID,
@@ -283,9 +303,6 @@ func RegisterInviteRoutes(publicAPI, api fiber.Router) {
 				return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "user already exists; ask an admin to revoke the invite"})
 			}
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create user", "message": err.Error()})
-		}
-		if _, err := db.DB.Exec(`UPDATE user_invites SET accepted_at = ? WHERE id = ?`, now, inviteID); err != nil {
-			slog.Warn("could not mark invite accepted", "invite_id", inviteID, "error", err)
 		}
 		events.AuditLogTenant(tenantID, userID, "invite.accept", "user", userID, "accepted invite, account created", c.IP())
 		return c.JSON(fiber.Map{"message": "Account created. You can now log in.", "email": inviteEmail})

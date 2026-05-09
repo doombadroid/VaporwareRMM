@@ -86,7 +86,7 @@ func RegisterSignupRoutes(publicAPI fiber.Router) {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create tenant", "message": err.Error()})
 		}
 
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
 		if err != nil {
 			// Rollback tenant insert; we don't want orphan tenants.
 			_, _ = db.DB.Exec(`DELETE FROM tenants WHERE id = ?`, tenantID)

@@ -18,6 +18,7 @@ import (
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/email"
+	"vaporrmm/server/internal/httputil"
 	"vaporrmm/server/internal/redis"
 
 	"github.com/gofiber/websocket/v2"
@@ -197,6 +198,14 @@ func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
 				slog.Warn("failed to decrypt webhook secret", "webhook_id", id, "error", err)
 				plainSecret = secret
 			}
+			// Re-validate the destination at fetch time. The URL was checked
+			// when the webhook row was created, but DNS rebinding lets a
+			// public hostname resolve to a private IP minutes later. The
+			// SafeOutboundClient also blocks redirect-based bypasses.
+			if err := httputil.RejectPrivateHost(urlStr); err != nil {
+				slog.Warn("webhook destination blocked by SSRF guard", "webhook_id", id, "error", err)
+				continue
+			}
 			body, _ := json.Marshal(payload)
 			req, _ := http.NewRequest("POST", urlStr, bytes.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
@@ -207,8 +216,7 @@ func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
 				req.Header.Set("X-VaporRMM-Signature", hex.EncodeToString(sig.Sum(nil)))
 			}
 
-			client := &http.Client{Timeout: 10 * time.Second}
-			resp, err := client.Do(req)
+			resp, err := httputil.SafeOutboundClient(10 * time.Second).Do(req)
 			if err != nil {
 				slog.Warn("webhook delivery failed", "webhook_id", id, "error", err)
 				continue

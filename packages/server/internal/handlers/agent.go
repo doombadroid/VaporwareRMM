@@ -243,8 +243,10 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		return c.JSON(fiber.Map{"status": "ok", "message": "Heartbeat received", "update_available": updateAvailable, "latest_version": "1.1.0"})
 	})
 
-	// Agent help request
-	app.Post("/agent/help-request", auth.AgentAuthMiddleware(), func(c *fiber.Ctx) error {
+	// Agent help request. Rate-limited so a single compromised agent can't
+	// spam the device_commands table or page on-call by triggering thousands
+	// of help-request rows in a tight loop.
+	app.Post("/agent/help-request", auth.RateLimiter(5, time.Minute), auth.AgentAuthMiddleware(), func(c *fiber.Ctx) error {
 		deviceID := c.Locals("device_id").(string)
 		hostname := c.Locals("hostname").(string)
 
@@ -328,6 +330,16 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "too many results in one batch (max 1000)"})
 		}
 
+		// Constrain the UPDATE to commands belonging to the authenticated
+		// device. Without this constraint a compromised agent A could submit
+		// fake "completed" rows for device B's pending commands by guessing
+		// their UUIDs, marking them succeeded with attacker-supplied output.
+		// device_id from the agent middleware is the trust root; the URL
+		// :hostname param is informational only.
+		deviceID, _ := c.Locals("device_id").(string)
+		if deviceID == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "agent device unknown"})
+		}
 		for _, result := range req.Results {
 			output := result.Output
 			status := "completed"
@@ -336,8 +348,8 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 				output = result.Error
 			}
 			if _, err := db.DB.Exec(
-				`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ?`,
-				status, output, time.Now().Unix(), result.CommandID,
+				`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ? AND device_id = ?`,
+				status, output, time.Now().Unix(), result.CommandID, deviceID,
 			); err != nil {
 				slog.Warn("db exec failed", "error", err)
 			}

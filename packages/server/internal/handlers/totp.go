@@ -62,9 +62,21 @@ func RegisterTOTPRoutes(publicAPI, api fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to generate TOTP secret"})
 		}
 
-		encSecret, encErr := crypto.Encrypt(key.Secret())
-		if encErr != nil {
-			slog.Warn("failed to encrypt totp secret", "error", encErr)
+		// Fail closed on encryption error. The previous behaviour wrote the
+		// plaintext TOTP secret to the DB on encrypt failure, which would
+		// expose every user's second factor on a DB compromise. Operators
+		// running the explicit DEV_ALLOW_UNENCRYPTED_SECRETS=1 path get
+		// crypto.Enabled()==false; let them through, but never silently
+		// downgrade.
+		var encSecret string
+		if crypto.Enabled() {
+			out, encErr := crypto.Encrypt(key.Secret())
+			if encErr != nil {
+				slog.Error("failed to encrypt totp secret", "error", encErr)
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to store TOTP secret"})
+			}
+			encSecret = out
+		} else {
 			encSecret = key.Secret()
 		}
 
@@ -143,8 +155,11 @@ func RegisterTOTPRoutes(publicAPI, api fiber.Router, cfg Config) {
 		return c.JSON(fiber.Map{"message": "Two-factor authentication enabled"})
 	})
 
-	// Verify current TOTP code then disable TOTP for this user
-	api.Post("/auth/totp/disable", func(c *fiber.Ctx) error {
+	// Verify current TOTP code then disable TOTP for this user. Rate-limited
+	// matching /enable so a session-cookie attacker can't brute-force the
+	// 6-digit TOTP code (1M codes / unlimited rate = ~17min) to remove the
+	// second factor on a victim account.
+	api.Post("/auth/totp/disable", auth.RateLimiter(5, time.Minute), func(c *fiber.Ctx) error {
 		userID := c.Locals("user_id").(string)
 		var req struct {
 			Code string `json:"code"`

@@ -2,6 +2,7 @@ package capabilities
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -226,8 +227,18 @@ func finishProbe(ctx context.Context, probe rollbackProbe, outcome, reason strin
 // signature in its action_taken JSON within the window. JSON containment
 // (@>) avoids the false-positive risk of LIKE '%sig%' matching a hex
 // substring inside a different field.
+//
+// The containment value is built with json.Marshal so a signature that
+// contains "}, attacker:" can't escape the JSON literal and rewrite the
+// query semantics. The signature reaches us via dedup output (alertdedup
+// normalises it to a hex-only token), but defence-in-depth: we never trust
+// upstream sanitisation when building SQL fragments.
 func alertSignatureSeenSince(ctx context.Context, tenantID, signature string, since int64) bool {
 	if signature == "" {
+		return false
+	}
+	containment, err := json.Marshal(map[string]string{"signature": signature})
+	if err != nil {
 		return false
 	}
 	var n int
@@ -236,7 +247,7 @@ func alertSignatureSeenSince(ctx context.Context, tenantID, signature string, si
 		 WHERE tenant_id = ? AND capability_id = ? AND created_at >= ?
 		   AND action_taken::jsonb @> ?::jsonb`,
 		tenantID, alertDedupCapName, since,
-		`{"signature":"`+signature+`"}`,
+		string(containment),
 	).Scan(&n)
 	return n > 0
 }

@@ -66,8 +66,18 @@ func main() {
 	// Load configuration from environment / Docker secrets
 	auth.JWTSecret = utils.ReadSecret("JWT_SECRET", "JWT_SECRET_FILE")
 	if auth.JWTSecret == "" {
+		// Dev convenience: generate a strong ephemeral key so single-process
+		// runs work without env setup. Sessions die on restart, which is the
+		// right tradeoff (no false sense of persistence).
 		auth.JWTSecret = utils.GenerateSecureKey()
-		slog.Info("Warning: JWT_SECRET not set, using generated key (will not persist across restarts)")
+		slog.Warn("JWT_SECRET not set, using generated ephemeral key (sessions will not survive restart)")
+	}
+	// HS256 over a short secret is brute-forceable. 32 bytes = 256 bits is the
+	// floor for matching the SHA-256 output. Operators who set a short secret
+	// (e.g. "secret", "changeme") would otherwise have token forgery on tap.
+	if len(auth.JWTSecret) < 32 {
+		slog.Error("JWT_SECRET must be at least 32 characters (current length insufficient for HS256). Generate one with: openssl rand -base64 48")
+		os.Exit(1)
 	}
 
 	utils.ServerPort = defaultServerPort
@@ -153,6 +163,11 @@ func main() {
 		c.Set("X-Frame-Options", "DENY")
 		c.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		c.Set("Content-Security-Policy", "default-src 'self'")
+		// CORS responses depend on the request Origin (we credential-allow a
+		// small allowlist), so any cache layer between us and the browser must
+		// key on it. Without Vary: Origin a CDN can serve a response that was
+		// authorised for origin A back to origin B.
+		c.Vary("Origin")
 		return c.Next()
 	})
 

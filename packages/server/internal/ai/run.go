@@ -205,6 +205,18 @@ func Run(ctx context.Context, in Input, fn Func) (Output, error) {
 			ErrProviderCapMismatch, cap.Name, cap.RequiredCaps, prov.Kind(), prov.Caps())
 	}
 
+	// 5b. Autonomous-rung confidence floor. Capabilities at autonomous bypass
+	// per-instance human approval — we owe the operator a precision check
+	// against the recent metrics window. If precision drops below the
+	// configured threshold, we refuse the run AND demote the capability one
+	// rung. The next call lands at act_policy and an alert wakes someone.
+	if cfg.rung == RungAutonomous {
+		if err := enforceAutonomousFloor(ctx, in.TenantID, in.CapabilityID, cap, cfg.confidence); err != nil {
+			return Output{}, err
+		}
+	}
+	_ = cap // referenced by enforceAutonomousFloor on the autonomous path
+
 	// 6. Reserve cost up front.
 	if err := ReserveCost(ctx, in.TenantID, cfg.costKind, in.Estimate); err != nil {
 		return Output{}, err
@@ -383,6 +395,69 @@ func callSafely(ctx context.Context, p Provider, modelName string, fn Func) (cha
 		}
 	}()
 	return fn(ctx, p, modelName)
+}
+
+// enforceAutonomousFloor refuses the run + auto-demotes when a capability
+// at the autonomous rung doesn't meet its confidence threshold. Threshold
+// is read from ai_capability_tenant_config.confidence_threshold (0-100;
+// percent) and compared against labelling-derived precision over the last
+// 14 days. The min-samples floor is the capability's own
+// PromotionCriteria.MinSamples — using a hardcoded 50 would let a
+// capability that requires 100 samples to PROMOTE be demoted on 50, which
+// is incoherent.
+func enforceAutonomousFloor(ctx context.Context, tenantID, capID string, capDef Capability, threshold int) error {
+	if threshold <= 0 {
+		return nil // operator opted out — they own the consequences
+	}
+	since := time.Now().Add(-14 * 24 * time.Hour).Unix()
+	var calls, correct, incorrect int
+	err := db.DB.QueryRow(`
+		SELECT COUNT(*),
+		       SUM(CASE WHEN outcome='correct' THEN 1 ELSE 0 END),
+		       SUM(CASE WHEN outcome='incorrect' THEN 1 ELSE 0 END)
+		  FROM ai_runs
+		 WHERE tenant_id = ? AND capability_id = ? AND created_at >= ?
+		   AND (output_text IS NULL OR output_text NOT LIKE '[error]%')`,
+		tenantID, capID, since,
+	).Scan(&calls, &correct, &incorrect)
+	if err != nil {
+		// Soft-fail: a metrics-query error must not block the chokepoint.
+		return nil
+	}
+	labelled := correct + incorrect
+	minSamples := capDef.DefaultPromotion.MinSamples
+	if minSamples < 50 {
+		minSamples = 50 // floor of 50 even for capabilities that omit MinSamples
+	}
+	if labelled < minSamples {
+		return nil // not enough signal; keep autonomous
+	}
+	precision := float64(correct) / float64(labelled) * 100.0
+	if precision >= float64(threshold) {
+		return nil // healthy
+	}
+	// Demote one rung. Prefer act_policy (still acts but with scope-policy
+	// gate) rather than all the way to shadow — operators promoted past
+	// act_policy with intent and we don't want to wipe trust accumulation.
+	// Surface the UPDATE error: a silent failure means the demote loop
+	// repeats every call, masking DB pressure.
+	now := time.Now().Unix()
+	if _, err := db.DB.Exec(`
+		UPDATE ai_capability_tenant_config
+		   SET rung = 'act_policy', last_demoted_at = ?, updated_at = ?
+		 WHERE tenant_id = ? AND capability_id = ?`,
+		now, now, tenantID, capID,
+	); err != nil {
+		slog.Error("ai: autonomous-rung demote UPDATE failed; capability NOT demoted but call refused",
+			"tenant_id", tenantID, "capability_id", capID, "error", err)
+		return fmt.Errorf("ai: autonomous floor failed AND demote UPDATE failed (precision=%.1f%% threshold=%d): %w",
+			precision, threshold, err)
+	}
+	slog.Warn("ai: autonomous-rung capability demoted on precision regression",
+		"tenant_id", tenantID, "capability_id", capID,
+		"precision", precision, "threshold", threshold, "labelled_samples", labelled)
+	return fmt.Errorf("ai: autonomous capability %s demoted to act_policy — precision %.1f%% below threshold %d%% (labelled samples=%d)",
+		capID, precision, threshold, labelled)
 }
 
 // providerSupports verifies the provider can fulfil every feature the

@@ -581,6 +581,47 @@ func RunMigrations(dialect string) error {
 			Name:    "add_devices_os_class",
 			SQL:     `ALTER TABLE devices ADD COLUMN os_class TEXT;`,
 		},
+		{
+			Version: "032",
+			Name:    "add_ai_rollback_probes",
+			SQL: `CREATE TABLE IF NOT EXISTS ai_rollback_probes (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				capability_id TEXT NOT NULL,
+				playbook TEXT NOT NULL,
+				token TEXT NOT NULL,
+				alert_signature TEXT,
+				preconditions TEXT,
+				run_at INTEGER NOT NULL,
+				rollback_window_ends INTEGER NOT NULL,
+				status TEXT NOT NULL DEFAULT 'pending',
+				attempts INTEGER NOT NULL DEFAULT 0,
+				outcome TEXT,
+				outcome_reason TEXT,
+				outcome_set_at INTEGER,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_ai_rollback_probes_due ON ai_rollback_probes(status, run_at);
+			CREATE INDEX IF NOT EXISTS idx_ai_rollback_probes_tenant ON ai_rollback_probes(tenant_id, capability_id, created_at);
+			-- Dedup: a capability that fires twice for the same alert in
+			-- quick succession registers two probes with the same
+			-- (token, alert_signature). The expression-index COALESCE
+			-- treats NULL signatures as the literal "__null__" so two
+			-- probes for a no-signature playbook (free_disk_space,
+			-- force_gpupdate) collapse to one — Postgres's default
+			-- unique-index NULL semantics would otherwise let both rows
+			-- through.
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_rollback_probes_dedup ON ai_rollback_probes(tenant_id, token, COALESCE(alert_signature, '__null__'));`,
+		},
+		{
+			Version: "033",
+			Name:    "add_users_skill_tags",
+			SQL: `ALTER TABLE users ADD COLUMN skill_tags TEXT;
+			ALTER TABLE users ADD COLUMN routing_weight INTEGER DEFAULT 100;
+			ALTER TABLE tickets ADD COLUMN ai_route TEXT;`,
+		},
 	}
 
 	for _, m := range migrations {

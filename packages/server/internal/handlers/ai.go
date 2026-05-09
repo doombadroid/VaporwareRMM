@@ -105,6 +105,8 @@ func RegisterAIRoutes(api fiber.Router) {
 	// ── Action / playbooks ───────────────────────────────────────────
 	g.Get("/playbooks", aiListPlaybooks)
 	g.Post("/playbooks/:name/run", aiRunPlaybook)
+	g.Get("/probes", aiListProbes)
+	g.Post("/assist/route", aiAssistRoute)
 
 	// ── Kill switches ─────────────────────────────────────────────────
 	g.Get("/kill", aiListKill)
@@ -1180,6 +1182,77 @@ func loadTargetForPlaybook(ctx context.Context, tenantID, customerID, deviceID s
 		}
 	}
 	return t, nil
+}
+
+// aiListProbes returns the rollback orchestrator's pending + recent
+// terminal probes for the tenant. Operators use this to inspect "what is
+// the AI watching for regression?" — a critical visibility surface for the
+// act_low+ rungs.
+func aiListProbes(c *fiber.Ctx) error {
+	tid := targetTenant(c)
+	status := c.Query("status", "") // pending|in_progress|done|<empty for all>
+	limit, _ := strconv.Atoi(c.Query("limit", "100"))
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := `SELECT id, device_id, capability_id, playbook, COALESCE(token,''),
+	             COALESCE(alert_signature,''), run_at, rollback_window_ends,
+	             status, attempts, COALESCE(outcome,''), COALESCE(outcome_set_at,0),
+	             created_at
+	      FROM ai_rollback_probes WHERE tenant_id = ?`
+	args := []any{tid}
+	if status != "" {
+		q += ` AND status = ?`
+		args = append(args, status)
+	}
+	q += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.DB.Query(q, args...)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "list failed"})
+	}
+	defer rows.Close()
+	out := []fiber.Map{}
+	for rows.Next() {
+		var (
+			id, deviceID, capID, playbook, token, sig, status2, outcome string
+			runAt, windowEnd, outcomeAt, createdAt                      int64
+			attempts                                                    int
+		)
+		if err := rows.Scan(&id, &deviceID, &capID, &playbook, &token, &sig,
+			&runAt, &windowEnd, &status2, &attempts, &outcome, &outcomeAt, &createdAt); err != nil {
+			continue
+		}
+		out = append(out, fiber.Map{
+			"id": id, "device_id": deviceID, "capability_id": capID,
+			"playbook": playbook, "token": token, "alert_signature": sig,
+			"run_at": runAt, "rollback_window_ends": windowEnd,
+			"status": status2, "attempts": attempts,
+			"outcome": outcome, "outcome_set_at": outcomeAt, "created_at": createdAt,
+		})
+	}
+	return c.JSON(fiber.Map{"probes": out, "limit": limit})
+}
+
+// aiAssistRoute is the manual auto-route entry point. Tech can preview a
+// route before assigning the ticket. The capability is gated by the
+// chokepoint (rung etc.) — this handler just adapts the HTTP shape.
+func aiAssistRoute(c *fiber.Ctx) error {
+	tid := targetTenant(c)
+	var req struct {
+		TicketID   string `json:"ticket_id"`
+		CustomerID string `json:"customer_id"`
+		Title      string `json:"title"`
+		Body       string `json:"body"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.TicketID == "" || req.Title == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "ticket_id and title required"})
+	}
+	res, err := capabilities.Route(c.Context(), tid, req.CustomerID, req.TicketID, req.Title, req.Body)
+	if err != nil {
+		return aiMapErr(c, err)
+	}
+	return c.JSON(res)
 }
 
 // ── Kill switches ─────────────────────────────────────────────────────────

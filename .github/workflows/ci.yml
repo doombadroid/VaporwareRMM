@@ -27,10 +27,11 @@ jobs:
       # locate the binary it needs to compute the cache key. The version is
       # pinned (NOT @latest) so a pnpm 10/11 release can't silently change
       # lockfile semantics under us.
+      # No `version:` here — pnpm/action-setup v4 picks up the version
+      # from packageManager in the root package.json (currently 9.15.0).
+      # Specifying both produces ERR_PNPM_BAD_PM_VERSION.
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -59,10 +60,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # No `version:` here — pnpm/action-setup v4 picks up the version
+      # from packageManager in the root package.json (currently 9.15.0).
+      # Specifying both produces ERR_PNPM_BAD_PM_VERSION.
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

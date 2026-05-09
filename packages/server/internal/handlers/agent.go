@@ -259,6 +259,14 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		helpJSON, _ := json.Marshal(map[string]interface{}{
 			"type": "help_request", "device_id": deviceID, "hostname": hostname, "timestamp": now, "details": helpData,
 		})
+		// Cap the payload landing in device_commands.payload. Without this
+		// a compromised agent at the 5/min rate could write 5 * 4MB =
+		// ~20MB/min into the table, with the data also showing up in
+		// every audit / tenant-export read path. 64KB is more than enough
+		// for the diagnostic context the help-request flow needs.
+		if len(helpJSON) > 64*1024 {
+			return c.Status(fiber.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": "help request payload too large (max 64 KiB)"})
+		}
 
 		commandID := uuid.New().String()
 		agentTenant, _ := c.Locals("tenant_id").(string)

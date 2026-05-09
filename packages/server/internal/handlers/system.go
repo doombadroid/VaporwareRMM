@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -27,7 +28,10 @@ func RegisterSystemRoutes(app *fiber.App, cfg Config, openAPISpec []byte) {
 	// Prometheus metrics endpoint — requires METRICS_API_KEY bearer or JWT admin session
 	app.Get("/metrics", func(c *fiber.Ctx) error {
 		if key := os.Getenv("METRICS_API_KEY"); key != "" {
-			if c.Get("Authorization") != "Bearer "+key {
+			// Constant-time compare so a network attacker can't derive the
+			// METRICS_API_KEY from response timing on Bearer-prefix matches.
+			expected := "Bearer " + key
+			if subtle.ConstantTimeCompare([]byte(c.Get("Authorization")), []byte(expected)) != 1 {
 				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
 			}
 		} else {

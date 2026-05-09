@@ -87,6 +87,40 @@ func buildAgentTLSConfig() *tls.Config {
 	return config
 }
 
+// validateAgentIP enforces the same SSRF guard for every server→agent
+// outbound call. Loopback / link-local / metadata addresses are refused;
+// private addresses are NOT refused because legitimate agents sit on
+// 10.x / 192.168.x / 100.64.x (Tailscale CGNAT) — the trust root for
+// agent calls is the bearer token, not the address class.
+func validateAgentIP(agentIP string) error {
+	check := func(ip net.IP) error {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("agent IP %s is not allowed", ip.String())
+		}
+		// Cloud-metadata: AWS/GCP/Azure 169.254.169.254 is link-local
+		// (caught above), but Alibaba's 100.100.100.200 sits in CGNAT
+		// alongside legitimate Tailscale addresses, so check that one
+		// specifically instead of refusing all of 100.64.0.0/10.
+		if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] == 100 && ip4[2] == 100 && ip4[3] == 200 {
+			return fmt.Errorf("agent IP %s is a cloud-metadata address", ip.String())
+		}
+		return nil
+	}
+	if ip := net.ParseIP(agentIP); ip != nil {
+		return check(ip)
+	}
+	ips, err := net.LookupIP(agentIP)
+	if err != nil || len(ips) == 0 {
+		return fmt.Errorf("failed to resolve agent IP %s: %w", agentIP, err)
+	}
+	for _, resolved := range ips {
+		if err := check(resolved); err != nil {
+			return fmt.Errorf("agent IP %s resolves to disallowed address: %w", agentIP, err)
+		}
+	}
+	return nil
+}
+
 // SendCommandToDevice sends a command to an agent at its tracked address with authorization.
 func SendCommandToDevice(agentIP string, agentPort int, apiToken string, cmdData []byte) error {
 	if agentIP == "" {
@@ -96,23 +130,8 @@ func SendCommandToDevice(agentIP string, agentPort int, apiToken string, cmdData
 		agentPort = 47991
 	}
 
-	// SSRF protection: block loopback, link-local, multicast, and unspecified addresses
-	ip := net.ParseIP(agentIP)
-	if ip != nil {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-			return fmt.Errorf("agent IP %s is not allowed", agentIP)
-		}
-	} else {
-		// If it's a hostname, resolve and check
-		ips, err := net.LookupIP(agentIP)
-		if err != nil || len(ips) == 0 {
-			return fmt.Errorf("failed to resolve agent IP %s: %w", agentIP, err)
-		}
-		for _, resolved := range ips {
-			if resolved.IsLoopback() || resolved.IsLinkLocalUnicast() || resolved.IsLinkLocalMulticast() || resolved.IsMulticast() || resolved.IsUnspecified() {
-				return fmt.Errorf("agent IP %s resolves to disallowed address %s", agentIP, resolved)
-			}
-		}
+	if err := validateAgentIP(agentIP); err != nil {
+		return err
 	}
 
 	scheme := "http"
@@ -266,6 +285,15 @@ func FetchSunshinePIN(agentIP string, agentPort int, apiToken string) (string, e
 	}
 	if agentPort == 0 {
 		agentPort = 47991
+	}
+
+	// SSRF guard. agent_ip is supplied by the agent during heartbeat and
+	// stored on the device row; without this check a compromised agent
+	// could redirect the server's PIN fetch to internal services
+	// (Redis on loopback, AWS metadata, etc.) and exfiltrate the
+	// response body via the dashboard.
+	if err := validateAgentIP(agentIP); err != nil {
+		return "", err
 	}
 
 	scheme := "http"

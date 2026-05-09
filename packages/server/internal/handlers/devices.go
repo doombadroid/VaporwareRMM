@@ -23,6 +23,14 @@ import (
 
 var tsAuthKeyRe = regexp.MustCompile(`^[a-zA-Z0-9_:-]+$`)
 
+// tailscaleTagRe matches Tailscale's accepted tag format ("tag:name") with
+// a strict alnum+hyphen body. Anything outside this set goes near
+// `tailscale auth-key create --tag=<value>` and could escape into the
+// argv parser if Tailscale ever changed how it tokenises (e.g. "=" as
+// inner separator). Cap at 64 chars to bound the exec arglist size when
+// many tags are passed.
+var tailscaleTagRe = regexp.MustCompile(`^tag:[a-z0-9-]{1,64}$`)
+
 // tenantFilter returns a SQL fragment and its args to enforce tenant scoping.
 // Returns "", nil for super_admin (cross-tenant access).
 // Returns " AND tenant_id = ?", [tid] for everyone else.
@@ -555,9 +563,13 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			args = append(args, "--ephemeral")
 		}
 		for _, tag := range req.Tags {
-			// Prevent argument injection by validating tag format
-			if strings.Contains(tag, " ") || strings.HasPrefix(tag, "-") {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid tag format"})
+			// Tailscale tags are formatted "tag:name". Restrict to the
+			// charset Tailscale itself accepts so a value like
+			// "name=--ephemeral" or "name `evil`" can't subvert the
+			// CLI argument parser. Length cap defends against memory
+			// exhaustion on the exec arglist.
+			if !tailscaleTagRe.MatchString(tag) {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid tag format (allowed: tag:[a-z0-9-]+, max 64 chars)"})
 			}
 			args = append(args, "--tag="+tag)
 		}

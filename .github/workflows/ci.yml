@@ -14,13 +14,14 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  # Opt JavaScript-based actions (actions/checkout, actions/setup-node,
-  # pnpm/action-setup) into the Node 24 runtime now. Node 20 is deprecated
-  # in GitHub Actions and forced-off June 2 2026; flipping this flag early
-  # surfaces any incompatibility now instead of on the deadline morning.
-  # When Node 24 becomes the default we can drop this; if Node 24 ever
-  # breaks an action we depend on, set ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true
-  # as a temporary fallback.
+  # Defense-in-depth opt-in to the Node 24 runtime for any JavaScript
+  # action that still declares node20 in its action.yml. The actions
+  # we use directly (checkout/setup-node/setup-go/pnpm/upload+download
+  # artifact) are pinned to versions that already declare node24, so
+  # this flag is effectively a no-op today — it remains in place to
+  # catch any transitively-pulled v4-era action before the June 2 2026
+  # forced cutover. If Node 24 ever breaks an action we depend on, set
+  # ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true as a temporary fallback.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 # Default least-privilege token. Jobs that need more (docker push,
@@ -35,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # pnpm has to land BEFORE setup-node, otherwise `cache: 'pnpm'` can't
       # locate the binary it needs to compute the cache key. The version is
@@ -45,10 +46,10 @@ jobs:
       # from packageManager in the root package.json (currently 9.15.0).
       # Specifying both produces ERR_PNPM_BAD_PM_VERSION.
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'pnpm'
@@ -72,16 +73,16 @@ jobs:
     needs: lint
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # No `version:` here — pnpm/action-setup v4 picks up the version
       # from packageManager in the root package.json (currently 9.15.0).
       # Specifying both produces ERR_PNPM_BAD_PM_VERSION.
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'pnpm'
@@ -110,10 +111,10 @@ jobs:
     needs: lint
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           # Must match go.work toolchain (1.25.0). Transitive deps like
           # x/sys 0.42.0 and x/crypto 0.49.0 declare `go 1.25`, so 1.23/1.24
@@ -163,10 +164,10 @@ jobs:
     needs: go-lint
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           # Must match go.work toolchain (1.25.0) — see go-lint job comment.
           go-version: '1.25'
@@ -217,10 +218,10 @@ jobs:
     needs: go-test
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
@@ -234,7 +235,7 @@ jobs:
           go build -o vaporrmm-server .
 
       - name: Upload server binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: server-linux-amd64
           path: packages/server/vaporrmm-server
@@ -246,10 +247,10 @@ jobs:
     needs: go-test
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
@@ -283,35 +284,35 @@ jobs:
           GOOS=darwin GOARCH=arm64 go build -o vaporrmm-agent-darwin-arm64 .
 
       - name: Upload Linux AMD64 agent
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-linux-amd64
           path: packages/agent/vaporrmm-agent-linux-amd64
           retention-days: 7
 
       - name: Upload Linux ARM64 agent
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-linux-arm64
           path: packages/agent/vaporrmm-agent-linux-arm64
           retention-days: 7
 
       - name: Upload Windows AMD64 agent
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-windows-amd64
           path: packages/agent/vaporrmm-agent-windows-amd64.exe
           retention-days: 7
 
       - name: Upload macOS AMD64 agent
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-darwin-amd64
           path: packages/agent/vaporrmm-agent-darwin-amd64
           retention-days: 7
 
       - name: Upload macOS ARM64 agent
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-darwin-arm64
           path: packages/agent/vaporrmm-agent-darwin-arm64
@@ -326,7 +327,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -384,7 +385,7 @@ jobs:
     needs: [build-server, build-agent]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # docker-compose.yml uses ${VAR:?msg} interpolation for the secrets
       # the server needs at boot. Generate ephemeral values for the smoke
@@ -421,7 +422,7 @@ jobs:
     needs: docker-build
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
@@ -438,7 +439,7 @@ jobs:
           output: 'trivy-image-results.txt'
 
       - name: Upload Trivy results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: trivy-scan-results
@@ -456,10 +457,10 @@ jobs:
       packages: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: '*'

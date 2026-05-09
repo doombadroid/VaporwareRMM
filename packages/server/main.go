@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"vaporrmm/server/internal/ai"
+	_ "vaporrmm/server/internal/ai/providers"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
@@ -102,6 +105,14 @@ func main() {
 
 	auth.LoadAgentTokens()
 	auth.CreateDefaultAdmin()
+
+	// Boot the AI kill-switch watcher (no-op when DB dialect is SQLite).
+	// Provider implementations self-register via init() in the side-effect
+	// import below; we kick off the kill-switch sync loop here so the cache
+	// is warm by the time the first AI request lands.
+	aiCtx, aiCancel := context.WithCancel(context.Background())
+	defer aiCancel()
+	ai.StartKillSwitchWatcher(aiCtx)
 
 	app := fiber.New(fiber.Config{
 		BodyLimit:             defaultBodyLimit,

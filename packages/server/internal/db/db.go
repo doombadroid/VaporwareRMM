@@ -354,6 +354,172 @@ func RunMigrations(dialect string) error {
 			SQL: `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_tenant ON users(email, tenant_id);
 			CREATE UNIQUE INDEX IF NOT EXISTS idx_user_invites_token_hash ON user_invites(token_hash);`,
 		},
+		{
+			Version: "022",
+			Name:    "add_tenants_ai_fields",
+			SQL: `ALTER TABLE tenants ADD COLUMN ai_enabled INTEGER DEFAULT 0;
+			ALTER TABLE tenants ADD COLUMN ai_billing_mode TEXT DEFAULT 'absorb';
+			ALTER TABLE tenants ADD COLUMN ai_max_chat_cost_per_day_micros BIGINT DEFAULT 0;
+			ALTER TABLE tenants ADD COLUMN ai_max_embedding_cost_per_day_micros BIGINT DEFAULT 0;
+			ALTER TABLE tenants ADD COLUMN ai_dpa_acknowledged_at INTEGER;`,
+		},
+		{
+			Version: "023",
+			Name:    "add_ai_providers",
+			SQL: `CREATE TABLE IF NOT EXISTS ai_providers (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				kind TEXT NOT NULL,
+				name TEXT NOT NULL,
+				base_url TEXT,
+				api_key_encrypted TEXT,
+				region TEXT,
+				model_trust_level TEXT DEFAULT 'external',
+				enabled INTEGER DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_ai_providers_tenant ON ai_providers(tenant_id);`,
+		},
+		{
+			Version: "024",
+			Name:    "add_ai_routing_rules",
+			SQL: `CREATE TABLE IF NOT EXISTS ai_routing_rules (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				task_type TEXT NOT NULL,
+				preferred_provider_id TEXT NOT NULL,
+				fallback_provider_id TEXT,
+				model_name TEXT NOT NULL,
+				embedding_model_name TEXT,
+				max_cost_per_call_micros BIGINT DEFAULT 1000000,
+				max_input_tokens INTEGER DEFAULT 8000,
+				max_output_tokens INTEGER DEFAULT 1000,
+				cost_per_1k_input_micros BIGINT DEFAULT 0,
+				cost_per_1k_output_micros BIGINT DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_routing_rules_task ON ai_routing_rules(tenant_id, task_type);`,
+		},
+		{
+			Version: "025",
+			Name:    "add_ai_runs",
+			SQL: `CREATE TABLE IF NOT EXISTS ai_runs (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				customer_id TEXT,
+				device_id TEXT,
+				ticket_id TEXT,
+				capability_id TEXT,
+				run_type TEXT NOT NULL,
+				call_chain_id TEXT,
+				parent_run_id TEXT,
+				provider_id TEXT NOT NULL,
+				model_name TEXT NOT NULL,
+				model_version TEXT,
+				model_trust_level TEXT,
+				prompt_hash TEXT,
+				prompt_token_count INTEGER DEFAULT 0,
+				output_token_count INTEGER DEFAULT 0,
+				cost_usd_micros BIGINT DEFAULT 0,
+				latency_ms INTEGER DEFAULT 0,
+				retrieved_context_refs TEXT,
+				output_text TEXT,
+				action_taken TEXT,
+				scope_snapshot_hash TEXT,
+				rung_at_call TEXT NOT NULL,
+				tenant_status_at_call TEXT,
+				approved_by_user_id TEXT,
+				outcome TEXT,
+				outcome_set_by TEXT,
+				outcome_set_at INTEGER,
+				rollback_attempted INTEGER DEFAULT 0,
+				rollback_succeeded INTEGER DEFAULT 0,
+				signed_hash TEXT,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_ai_runs_tenant_created ON ai_runs(tenant_id, created_at);
+			CREATE INDEX IF NOT EXISTS idx_ai_runs_capability_created ON ai_runs(capability_id, created_at);
+			CREATE INDEX IF NOT EXISTS idx_ai_runs_chain ON ai_runs(call_chain_id);`,
+		},
+		{
+			Version: "026",
+			Name:    "add_ai_run_prompts",
+			SQL: `CREATE TABLE IF NOT EXISTS ai_run_prompts (
+				run_id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				prompt_text TEXT,
+				archived_at INTEGER,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_ai_run_prompts_tenant ON ai_run_prompts(tenant_id, created_at);`,
+		},
+		{
+			Version: "027",
+			Name:    "add_ai_capabilities",
+			SQL: `CREATE TABLE IF NOT EXISTS ai_capabilities (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL UNIQUE,
+				category TEXT NOT NULL,
+				description TEXT,
+				stage INTEGER NOT NULL,
+				required_provider_caps TEXT,
+				created_at INTEGER NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS ai_capability_tenant_config (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				capability_id TEXT NOT NULL,
+				enabled INTEGER DEFAULT 0,
+				rung TEXT DEFAULT 'shadow',
+				scope_filter TEXT,
+				confidence_threshold INTEGER DEFAULT 0,
+				blast_radius_max_devices INTEGER DEFAULT 0,
+				blast_radius_window_minutes INTEGER DEFAULT 5,
+				promotion_criteria TEXT,
+				kill_switch INTEGER DEFAULT 0,
+				last_promoted_at INTEGER,
+				last_demoted_at INTEGER,
+				updated_at INTEGER NOT NULL
+			);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_cap_tenant ON ai_capability_tenant_config(tenant_id, capability_id);
+			CREATE TABLE IF NOT EXISTS ai_capability_metrics_daily (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				capability_id TEXT NOT NULL,
+				day TEXT NOT NULL,
+				calls INTEGER DEFAULT 0,
+				suggestions_offered INTEGER DEFAULT 0,
+				suggestions_taken INTEGER DEFAULT 0,
+				suggestions_overridden INTEGER DEFAULT 0,
+				actions_executed INTEGER DEFAULT 0,
+				actions_rolled_back INTEGER DEFAULT 0,
+				labeled_correct INTEGER DEFAULT 0,
+				labeled_incorrect INTEGER DEFAULT 0,
+				labeled_unclear INTEGER DEFAULT 0,
+				customer_complaints INTEGER DEFAULT 0,
+				cost_usd_micros BIGINT DEFAULT 0,
+				created_at INTEGER NOT NULL
+			);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_cap_metrics ON ai_capability_metrics_daily(tenant_id, capability_id, day);
+			CREATE TABLE IF NOT EXISTS ai_capability_dependencies (
+				capability_id TEXT NOT NULL,
+				depends_on TEXT NOT NULL,
+				PRIMARY KEY (capability_id, depends_on)
+			);`,
+		},
+		{
+			Version: "028",
+			Name:    "add_ai_kill_switches",
+			SQL: `CREATE TABLE IF NOT EXISTS ai_kill_switches (
+				scope TEXT PRIMARY KEY,
+				enabled INTEGER NOT NULL,
+				reason TEXT,
+				set_by_user_id TEXT,
+				set_at INTEGER NOT NULL
+			);`,
+		},
 	}
 
 	for _, m := range migrations {

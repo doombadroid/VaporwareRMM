@@ -109,7 +109,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          # Must match go.work toolchain (1.25.0). Transitive deps like
+          # x/sys 0.42.0 and x/crypto 0.49.0 declare `go 1.25`, so 1.23/1.24
+          # produce "package requires newer Go version go1.25" typecheck
+          # errors that cascade into bogus "undefined: fiber" noise.
+          go-version: '1.25'
           cache: true
           # Cache key has to include every per-module go.sum, not just the
           # workspace sum — without these the dep cache misses and tools
@@ -154,15 +158,9 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          # Must match go.work toolchain (1.25.0) — see go-lint job comment.
+          go-version: '1.25'
           cache: true
-          # Cache key has to include every per-module go.sum, not just the
-          # workspace sum — without these the dep cache misses and tools
-          # like golangci-lint fall back to typechecking against unresolved
-          # imports, which manifests as bogus "undefined: fiber" /
-          # "undefined: websocket" errors and a phantom "v2 redeclared"
-          # collision (the typechecker uses the last path segment when it
-          # can't load the package itself).
           cache-dependency-path: |
             go.work.sum
             packages/server/go.sum
@@ -204,7 +202,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: true
           cache-dependency-path: |
             packages/server/go.sum
@@ -233,7 +231,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: '1.25'
           cache: true
           cache-dependency-path: |
             packages/agent/go.sum

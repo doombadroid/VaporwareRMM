@@ -425,9 +425,19 @@ echo "  systemctl restart vaporrmm-agent"
 		if req.Status == "completed" || req.Status == "failed" {
 			completedAt = time.Now().Unix()
 		}
-		_, err := db.DB.Exec(`UPDATE file_transfers SET status = ?, progress = ?, completed_at = ? WHERE id = ? AND device_id = ?`, req.Status, req.Progress, completedAt, transferID, deviceID)
+		// UPDATE constrained by device_id so a compromised agent A can't
+		// flip transfers belonging to device B. RowsAffected is the
+		// authority on whether the row matched — without checking it,
+		// the webhook below would fire on every call (including ones
+		// that touched zero rows because the transfer_id was guessed or
+		// belongs to another device).
+		res, err := db.DB.Exec(`UPDATE file_transfers SET status = ?, progress = ?, completed_at = ? WHERE id = ? AND device_id = ?`, req.Status, req.Progress, completedAt, transferID, deviceID)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update file transfer"})
+		}
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "transfer not found for this device"})
 		}
 		ftTenant, _ := c.Locals("tenant_id").(string)
 		if req.Status == "completed" {

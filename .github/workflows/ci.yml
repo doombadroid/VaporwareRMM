@@ -405,6 +405,13 @@ jobs:
             # doesn't error.
             echo "AGENT_TOKEN=ci-smoke-not-a-real-token"
           } > .env
+          # docker-compose.yml mounts ./secrets/jwt_secret.txt as a Docker
+          # secret. The file is intentionally not in git (it would be the
+          # production JWT key); generate a per-run placeholder so the
+          # bind mount resolves. The server reads JWT_SECRET from env first
+          # anyway, the file mount is a runtime fallback for swarm mode.
+          mkdir -p secrets
+          openssl rand -base64 48 > secrets/jwt_secret.txt
           docker compose up --build -d
 
       - name: Wait for services to be ready
@@ -424,6 +431,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      # Same lowercase-name fix as the docker-build job — GHCR rejects
+      # mixed-case repo names and Trivy errors with 'could not parse
+      # reference' on the same image tag.
+      - name: Compute lowercase image name
+        id: img
+        run: echo "name=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -434,7 +448,7 @@ jobs:
       - name: Run Trivy image scan
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/server:${{ github.sha }}
+          image-ref: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}/server:${{ github.sha }}
           format: 'table'
           output: 'trivy-image-results.txt'
 

@@ -72,9 +72,16 @@ test-results/
 .DS_Store
 Thumbs.db
 
-# ── IDE ──────────────────────────────────────────────────────
+# ── IDE / personal scratch ───────────────────────────────────
 .vscode/
 .idea/
+.claude/
+.opencode/
+.cursor/
+.aider*
+CLAUDE.md
+PRODUCT.md
+DESIGN.md
 *.swp
 *.swo
 

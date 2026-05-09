@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +17,33 @@ import (
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 )
+
+// modelVersionRe is what we accept from a provider's reported model name
+// before storing it on the audit row. A malicious openai_compat backend
+// could otherwise return '<script>' or other text that, while React-escaped
+// in the dashboard, would clutter the audit log with confusing entries.
+var modelVersionRe = regexp.MustCompile(`^[A-Za-z0-9._:/+-]{1,128}$`)
+
+func sanitizeModelVersion(s string) string {
+	if modelVersionRe.MatchString(s) {
+		return s
+	}
+	// Keep what we can. Strip non-matching chars + cap length.
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == ':' || r == '/' || r == '+' || r == '-' {
+			b.WriteRune(r)
+			if b.Len() >= 128 {
+				break
+			}
+		}
+	}
+	if b.Len() == 0 {
+		return "[unparseable]"
+	}
+	return b.String()
+}
 
 // Sentinels the chokepoint can return. Callers map these to HTTP statuses.
 var (
@@ -26,6 +54,7 @@ var (
 	ErrCapNotFound        = errors.New("ai: capability not registered in this build")
 	ErrUnmetDependency    = errors.New("ai: capability has unmet dependencies")
 	ErrTenantSuspended    = errors.New("ai: tenant suspended")
+	ErrProviderCapMismatch = errors.New("ai: chosen provider does not support a capability the requested feature requires")
 )
 
 // callChainKey is a private context-value key. The chain ID propagates from
@@ -129,6 +158,7 @@ func Run(ctx context.Context, in Input, fn Func) (Output, error) {
 	if !ok {
 		return Output{}, ErrCapNotFound
 	}
+	_ = cap // referenced by the provider-cap check below
 	unmet, err := CheckDependencies(in.CapabilityID)
 	if err != nil {
 		return Output{}, err
@@ -146,12 +176,23 @@ func Run(ctx context.Context, in Input, fn Func) (Output, error) {
 		CapturedAt: time.Now().Unix(),
 	}
 	snap.Hash = hashSnapshot(snap)
-	_ = cap // use for tool composition later
 
 	// 5. Build the provider.
 	prov, err := Build(cfg.providerCfg)
 	if err != nil {
 		return Output{}, fmt.Errorf("ai: build provider: %w", err)
+	}
+
+	// 5a. Provider must support every feature the capability requires. We do
+	// the comparison here rather than at routing-rule create time because
+	// the capability registry is in-process — a routing rule pinned to
+	// `ollama` is fine if the only capability that uses it doesn't need
+	// tool calls, but the moment a tool-using capability registers against
+	// the same task_type we should fail loudly instead of letting the
+	// provider 400 the request mid-flight.
+	if !providerSupports(prov.Caps(), cap.RequiredCaps) {
+		return Output{}, fmt.Errorf("%w: capability %s needs %+v, provider %s offers %+v",
+			ErrProviderCapMismatch, cap.Name, cap.RequiredCaps, prov.Kind(), prov.Caps())
 	}
 
 	// 6. Reserve cost up front.
@@ -172,13 +213,21 @@ func Run(ctx context.Context, in Input, fn Func) (Output, error) {
 		ReleaseCost(ctx, in.TenantID, cfg.costKind, over)
 	}
 
-	// 9. Persist audit row (write-once, signed). Errors here are logged but
-	// not returned — we must not lose the call result because we couldn't
-	// write the audit; instead alert.
+	// 9. Persist audit row (write-once, signed). If this fails we must NOT
+	// return success: the cost has already been billed via Redis/DB but
+	// without an ai_runs row the daily-spend SUM in reserveViaDB is stale,
+	// and we have no record of who did what. Release the reservation and
+	// return a hard error so the caller knows to retry (idempotently) or
+	// alert an operator.
 	runID := uuid.New().String()
 	if err := persistRun(ctx, runID, in, cfg, snap, chatResp, embedResp, actionBytes, actualMicros, latency, callErr); err != nil {
-		slog.Error("ai: failed to persist audit row", "tenant_id", in.TenantID,
-			"capability_id", in.CapabilityID, "error", err)
+		slog.Error("ai: failed to persist audit row — releasing cost reservation and failing the run",
+			"tenant_id", in.TenantID, "capability_id", in.CapabilityID, "error", err)
+		ReleaseCost(ctx, in.TenantID, cfg.costKind, in.Estimate)
+		if callErr != nil {
+			return Output{}, fmt.Errorf("ai: provider call failed AND audit persist failed: provider=%v audit=%w", callErr, err)
+		}
+		return Output{}, fmt.Errorf("ai: audit persist failed: %w", err)
 	}
 
 	if callErr != nil {
@@ -243,6 +292,10 @@ func loadRuntime(ctx context.Context, in Input) (runtimeConfig, error) {
 	if taskType == "" {
 		taskType = string(TaskReason)
 	}
+	// Default cost kind to chat; embed runs flip both the task routing and
+	// the cost bucket. Being explicit here means future RunTypes don't
+	// silently fall through to CostChat just because it's iota=0.
+	rc.costKind = CostChat
 	if in.RunType == RunTypeEmbed {
 		taskType = string(TaskEmbed)
 		rc.costKind = CostEmbedding
@@ -306,6 +359,29 @@ func loadProvider(id string) (ProviderConfig, error) {
 	return pc, nil
 }
 
+// providerSupports verifies the provider can fulfil every feature the
+// capability declared as required. Bools are anded; MaxContext is a minimum
+// requirement so a capability that needs at least 32k context isn't routed
+// to a 4k-window model.
+func providerSupports(have, need Capabilities) bool {
+	if need.Streaming && !have.Streaming {
+		return false
+	}
+	if need.ToolCalling && !have.ToolCalling {
+		return false
+	}
+	if need.Embeddings && !have.Embeddings {
+		return false
+	}
+	if need.JSONMode && !have.JSONMode {
+		return false
+	}
+	if need.MaxContext > 0 && have.MaxContext > 0 && have.MaxContext < need.MaxContext {
+		return false
+	}
+	return true
+}
+
 func computeActualCost(cfg runtimeConfig, chat *ChatResponse, embed *EmbedResponse) int64 {
 	// Stage 0 math: per-1k rates were captured into runtimeConfig at gate
 	// entry (so a routing-rule edit mid-call doesn't bill us at the new
@@ -337,13 +413,13 @@ func persistRun(ctx context.Context, runID string, in Input, cfg runtimeConfig, 
 		outputText   string
 	)
 	if chat != nil {
-		modelVersion = chat.ModelVersion
+		modelVersion = sanitizeModelVersion(chat.ModelVersion)
 		promptTok = chat.PromptTokens
 		outputTok = chat.OutputTokens
 		outputText = truncateForAudit(chat.Content)
 	}
 	if embed != nil {
-		modelVersion = embed.ModelVersion
+		modelVersion = sanitizeModelVersion(embed.ModelVersion)
 		promptTok = embed.PromptTokens
 	}
 	// Preserve provider errors in the audit row. We tag with "[error] " so
@@ -400,6 +476,54 @@ func hashSnapshot(s ScopeSnapshot) string {
 	b, _ := json.Marshal(s.Devices)
 	h := sha256.Sum256(append([]byte(s.TenantID+"|"+s.CustomerID+"|"), b...))
 	return hex.EncodeToString(h[:])
+}
+
+// RunForVerification carries the persisted fields needed to re-derive an
+// audit row's signature. Returned by LoadRunForVerification, fed back into
+// RecomputeSignature so the handler can compare stored vs recomputed.
+type RunForVerification struct {
+	RunID        string
+	TenantID     string
+	CapabilityID string
+	RunType      string
+	ProviderID   string
+	ModelName    string
+	Rung         string
+	Cost         int64
+	SnapHash     string
+	CreatedAt    int64
+	Signed       string
+}
+
+// LoadRunForVerification fetches a single ai_runs row by id, scoped to the
+// tenant. Returns ErrCapNotFound if the row doesn't exist OR belongs to a
+// different tenant — the same response either way so an attacker can't
+// distinguish "no such row" from "row exists but isn't yours".
+func LoadRunForVerification(runID, tenantID string) (RunForVerification, error) {
+	var r RunForVerification
+	err := db.DB.QueryRow(`
+		SELECT id, tenant_id, COALESCE(capability_id,''), run_type, provider_id, model_name,
+		       rung_at_call, cost_usd_micros, COALESCE(scope_snapshot_hash,''), created_at,
+		       COALESCE(signed_hash,'')
+		  FROM ai_runs WHERE id = ? AND tenant_id = ?`, runID, tenantID,
+	).Scan(&r.RunID, &r.TenantID, &r.CapabilityID, &r.RunType, &r.ProviderID, &r.ModelName,
+		&r.Rung, &r.Cost, &r.SnapHash, &r.CreatedAt, &r.Signed)
+	if err != nil {
+		return r, ErrCapNotFound
+	}
+	return r, nil
+}
+
+// RecomputeSignature reproduces the signRow logic over the fields persisted
+// to ai_runs. Tampering with any of those fields after the fact yields a
+// different hex string from what was stored at insert time.
+func RecomputeSignature(r RunForVerification) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%d|%s|%d",
+		r.RunID, r.TenantID, r.CapabilityID, r.RunType,
+		r.ProviderID, r.ModelName, r.Rung,
+		r.Cost, r.SnapHash, r.CreatedAt)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func signRow(runID string, in Input, cfg runtimeConfig, cost int64, snapHash string, ts int64) string {

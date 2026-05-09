@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -17,6 +20,40 @@ import (
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
 )
+
+// validateProviderBaseURL refuses configs that mix an external trust level
+// with a private-IP / loopback / link-local hostname. That combination is
+// almost always either a misconfiguration (operator pasted localhost into a
+// SaaS-trust row) or an attempt to steer an "external" provider towards an
+// internal service like Redis or the Postgres host. Self-hosted/local trust
+// levels are allowed to point at private addresses — that's the whole point.
+func validateProviderBaseURL(baseURL, trust string) error {
+	if baseURL == "" {
+		return nil
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid base_url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("base_url must be http or https (got %q)", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("base_url missing host")
+	}
+	if trust == "external" {
+		host := u.Hostname()
+		ips, _ := net.LookupIP(host)
+		// If we can resolve, every IP must be public. If we can't resolve, we
+		// allow it — DNS may be down or the operator may be staging a host.
+		for _, ip := range ips {
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+				return fmt.Errorf("external-trust provider may not point at a non-public address (%s → %s); change model_trust_level to 'local' or 'self_hosted'", host, ip)
+			}
+		}
+	}
+	return nil
+}
 
 // RegisterAIRoutes wires the Settings → AI surface. All routes are admin-only;
 // promotion past the `suggest` rung and global-scope kill switches are
@@ -52,6 +89,7 @@ func RegisterAIRoutes(api fiber.Router) {
 
 	// ── Audit log ─────────────────────────────────────────────────────
 	g.Get("/runs", aiListRuns)
+	g.Get("/runs/:id/verify", aiVerifyRun)
 
 	// ── Kill switches ─────────────────────────────────────────────────
 	g.Get("/kill", aiListKill)
@@ -148,16 +186,19 @@ func aiPatchTenant(c *fiber.Ctx) error {
 		fields = append(fields, "ai_billing_mode = ?")
 		args = append(args, *p.AIBillingMode)
 	}
+	// Sanity cap: $100k/day. A higher value is almost certainly a UI bug
+	// (decimal-point misread converting "1.50" → 1500000000 micros).
+	const maxDailyCostMicros = int64(100_000) * 1_000_000
 	if p.AIMaxChatCostPerDay != nil {
-		if *p.AIMaxChatCostPerDay < 0 {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cost cap must be non-negative"})
+		if *p.AIMaxChatCostPerDay < 0 || *p.AIMaxChatCostPerDay > maxDailyCostMicros {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cost cap must be between 0 and 100,000,000,000 micros ($100k/day)"})
 		}
 		fields = append(fields, "ai_max_chat_cost_per_day_micros = ?")
 		args = append(args, *p.AIMaxChatCostPerDay)
 	}
 	if p.AIMaxEmbedCostPerDay != nil {
-		if *p.AIMaxEmbedCostPerDay < 0 {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cost cap must be non-negative"})
+		if *p.AIMaxEmbedCostPerDay < 0 || *p.AIMaxEmbedCostPerDay > maxDailyCostMicros {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cost cap must be between 0 and 100,000,000,000 micros ($100k/day)"})
 		}
 		fields = append(fields, "ai_max_embedding_cost_per_day_micros = ?")
 		args = append(args, *p.AIMaxEmbedCostPerDay)
@@ -236,6 +277,9 @@ func aiCreateProvider(c *fiber.Ctx) error {
 	if trust != "local" && trust != "external" && trust != "self_hosted" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid model_trust_level"})
 	}
+	if err := validateProviderBaseURL(p.BaseURL, trust); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 	encKey := ""
 	if p.APIKey != "" {
 		v, err := crypto.Encrypt(p.APIKey)
@@ -310,6 +354,25 @@ func aiPatchProvider(c *fiber.Ctx) error {
 		}
 		fields = append(fields, "model_trust_level = ?")
 		args = append(args, v)
+	}
+	// If either base_url or trust level is changing, validate the resulting
+	// pair. We need the *resulting* values, so re-read the row's current state
+	// and merge with the patch.
+	if p.BaseURL != nil || p.ModelTrustLevel != nil {
+		var (
+			currURL, currTrust string
+		)
+		_ = db.DB.QueryRow(`SELECT COALESCE(base_url,''), COALESCE(model_trust_level,'external') FROM ai_providers WHERE id = ? AND tenant_id = ?`, id, tid).Scan(&currURL, &currTrust)
+		nextURL, nextTrust := currURL, currTrust
+		if p.BaseURL != nil {
+			nextURL = *p.BaseURL
+		}
+		if p.ModelTrustLevel != nil {
+			nextTrust = *p.ModelTrustLevel
+		}
+		if err := validateProviderBaseURL(nextURL, nextTrust); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
 	}
 	if p.Enabled != nil {
 		fields = append(fields, "enabled = ?")
@@ -512,25 +575,27 @@ func aiListCapabilities(c *fiber.Ctx) error {
 	caps := ai.All()
 	out := make([]fiber.Map, 0, len(caps))
 	for _, cap := range caps {
-		// Per-tenant config (may be missing → defaults)
+		// Per-tenant config (may be missing → defaults). The kill-switch
+		// state lives in ai_kill_switches now (single source of truth);
+		// the column on this table is deprecated and ignored.
 		var (
-			enabled, conf, blastMax, blastWin, killSwitch int
-			rung                                          string
-			scopeRaw                                      sql.NullString
+			enabled, conf, blastMax, blastWin int
+			rung                              string
+			scopeRaw                          sql.NullString
 		)
 		err := db.DB.QueryRow(`
 			SELECT COALESCE(enabled,0), COALESCE(rung,'shadow'),
 			       scope_filter, COALESCE(confidence_threshold,0),
 			       COALESCE(blast_radius_max_devices,0),
-			       COALESCE(blast_radius_window_minutes,5),
-			       COALESCE(kill_switch,0)
+			       COALESCE(blast_radius_window_minutes,5)
 			  FROM ai_capability_tenant_config
 			 WHERE tenant_id = ? AND capability_id = ?`,
 			tid, cap.Name,
-		).Scan(&enabled, &rung, &scopeRaw, &conf, &blastMax, &blastWin, &killSwitch)
+		).Scan(&enabled, &rung, &scopeRaw, &conf, &blastMax, &blastWin)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
+		killSwitch := ai.IsKilled(tid, cap.Name)
 		var scope ai.ScopeFilter
 		if scopeRaw.Valid {
 			scope, _ = ai.ParseScopeFilter([]byte(scopeRaw.String))
@@ -553,7 +618,7 @@ func aiListCapabilities(c *fiber.Ctx) error {
 			"confidence_threshold":       conf,
 			"blast_radius_max_devices":   blastMax,
 			"blast_radius_window_minutes": blastWin,
-			"kill_switch":                killSwitch == 1,
+			"kill_switch":                killSwitch,
 		})
 	}
 	return c.JSON(fiber.Map{"capabilities": out})
@@ -615,24 +680,25 @@ func aiPatchCapability(c *fiber.Ctx) error {
 		scopeJSON = string(b)
 	}
 
-	// Read existing row; if present, merge fields.
+	// Read existing row; if present, merge fields. We deliberately do NOT
+	// read the legacy kill_switch column — kill state lives in
+	// ai_kill_switches as the single source of truth so the dashboard view
+	// and the chokepoint check can never drift.
 	id := ""
-	var existing capabilityPatch
 	var (
-		existingEnabled, existingConf, existingBlastMax, existingBlastWin, existingKill int
-		existingRung                                                                    string
-		existingScopeRaw                                                                sql.NullString
+		existingEnabled, existingConf, existingBlastMax, existingBlastWin int
+		existingRung                                                      string
+		existingScopeRaw                                                  sql.NullString
 	)
 	err := db.DB.QueryRow(`
 		SELECT id, COALESCE(enabled,0), COALESCE(rung,'shadow'),
 		       scope_filter, COALESCE(confidence_threshold,0),
 		       COALESCE(blast_radius_max_devices,0),
-		       COALESCE(blast_radius_window_minutes,5),
-		       COALESCE(kill_switch,0)
+		       COALESCE(blast_radius_window_minutes,5)
 		  FROM ai_capability_tenant_config
 		 WHERE tenant_id = ? AND capability_id = ?`,
 		tid, name,
-	).Scan(&id, &existingEnabled, &existingRung, &existingScopeRaw, &existingConf, &existingBlastMax, &existingBlastWin, &existingKill)
+	).Scan(&id, &existingEnabled, &existingRung, &existingScopeRaw, &existingConf, &existingBlastMax, &existingBlastWin)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "load failed"})
 	}
@@ -659,41 +725,40 @@ func aiPatchCapability(c *fiber.Ctx) error {
 	if p.BlastRadiusWindowMinutes != nil {
 		blastWin = *p.BlastRadiusWindowMinutes
 	}
-	kill := existingKill
-	if p.KillSwitch != nil {
-		kill = boolToInt(*p.KillSwitch)
-	}
 	if p.ScopeFilter == nil && existingScopeRaw.Valid {
 		scopeJSON = existingScopeRaw.String
 	}
-	_ = existing
 	// Promotion criteria stays default for now (Stage 0 doesn't expose them via
 	// the API; Stage 1 will surface them when capability metrics ship).
 	promJSON, _ := json.Marshal(cap.DefaultPromotion)
 
+	// We still persist the row so non-kill fields survive. The kill_switch
+	// column is written to a fixed 0 — only the kill_switches table is
+	// authoritative — but the column has a NOT NULL constraint via the
+	// migration default, so we leave it untouched on update.
 	_, err = db.DB.Exec(`
 		INSERT INTO ai_capability_tenant_config (
 			id, tenant_id, capability_id, enabled, rung, scope_filter,
 			confidence_threshold, blast_radius_max_devices, blast_radius_window_minutes,
 			promotion_criteria, kill_switch, last_promoted_at, last_demoted_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
 		ON CONFLICT (tenant_id, capability_id) DO UPDATE
 		   SET enabled=EXCLUDED.enabled, rung=EXCLUDED.rung,
 		       scope_filter=EXCLUDED.scope_filter,
 		       confidence_threshold=EXCLUDED.confidence_threshold,
 		       blast_radius_max_devices=EXCLUDED.blast_radius_max_devices,
 		       blast_radius_window_minutes=EXCLUDED.blast_radius_window_minutes,
-		       kill_switch=EXCLUDED.kill_switch,
 		       updated_at=EXCLUDED.updated_at`,
 		id, tid, name, enabled, rung, nullableStr(scopeJSON),
-		conf, blastMax, blastWin, string(promJSON), kill, nil, nil, now,
+		conf, blastMax, blastWin, string(promJSON), nil, nil, now,
 	)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "upsert failed"})
 	}
 
-	// Mirror the per-capability kill switch into the kill-switch cache so the
-	// chokepoint sees changes without a poll wait.
+	// Per-capability kill state goes ONLY to ai_kill_switches. SetKill writes
+	// the DB row and updates the in-memory cache; the chokepoint reads from
+	// the cache via IsKilled. No drift possible.
 	if p.KillSwitch != nil {
 		uid, _ := c.Locals("user_id").(string)
 		_ = ai.SetKill("tenant:"+tid+":capability:"+name, *p.KillSwitch, "set via dashboard", uid)
@@ -757,6 +822,28 @@ func aiListRuns(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"runs": out, "limit": limit, "offset": offset})
 }
 
+// aiVerifyRun re-computes the signed_hash for a single ai_runs row and
+// reports whether it matches the stored signature. The chokepoint writes
+// signatures over the row's authoritative fields; an after-the-fact mutation
+// (operator with DB access tampering with cost or device_id) is detected by
+// re-running the same HMAC and comparing. This is the SOC2 verification
+// path — auditors hit this for spot checks.
+func aiVerifyRun(c *fiber.Ctx) error {
+	tid := targetTenant(c)
+	id := c.Params("id")
+	row, err := ai.LoadRunForVerification(id, tid)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+	}
+	expected := ai.RecomputeSignature(row)
+	return c.JSON(fiber.Map{
+		"run_id":    id,
+		"stored":    row.Signed,
+		"recomputed": expected,
+		"valid":     expected == row.Signed,
+	})
+}
+
 // ── Kill switches ─────────────────────────────────────────────────────────
 
 func aiListKill(c *fiber.Ctx) error {
@@ -779,7 +866,7 @@ func aiListKill(c *fiber.Ctx) error {
 		}
 		// Tenant_admin only sees their own scope + global. Super_admin sees everything.
 		if !auth.IsSuperAdmin(role) {
-			if scope != "global" && !startsWith(scope, "tenant:"+tid) {
+			if scope != "global" && !strings.HasPrefix(scope, "tenant:"+tid) {
 				continue
 			}
 		}
@@ -804,6 +891,9 @@ func aiSetKill(c *fiber.Ctx) error {
 	if err := c.BodyParser(&p); err != nil || p.Scope == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "scope required"})
 	}
+	if err := validateKillScope(p.Scope); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 	// Authorisation:
 	// - global / capability:* — super_admin only
 	// - tenant:<own>:* — tenant_admin or super_admin
@@ -813,12 +903,12 @@ func aiSetKill(c *fiber.Ctx) error {
 		if !auth.IsSuperAdmin(role) {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "global kill switch is super_admin only"})
 		}
-	case startsWith(p.Scope, "capability:"):
+	case strings.HasPrefix(p.Scope, "capability:"):
 		if !auth.IsSuperAdmin(role) {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "global capability kill switch is super_admin only"})
 		}
-	case startsWith(p.Scope, "tenant:"):
-		if !auth.IsSuperAdmin(role) && !startsWith(p.Scope, "tenant:"+tid) {
+	case strings.HasPrefix(p.Scope, "tenant:"):
+		if !auth.IsSuperAdmin(role) && !strings.HasPrefix(p.Scope, "tenant:"+tid+":") && p.Scope != "tenant:"+tid {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "cannot flip kill switch for another tenant"})
 		}
 	default:
@@ -879,6 +969,38 @@ func providerOwned(id, tenantID string) bool {
 	return n > 0
 }
 
-func startsWith(s, prefix string) bool {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
+// validateKillScope enforces the documented scope grammar:
+//
+//	global
+//	tenant:<id>
+//	capability:<name>
+//	tenant:<id>:capability:<name>
+//
+// IDs and names must be non-empty and must not contain ':' (otherwise we
+// can't unambiguously parse the scope) or characters that could let an
+// attacker craft a confusing scope label like "tenant: :capability:foo".
+func validateKillScope(s string) error {
+	if s == "global" {
+		return nil
+	}
+	bad := func() error { return fmt.Errorf("scope %q is not well-formed", s) }
+	parts := strings.Split(s, ":")
+	switch len(parts) {
+	case 2:
+		if (parts[0] != "tenant" && parts[0] != "capability") || parts[1] == "" {
+			return bad()
+		}
+	case 4:
+		if parts[0] != "tenant" || parts[1] == "" || parts[2] != "capability" || parts[3] == "" {
+			return bad()
+		}
+	default:
+		return bad()
+	}
+	for _, p := range parts {
+		if strings.ContainsAny(p, " \t\r\n/") {
+			return bad()
+		}
+	}
+	return nil
 }

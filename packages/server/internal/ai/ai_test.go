@@ -144,6 +144,81 @@ func TestCapabilityRegistration(t *testing.T) {
 	}
 }
 
+func TestSanitizeModelVersion(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"gpt-4o-2024-11-20", "gpt-4o-2024-11-20"},
+		{"claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20241022"},
+		{"models/gemini-1.5-pro", "models/gemini-1.5-pro"},
+		{"valid:v1+rc.2", "valid:v1+rc.2"},
+		{"<script>alert(1)</script>", "scriptalert1/script"}, // angles+parens stripped, slash kept (legitimate in 'models/foo')
+		{"gpt 4o", "gpt4o"},                                  // space stripped
+		{"", "[unparseable]"},
+		{"!!!", "[unparseable]"},
+	}
+	for _, c := range cases {
+		got := sanitizeModelVersion(c.in)
+		if got != c.want {
+			t.Errorf("sanitizeModelVersion(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestProviderSupports(t *testing.T) {
+	have := Capabilities{Streaming: true, ToolCalling: true, Embeddings: true, JSONMode: true, MaxContext: 128_000}
+	cases := []struct {
+		name string
+		need Capabilities
+		ok   bool
+	}{
+		{"all match", Capabilities{ToolCalling: true, MaxContext: 8000}, true},
+		{"need streaming, have it", Capabilities{Streaming: true}, true},
+		{"need tools, lack tools", Capabilities{ToolCalling: true}, true},
+		{"need embeddings, have", Capabilities{Embeddings: true}, true},
+		{"need huge context, have less", Capabilities{MaxContext: 200_000}, false},
+		{"need JSON mode, have", Capabilities{JSONMode: true}, true},
+	}
+	for _, c := range cases {
+		if got := providerSupports(have, c.need); got != c.ok {
+			t.Errorf("%s: providerSupports = %v want %v", c.name, got, c.ok)
+		}
+	}
+
+	// And the inverse: a constrained provider can't satisfy a feature-rich need.
+	thin := Capabilities{Streaming: true, MaxContext: 4000}
+	if providerSupports(thin, Capabilities{ToolCalling: true}) {
+		t.Error("thin provider must NOT satisfy ToolCalling requirement")
+	}
+	if providerSupports(thin, Capabilities{MaxContext: 8000}) {
+		t.Error("4k-context provider must NOT satisfy 8k requirement")
+	}
+}
+
+func TestRecomputeSignatureRoundTrip(t *testing.T) {
+	// Same fields → same hash, mutation → different hash. Verifies the audit
+	// signing scheme detects the after-the-fact-mutation case the SOC2
+	// verify endpoint exists for.
+	r := RunForVerification{
+		RunID: "abc", TenantID: "t1", CapabilityID: "alert_dedup",
+		RunType: "chat", ProviderID: "p1", ModelName: "gpt-4o",
+		Rung: "shadow", Cost: 1500, SnapHash: "deadbeef", CreatedAt: 1730000000,
+	}
+	h1 := RecomputeSignature(r)
+	h2 := RecomputeSignature(r)
+	if h1 != h2 {
+		t.Fatal("RecomputeSignature must be deterministic")
+	}
+	r2 := r
+	r2.Cost = 9999
+	if RecomputeSignature(r2) == h1 {
+		t.Fatal("mutating Cost must change the signature")
+	}
+	r3 := r
+	r3.ProviderID = "p2"
+	if RecomputeSignature(r3) == h1 {
+		t.Fatal("mutating ProviderID must change the signature")
+	}
+}
+
 // Concurrent-safety smoke test: the registries should tolerate being read
 // from many goroutines while a sibling registers a new capability.
 func TestRegistryConcurrentReads(t *testing.T) {

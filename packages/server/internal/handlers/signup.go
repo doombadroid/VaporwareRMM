@@ -70,7 +70,11 @@ func RegisterSignupRoutes(publicAPI fiber.Router) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Reserved slug"})
 		}
 
-		// Reject if slug already used
+		// Pre-flight slug check for a fast 409 on the common case. The
+		// authoritative gate is the UNIQUE index on tenants(slug) — two
+		// concurrent signups with the same slug both pass this SELECT,
+		// so we still need to translate the unique-violation INSERT
+		// failure below into a 409 instead of a 500.
 		var existing int
 		_ = db.DB.QueryRow(`SELECT COUNT(*) FROM tenants WHERE slug = ?`, req.TenantSlug).Scan(&existing)
 		if existing > 0 {
@@ -83,6 +87,10 @@ func RegisterSignupRoutes(publicAPI fiber.Router) {
 			`INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) VALUES (?, ?, ?, 'free', 'active', ?, ?)`,
 			tenantID, req.TenantName, req.TenantSlug, now, now,
 		); err != nil {
+			es := strings.ToLower(err.Error())
+			if strings.Contains(es, "unique") || strings.Contains(es, "duplicate") {
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Tenant slug already taken"})
+			}
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create tenant", "message": err.Error()})
 		}
 

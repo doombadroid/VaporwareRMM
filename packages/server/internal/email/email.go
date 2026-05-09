@@ -6,7 +6,6 @@ package email
 import (
 	"crypto/tls"
 	"fmt"
-	"log/slog"
 	"net/smtp"
 	"os"
 	"strings"
@@ -60,8 +59,13 @@ func loadSMTPRow(tenantID string) (smtpConfig, error) {
 	}
 	pw, derr := crypto.Decrypt(encPassword)
 	if derr != nil {
-		slog.Warn("smtp password decrypt failed", "tenant_id", tenantID, "error", derr)
-		pw = encPassword
+		// Fail closed. The previous behaviour returned the still-ciphertext
+		// password to the SMTP Auth() call, which then failed with an
+		// auth error that operators interpreted as "wrong password",
+		// hiding the real cause (encryption key rotated, secrets DB
+		// corrupted). Return the underlying error so the alert surface
+		// can show 'smtp password decrypt failed' instead.
+		return smtpConfig{}, fmt.Errorf("smtp password decrypt failed: %w", derr)
 	}
 	return smtpConfig{Host: host, Port: port, User: user, Password: pw, From: from}, nil
 }

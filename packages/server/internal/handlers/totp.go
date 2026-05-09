@@ -21,16 +21,18 @@ import (
 )
 
 // generateBackupCodes creates 8 single-use recovery codes (format XXXXXXXX-XXXXXXXX).
-func generateBackupCodes() []string {
+// Returns an error on crypto/rand failure so the HTTP handler can produce a
+// clean 500 instead of a panic that the recover middleware catches mid-write.
+func generateBackupCodes() ([]string, error) {
 	codes := make([]string, 8)
 	for i := range codes {
 		b := make([]byte, 8)
 		if _, err := rand.Read(b); err != nil {
-			panic(err) // crypto/rand failure is fatal
+			return nil, fmt.Errorf("backup-code rand: %w", err)
 		}
 		codes[i] = fmt.Sprintf("%X-%X", b[:4], b[4:])
 	}
-	return codes
+	return codes, nil
 }
 
 func RegisterTOTPRoutes(publicAPI, api fiber.Router, cfg Config) {
@@ -97,7 +99,10 @@ func RegisterTOTPRoutes(publicAPI, api fiber.Router, cfg Config) {
 		if _, err := db.DB.Exec(`DELETE FROM user_totp_backup_codes WHERE user_id = ?`, userID); err != nil {
 			slog.Warn("failed to clear old backup codes", "error", err)
 		}
-		plainCodes := generateBackupCodes()
+		plainCodes, codeErr := generateBackupCodes()
+		if codeErr != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to generate backup codes"})
+		}
 		for _, code := range plainCodes {
 			codeHash := fmt.Sprintf("%x", sha256.Sum256([]byte(code)))
 			if _, err := db.DB.Exec(

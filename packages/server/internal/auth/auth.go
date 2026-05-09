@@ -44,6 +44,28 @@ var (
 	rateLimitMu    sync.RWMutex
 )
 
+func init() {
+	// Background pruner for the in-memory rate-limit map. Without this the
+	// map grows unbounded as unique IPs hit the server (months of uptime
+	// + many crawlers = a slow leak that operators would only notice on
+	// OOM). The 10-minute interval is well above any rate-limit window,
+	// so a legitimate caller's entry is never pruned mid-window.
+	go func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			now := time.Now()
+			rateLimitMu.Lock()
+			for k, v := range rateLimitStore {
+				if now.After(v.resetAt) {
+					delete(rateLimitStore, k)
+				}
+			}
+			rateLimitMu.Unlock()
+		}
+	}()
+}
+
 // GenerateJWT creates a JWT token signed with HMAC-SHA256 using golang-jwt/jwt/v5.
 func GenerateJWT(userID, tenantID, role string, expiryHours int) (string, error) {
 	now := time.Now()

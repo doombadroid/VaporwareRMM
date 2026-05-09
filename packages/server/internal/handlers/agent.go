@@ -355,6 +355,15 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 				status = "failed"
 				output = result.Error
 			}
+			// Cap per-result output. Without this a compromised agent can
+			// fire a 1000-row batch with 10MB outputs each (~10GB) every
+			// time it polls; the rows then echo into command-history GETs
+			// and tenant exports. The agent already truncates at 64KiB
+			// (truncateOutput), so anything larger here is anomalous.
+			const maxOutputBytes = 256 * 1024
+			if len(output) > maxOutputBytes {
+				output = output[:maxOutputBytes] + "...[truncated by server]"
+			}
 			if _, err := db.DB.Exec(
 				`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ? AND device_id = ?`,
 				status, output, time.Now().Unix(), result.CommandID, deviceID,

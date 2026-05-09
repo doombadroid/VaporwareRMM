@@ -183,7 +183,17 @@ jobs:
           cd ../agent && go mod download
           cd ../cli && go mod download
 
+      # Generate a real per-run encryption key so the server-side crypto
+      # init doesn't os.Exit(1). DEV_ALLOW_UNENCRYPTED_SECRETS=1 would also
+      # work, but a real key exercises the encrypt/decrypt path in tests.
+      - name: Generate ephemeral SECRETS_ENCRYPTION_KEY
+        id: secret_key
+        run: echo "key=$(openssl rand -base64 32)" >> "$GITHUB_OUTPUT"
+
       - name: Run server tests with coverage
+        env:
+          SECRETS_ENCRYPTION_KEY: ${{ steps.secret_key.outputs.key }}
+          JWT_SECRET: ${{ steps.secret_key.outputs.key }}
         run: |
           cd packages/server
           go test -v -race -coverprofile=coverage.out ./...

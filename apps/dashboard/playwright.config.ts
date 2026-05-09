@@ -37,11 +37,15 @@ export default defineConfig({
       cwd: path.join(repoRoot, 'packages/server'),
       url: 'http://localhost:8080/health',
       reuseExistingServer: !process.env.CI,
-      timeout: 60_000,
+      // Cold 'go run .' on CI takes ~55s to compile + 33 SQLite migrations
+      // before /health responds. 60s left only ~5s for the healthcheck and
+      // would race; 180s gives plenty of headroom for slower runners.
+      timeout: 180_000,
       env: {
         SERVER_PORT: '8080',
         DATABASE_PATH: '/tmp/vaporrmm-e2e.db',
-        JWT_SECRET: 'e2e-secret-key-that-is-long-enough-for-tests',
+        // 48-char value safely above the new 32-char min-length gate.
+        JWT_SECRET: 'e2e-secret-key-that-is-long-enough-for-tests-ok',
         ADMIN_PASSWORD: 'TestAdmin123!',
         CORS_ORIGINS: 'http://localhost:3000',
         SECRETS_ENCRYPTION_KEY: 'fmZn0pFd/f58gKeknlaECEbcMDh5oQ+nRhFB/sAMScY=',

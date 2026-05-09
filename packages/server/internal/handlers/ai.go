@@ -90,6 +90,10 @@ func RegisterAIRoutes(api fiber.Router) {
 	// ── Audit log ─────────────────────────────────────────────────────
 	g.Get("/runs", aiListRuns)
 	g.Get("/runs/:id/verify", aiVerifyRun)
+	g.Post("/runs/:id/label", aiLabelRun)
+
+	// ── Metrics (rolled up from ai_runs lazily on GET) ────────────────
+	g.Get("/metrics", aiCapabilityMetrics)
 
 	// ── Kill switches ─────────────────────────────────────────────────
 	g.Get("/kill", aiListKill)
@@ -842,6 +846,133 @@ func aiVerifyRun(c *fiber.Ctx) error {
 		"recomputed": expected,
 		"valid":     expected == row.Signed,
 	})
+}
+
+// aiLabelRun records a tech's verdict on an AI run. Outcome is one of
+// "correct" | "incorrect" | "unclear". The label is what the metrics
+// rollup uses to compute precision and labelling-rate; promotion past
+// shadow refuses to consider a capability unless its labelling rate is
+// above the configured threshold (defaults to 20%).
+//
+// Labels are write-once-per-run for non-super-admins: a tech can label,
+// then super_admin can override (e.g., during incident review). We don't
+// allow a tech to flip-flop their own label.
+func aiLabelRun(c *fiber.Ctx) error {
+	tid := targetTenant(c)
+	id := c.Params("id")
+	role, _ := c.Locals("user_role").(string)
+	uid, _ := c.Locals("user_id").(string)
+
+	var p struct {
+		Outcome string `json:"outcome"`
+		Reason  string `json:"reason"`
+	}
+	if err := c.BodyParser(&p); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
+	}
+	switch p.Outcome {
+	case "correct", "incorrect", "unclear":
+	default:
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "outcome must be correct | incorrect | unclear"})
+	}
+
+	// Read current label + ownership of the existing label (so non-super_admin
+	// can't overwrite a label they didn't set themselves — prevents two
+	// techs racing to claim opposite verdicts).
+	var existingOutcome, existingSetBy string
+	err := db.DB.QueryRow(`SELECT COALESCE(outcome,''), COALESCE(outcome_set_by,'') FROM ai_runs WHERE id = ? AND tenant_id = ?`,
+		id, tid).Scan(&existingOutcome, &existingSetBy)
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "run not found"})
+	}
+	if existingOutcome != "" && !auth.IsSuperAdmin(role) && existingSetBy != uid {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "run already labelled by another user; only super_admin may override"})
+	}
+
+	now := time.Now().Unix()
+	if _, err := db.DB.Exec(
+		`UPDATE ai_runs SET outcome = ?, outcome_set_by = ?, outcome_set_at = ? WHERE id = ? AND tenant_id = ?`,
+		p.Outcome, uid, now, id, tid,
+	); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "label failed"})
+	}
+	events.AuditLogTenant(tid, uid, "ai.run.label", "ai_run", id,
+		fmt.Sprintf("outcome=%s reason=%q", p.Outcome, p.Reason), c.IP())
+	return c.JSON(fiber.Map{"message": "labelled"})
+}
+
+// aiCapabilityMetrics computes per-capability aggregates over the last N days
+// from ai_runs. We compute lazily (no cron) so the values are always live.
+// The dashboard uses this to render the per-capability metrics row + the
+// "ready to promote?" indicator.
+//
+// Returned per capability:
+//   - calls in window
+//   - labelled fraction (key gate for promotion eligibility)
+//   - precision = labelled_correct / labelled_total
+//   - recall is omitted at v1 (no negative-class signal collected)
+func aiCapabilityMetrics(c *fiber.Ctx) error {
+	tid := targetTenant(c)
+	days, _ := strconv.Atoi(c.Query("days", "14"))
+	if days <= 0 || days > 90 {
+		days = 14
+	}
+	since := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
+
+	// Errored runs are excluded from the metrics denominator: a provider
+	// outage that fails 1000 calls would otherwise tank the labelling rate
+	// and block promotion even when the underlying capability is fine.
+	// LIMIT 200 caps the response size for tenants with many capabilities.
+	rows, err := db.DB.Query(`
+		SELECT capability_id,
+		       COUNT(*) as calls,
+		       SUM(CASE WHEN outcome = 'correct' THEN 1 ELSE 0 END) as labelled_correct,
+		       SUM(CASE WHEN outcome = 'incorrect' THEN 1 ELSE 0 END) as labelled_incorrect,
+		       SUM(CASE WHEN outcome = 'unclear' THEN 1 ELSE 0 END) as labelled_unclear,
+		       SUM(cost_usd_micros) as cost_micros
+		  FROM ai_runs
+		 WHERE tenant_id = ? AND created_at >= ?
+		   AND capability_id IS NOT NULL AND capability_id <> ''
+		   AND (output_text IS NULL OR output_text NOT LIKE '[error]%')
+		 GROUP BY capability_id
+		 ORDER BY calls DESC
+		 LIMIT 200`, tid, since)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "metrics query failed"})
+	}
+	defer rows.Close()
+	out := []fiber.Map{}
+	for rows.Next() {
+		var (
+			capID                                                     string
+			calls, lc, li, lu                                         int
+			cost                                                      int64
+		)
+		if err := rows.Scan(&capID, &calls, &lc, &li, &lu, &cost); err != nil {
+			continue
+		}
+		labelled := lc + li + lu
+		labelRate := 0.0
+		precision := 0.0
+		if calls > 0 {
+			labelRate = float64(labelled) / float64(calls)
+		}
+		if labelled > 0 {
+			precision = float64(lc) / float64(labelled)
+		}
+		out = append(out, fiber.Map{
+			"capability_id":     capID,
+			"window_days":       days,
+			"calls":             calls,
+			"labelled_correct":  lc,
+			"labelled_incorrect": li,
+			"labelled_unclear":  lu,
+			"labelling_rate":    labelRate,
+			"precision":         precision,
+			"cost_usd_micros":   cost,
+		})
+	}
+	return c.JSON(fiber.Map{"metrics": out, "since": since})
 }
 
 // ── Kill switches ─────────────────────────────────────────────────────────

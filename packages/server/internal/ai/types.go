@@ -134,6 +134,12 @@ type ChatResponse struct {
 	PromptTokens int
 	OutputTokens int
 	ModelVersion string // e.g. "gpt-4o-2024-11-20" — pinned where the provider exposes it
+	// Synthetic marks responses produced by capability fast-paths (e.g. an
+	// exact-match cluster lookup that doesn't actually call the provider).
+	// The chokepoint replaces model_name with "local:<source>" on the audit
+	// row when this is set so reviewers can tell a real call from a cache hit.
+	Synthetic       bool
+	SyntheticSource string
 }
 
 // ToolDef is what the model is told it may call.

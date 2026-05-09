@@ -104,11 +104,15 @@ type Output struct {
 	EmbedResp  *EmbedResponse
 }
 
-// Func is the inner closure that performs the provider call. It receives the
-// resolved Provider; the caller composes prompts, parses responses, and may
-// emit tool calls — all inside this closure. Returning ChatResp / EmbedResp
-// (whichever applies) lets Run record token counts in the audit row.
-type Func func(ctx context.Context, p Provider) (*ChatResponse, *EmbedResponse, []byte, error)
+// Func is the inner closure that performs the provider call. It receives:
+//   - the resolved Provider
+//   - the model name the operator pinned in the routing rule for this
+//     capability's preferred task type
+// The closure must use the supplied modelName when building the request;
+// otherwise the operator's routing config is silently ignored. Returning
+// ChatResp / EmbedResp (whichever applies) lets Run record token counts
+// in the audit row.
+type Func func(ctx context.Context, p Provider, modelName string) (*ChatResponse, *EmbedResponse, []byte, error)
 
 // runtimeConfig is what we resolve up front so nothing changes mid-run.
 type runtimeConfig struct {
@@ -149,7 +153,13 @@ func Run(ctx context.Context, in Input, fn Func) (Output, error) {
 	if cfg.tenantStatus != "active" {
 		return Output{}, fmt.Errorf("%w: status=%s", ErrTenantSuspended, cfg.tenantStatus)
 	}
-	if !cfg.enabled {
+	// System capabilities (Stage 0 marker — rag.index, rag.query, etc.)
+	// bypass the per-tenant enabled flag. Operators don't see them in the
+	// dashboard and shouldn't have to opt into them per tenant — they're
+	// infrastructure that user-facing capabilities depend on.
+	if cap, ok := Lookup(in.CapabilityID); ok && cap.Stage == 0 {
+		// implicit enabled
+	} else if !cfg.enabled {
 		return Output{}, ErrCapabilityDisabled
 	}
 
@@ -202,8 +212,11 @@ func Run(ctx context.Context, in Input, fn Func) (Output, error) {
 
 	// 7. Execute. We pass a child context so cancellation propagates to the
 	// provider HTTP client — closing the dashboard tab kills upstream tokens.
+	// Wrap fn() in a panic recovery so a runtime panic in user-supplied
+	// closure code can't leak the cost reservation. Recovered panics turn
+	// into a regular call error and the audit + release paths run.
 	t0 := time.Now()
-	chatResp, embedResp, actionBytes, callErr := fn(ctx, prov)
+	chatResp, embedResp, actionBytes, callErr := callSafely(ctx, prov, cfg.modelName, fn)
 	latency := time.Since(t0)
 
 	// 8. Reconcile cost: figure actual using provider-reported tokens + the
@@ -310,7 +323,8 @@ func loadRuntime(ctx context.Context, in Input) (runtimeConfig, error) {
 		&providerID, &modelName, &maxCost, &inRate, &outRate,
 	)
 	if err != nil {
-		return rc, fmt.Errorf("%w: task=%s: %v", ErrNoProvider, taskType, err)
+		return rc, fmt.Errorf("%w: no routing rule for task_type=%s in tenant %s. Configure one under Settings → AI → Routing rules. Underlying error: %v",
+			ErrNoProvider, taskType, in.TenantID, err)
 	}
 	rc.modelName = modelName
 	if maxCost.Valid {
@@ -357,6 +371,18 @@ func loadProvider(id string) (ProviderConfig, error) {
 		pc.APIKey = dec
 	}
 	return pc, nil
+}
+
+// callSafely runs fn under a panic recovery so a closure crash doesn't
+// leak the cost reservation. The chokepoint must always reach the audit +
+// release path, so we convert any panic to a normal error.
+func callSafely(ctx context.Context, p Provider, modelName string, fn Func) (chat *ChatResponse, embed *EmbedResponse, action []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("ai: provider closure panicked: %v", r)
+		}
+	}()
+	return fn(ctx, p, modelName)
 }
 
 // providerSupports verifies the provider can fulfil every feature the
@@ -412,11 +438,22 @@ func persistRun(ctx context.Context, runID string, in Input, cfg runtimeConfig, 
 		outputTok    int
 		outputText   string
 	)
+	modelName := cfg.modelName
 	if chat != nil {
 		modelVersion = sanitizeModelVersion(chat.ModelVersion)
 		promptTok = chat.PromptTokens
 		outputTok = chat.OutputTokens
 		outputText = truncateForAudit(chat.Content)
+		if chat.Synthetic {
+			// Replace the audit row's model_name so a reviewer can tell at
+			// a glance that this row is a synthetic capability decision
+			// (no provider was actually called), not a real LLM completion.
+			source := chat.SyntheticSource
+			if source == "" {
+				source = "synthetic"
+			}
+			modelName = "local:" + source
+		}
 	}
 	if embed != nil {
 		modelVersion = sanitizeModelVersion(embed.ModelVersion)
@@ -433,7 +470,7 @@ func persistRun(ctx context.Context, runID string, in Input, cfg runtimeConfig, 
 	row := []any{
 		runID, in.TenantID, nullable(in.CustomerID), nullable(in.DeviceID), nullable(in.TicketID),
 		nullable(in.CapabilityID), string(in.RunType), chainID, nil, // parent_run_id
-		cfg.providerCfg.ID, cfg.modelName, modelVersion, string(cfg.providerCfg.TrustLevel),
+		cfg.providerCfg.ID, modelName, modelVersion, string(cfg.providerCfg.TrustLevel),
 		"" /* prompt_hash filled by caller via PromptBuilder later */, promptTok, outputTok,
 		costMicros, latency.Milliseconds(), nil /* retrieved_context_refs */, outputText,
 		nullableBytes(action), snap.Hash, string(cfg.rung), cfg.tenantStatus,

@@ -23,6 +23,9 @@ type migration struct {
 	Version string
 	Name    string
 	SQL     string
+	// PostgresOnly skips this migration on SQLite. Used for things that
+	// only make sense on Postgres — pgvector, vector indexes, etc.
+	PostgresOnly bool
 }
 
 // q rewrites ? placeholders to $1,$2,... for PostgreSQL; no-op for SQLite.
@@ -520,6 +523,64 @@ func RunMigrations(dialect string) error {
 				set_at INTEGER NOT NULL
 			);`,
 		},
+		{
+			Version: "029",
+			Name:    "extend_tickets_for_ai",
+			SQL: `ALTER TABLE tickets ADD COLUMN tenant_id TEXT DEFAULT 'default';
+			ALTER TABLE tickets ADD COLUMN customer_id TEXT;
+			ALTER TABLE tickets ADD COLUMN ai_triage TEXT;
+			ALTER TABLE tickets ADD COLUMN cluster_id TEXT;
+			ALTER TABLE tickets ADD COLUMN related_alert_ids TEXT;
+			ALTER TABLE tickets ADD COLUMN root_cause TEXT;
+			ALTER TABLE tickets ADD COLUMN resolution_summary TEXT;
+			-- Belt-and-suspenders backfill: ALTER ADD COLUMN with DEFAULT
+			-- backfills existing rows on Postgres 11+ and SQLite 3.25+, but
+			-- older SQLite leaves them NULL. The explicit UPDATE guarantees
+			-- every existing ticket lives in the default tenant after the
+			-- migration regardless of dialect version.
+			UPDATE tickets SET tenant_id = 'default' WHERE tenant_id IS NULL;
+			CREATE INDEX IF NOT EXISTS idx_tickets_tenant_status ON tickets(tenant_id, status);
+			CREATE TABLE IF NOT EXISTS ticket_clusters (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				customer_id TEXT,
+				signature_hash TEXT NOT NULL,
+				name TEXT,
+				likely_cause TEXT,
+				first_seen INTEGER NOT NULL,
+				last_seen INTEGER NOT NULL,
+				count INTEGER NOT NULL DEFAULT 0,
+				status TEXT NOT NULL DEFAULT 'active',
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_ticket_clusters_tenant_active ON ticket_clusters(tenant_id, status, last_seen);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_ticket_clusters_sig ON ticket_clusters(tenant_id, signature_hash);`,
+		},
+		{
+			Version:      "030",
+			Name:         "enable_pgvector_and_embeddings",
+			PostgresOnly: true,
+			SQL: `CREATE EXTENSION IF NOT EXISTS vector;
+			CREATE TABLE IF NOT EXISTS ai_embeddings (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				customer_id TEXT,
+				source_kind TEXT NOT NULL,
+				source_id TEXT NOT NULL,
+				text_hash TEXT NOT NULL,
+				model_name TEXT NOT NULL,
+				dim INTEGER NOT NULL,
+				embedding vector(1536),
+				created_at BIGINT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_ai_embeddings_tenant ON ai_embeddings(tenant_id, source_kind);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_embeddings_dedup ON ai_embeddings(tenant_id, source_kind, source_id, model_name);`,
+		},
+		{
+			Version: "031",
+			Name:    "add_devices_os_class",
+			SQL:     `ALTER TABLE devices ADD COLUMN os_class TEXT;`,
+		},
 	}
 
 	for _, m := range migrations {
@@ -528,6 +589,14 @@ func RunMigrations(dialect string) error {
 			slog.Warn("db query row scan failed", "error", err)
 		}
 		if exists > 0 {
+			continue
+		}
+		// Skip Postgres-only migrations on SQLite. We still record them so a
+		// later switch to Postgres knows to run the gap (we deliberately do
+		// NOT mark them applied; the next runMigrations call on Postgres will
+		// pick them up).
+		if m.PostgresOnly && dialect != "postgres" {
+			slog.Info("migration skipped (postgres-only)", "version", m.Version, "name", m.Name)
 			continue
 		}
 
@@ -540,11 +609,23 @@ func RunMigrations(dialect string) error {
 
 		_, err := DB.Exec(m.SQL)
 		if err != nil {
-			// Ignore "duplicate column" errors (SQLite: 1, PostgreSQL: 42701)
+			// Tolerate idempotent re-runs (duplicate column, already exists)
+			// and the special case of CREATE EXTENSION on Postgres without
+			// superuser — operators with managed Postgres (RDS, Azure)
+			// should pre-install pgvector, and we shouldn't block server
+			// boot on the AI-only extension migration.
 			errStr := err.Error()
-			if !strings.Contains(errStr, "duplicate column name") &&
-				!strings.Contains(errStr, "already exists") &&
-				!strings.Contains(errStr, "42701") {
+			tolerated := strings.Contains(errStr, "duplicate column name") ||
+				strings.Contains(errStr, "already exists") ||
+				strings.Contains(errStr, "42701")
+			extPermDenied := strings.Contains(errStr, "permission denied") &&
+				strings.Contains(strings.ToLower(m.SQL), "create extension")
+			if extPermDenied {
+				slog.Warn("migration skipped — CREATE EXTENSION requires superuser; ask DBA to install manually",
+					"version", m.Version, "name", m.Name, "error", err)
+				continue
+			}
+			if !tolerated {
 				slog.Warn("migration failed", "version", m.Version, "error", err)
 				continue
 			}

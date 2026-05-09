@@ -96,6 +96,29 @@ Per-user TOTP enrollment with QR code + 8 single-use backup codes shown once.
 
 ![Settings · Security](docs/screenshots/04-settings-security.png)
 
+### AI agent — operator surface
+
+The full AI control plane on one page: kill switches, providers (OpenAI / Anthropic / Google / Ollama / any OpenAI-compatible), per-task routing rules, the capability ladder (shadow → suggest → act_low → act_policy → autonomous), and the write-once audit ledger of every model call. Postgres + pgvector required; the tab is hidden on SQLite deployments.
+
+![AI agent](docs/screenshots/05-ai-admin.png)
+
+### AI assistance — natural-language fleet search + script generator
+
+Stage 2 capabilities surface here. NL search runs a tool-calling loop against `list_devices` / `list_tickets` / `list_active_clusters` and returns a tabular answer plus a per-step tool log. The script generator emits bash or PowerShell behind a danger-pattern validator; output is shown to the tech for review and never auto-executed.
+
+![AI assistance](docs/screenshots/06-ai-assistance.png)
+
+### AI capability ladder + guardrails
+
+| Tier | Stage | Default rung | Notes |
+|------|-------|--------------|-------|
+| Observation | 1 | shadow | alert dedup + correlation; ticket clustering; predictive failure |
+| Assistance | 2 | suggest | NL fleet search; script gen; ticket triage on intake |
+| Action | 3 | shadow | playbook framework + auto-remediation w/ rollback orchestrator |
+| Autonomous | 4 | act_low* | persistent probe queue; auto-routing; precision-floor demote |
+
+`*` Autonomous-rung capabilities auto-demote to `act_policy` when 14-day precision drops below threshold (configurable; min-samples gated). Promotion past `suggest` is super-admin only. Multi-level kill switches (global / per-tenant / per-capability) cached in memory + invalidated via Redis pub/sub. Per-(tenant, capability) blast-radius cap with sliding window. Provider keys encrypted at rest via AES-256-GCM; audit rows carry write-once HMAC signatures.
+
 ---
 
 ## Quick start (Docker, Linux)

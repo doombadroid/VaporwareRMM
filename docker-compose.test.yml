@@ -12,7 +12,10 @@ version: '3.8'
 
 services:
   postgres-test:
-    image: postgres:16-alpine
+    # pgvector image (Postgres 16 + pgvector extension preinstalled).
+    # Stage 1 AI migrations CREATE EXTENSION vector — stock postgres:16-alpine
+    # would fail with "extension is not available".
+    image: pgvector/pgvector:pg16
     container_name: vaporrmm-postgres-test
     environment:
       POSTGRES_DB: vaporrmm_test

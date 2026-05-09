@@ -91,3 +91,4 @@ temp/
 
 # Generated files
 generated/
+*.tsbuildinfo

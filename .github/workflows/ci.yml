@@ -23,6 +23,12 @@ env:
   # as a temporary fallback.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
+# Default least-privilege token. Jobs that need more (docker push,
+# release upload) override per-job below. Closes the
+# actions/missing-workflow-permissions code-scanning alerts.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint & Type Check

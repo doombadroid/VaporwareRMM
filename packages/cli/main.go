@@ -619,6 +619,10 @@ func runUpdateSunshine() {
 			}
 			fmt.Printf("[OK] Sunshine configuration updated at %s (permissions: 0600)\n", configPath)
 		} else {
+			// Fallback: no writable config dir. Print to stdout so the
+			// operator can copy/paste. CodeQL go/clear-text-logging is a
+			// true positive on dataflow but stdout-to-operator is the
+			// only way to surface bootstrap secrets in a CLI tool.
 			fmt.Println("[OK] Sunshine Configuration (save with permissions 0600):")
 			fmt.Println(configContent)
 			fmt.Printf("\n[!] Note: Save to one of these paths:\n")
@@ -630,6 +634,7 @@ func runUpdateSunshine() {
 		fmt.Println(configContent)
 	}
 
+	// First-run credential display (see clear-text-logging note above).
 	fmt.Printf("\n[!] IMPORTANT: Save these credentials - they cannot be retrieved later:\n")
 	fmt.Printf("    Username: %s\n", username)
 	fmt.Printf("    Password: %s\n", password)
@@ -758,6 +763,8 @@ func updateSunshineWithPort(port int) {
 		fmt.Println("[!] Warning: No valid Sunshine config directory found, skipping config generation")
 	}
 
+	// First-run credential display (CodeQL clear-text-logging is design
+	// intent; stdout-to-operator is the bootstrap channel for a CLI tool).
 	fmt.Printf("[!] IMPORTANT: Save these credentials - they cannot be retrieved later:\n")
 	fmt.Printf("    Username: %s\n", username)
 	fmt.Printf("    Password: %s\n", password)

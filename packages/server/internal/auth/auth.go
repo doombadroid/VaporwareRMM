@@ -757,6 +757,11 @@ func CreateDefaultAdmin() {
 		}
 
 		if generated {
+			// First-run bootstrap. Operator MUST capture this password
+			// from stdout — it is hashed before storage and unrecoverable
+			// later. CodeQL go/clear-text-logging is a true positive on
+			// dataflow but writing to stdout for a one-shot human
+			// operator is the design intent, not log persistence.
 			fmt.Printf("\n==========================================================\n")
 			fmt.Printf("  ADMIN CREDENTIALS (first run only — save these now!)\n")
 			fmt.Printf("  Email:    admin@vaporrmm.local\n")

@@ -766,6 +766,13 @@ func (a *Agent) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
+	// Authenticated admin RCE channel. Trust boundary is authMiddleware
+	// (bearer token from server) + Tailscale firewall on port 47991 +
+	// isDangerous() blocklist above. Shell invocation is the API contract:
+	// the server side sends operator-authored commands (patch installs,
+	// service restarts) that require shell features (pipes, env, quoting).
+	// CodeQL go/command-injection is a true positive on dataflow but a
+	// false positive on intent — same risk profile as ssh.
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "cmd.exe", "/C", cmdReq.Command)

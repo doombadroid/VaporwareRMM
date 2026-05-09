@@ -336,10 +336,20 @@ func (a *Agent) Start() error {
 	mux.HandleFunc("/agent/file-transfer", a.authMiddleware(a.handleFileTransfer))
 	mux.HandleFunc("/agent/sunshine/pin", a.authMiddleware(a.handleGetSunshinePIN))
 
+	// Bind address: 0.0.0.0 by default so the central server can reach the agent
+	// over Tailscale or LAN. Every endpoint above is wrapped in authMiddleware
+	// (Bearer-token gate); the bind is NOT a security boundary, the token is.
+	// Operators who run agent + server on the same host can pin to 127.0.0.1
+	// via VAPOR_AGENT_BIND.
+	bindAddr := os.Getenv("VAPOR_AGENT_BIND")
+	if bindAddr == "" {
+		bindAddr = "0.0.0.0"
+	}
+
 	// Start HTTP server to receive commands from server
 	go func() {
 		server := &http.Server{
-			Addr:         fmt.Sprintf(":%d", a.port),
+			Addr:         fmt.Sprintf("%s:%d", bindAddr, a.port),
 			Handler:      mux,
 			ReadTimeout:  15 * time.Second,
 			WriteTimeout: 15 * time.Second,
@@ -398,16 +408,28 @@ func (a *Agent) autoStartServices() {
 	}
 }
 
+// tailscaleAuthKeyRe restricts auth keys to the well-known prefix + chars to
+// prevent shell-meaningful chars from being interpolated downstream and to
+// reject obvious garbage early.
+var tailscaleAuthKeyRe = regexp.MustCompile(`^[A-Za-z0-9_:.-]{16,256}$`)
+
 // connectTailscale attempts to connect Tailscale using the auth key from environment.
 func (a *Agent) connectTailscale() {
 	authKey := os.Getenv("TAILSCALE_AUTH_KEY")
 	if authKey == "" {
 		return
 	}
+	if !tailscaleAuthKeyRe.MatchString(authKey) {
+		slog.Warn("TAILSCALE_AUTH_KEY format invalid; refusing to invoke tailscale")
+		return
+	}
 	cmd := exec.Command("tailscale", "up", "--authkey", authKey, "--accept-routes")
 	output, err := cmd.CombinedOutput()
+	// Scrub the auth key out of any output before logging — Tailscale's CLI
+	// has historically echoed parts of the key in error messages.
+	scrubbed := strings.ReplaceAll(string(output), authKey, "<redacted>")
 	if err != nil {
-		slog.Warn("failed to auto-connect tailscale", "error", err, "output", string(output))
+		slog.Warn("failed to auto-connect tailscale", "error", err, "output", scrubbed)
 	} else {
 		slog.Info("Tailscale auto-connected successfully")
 	}
@@ -611,7 +633,7 @@ func (a *Agent) executeCommand(cmd CommandRequest) CommandResult {
 	}
 
 	output, err := execCmd.CombinedOutput()
-	result.Output = string(output)
+	result.Output = truncateOutput(output)
 	if ctx.Err() == context.DeadlineExceeded {
 		result.Success = false
 		result.Error = "command timed out after 60s"
@@ -624,6 +646,18 @@ func (a *Agent) executeCommand(cmd CommandRequest) CommandResult {
 
 	a.addCommandResult(result)
 	return result
+}
+
+// maxCommandOutputBytes caps the size of stdout+stderr returned to the server.
+// Without this a `cat /dev/zero` or `dd if=/dev/urandom` command would happily
+// stream gigabytes through the agent into the server's database.
+const maxCommandOutputBytes = 1 << 20 // 1 MiB
+
+func truncateOutput(b []byte) string {
+	if len(b) <= maxCommandOutputBytes {
+		return string(b)
+	}
+	return string(b[:maxCommandOutputBytes]) + "\n... (truncated, " + fmt.Sprintf("%d", len(b)-maxCommandOutputBytes) + " bytes elided)"
 }
 
 // submitResults posts command results back to the server.
@@ -740,7 +774,7 @@ func (a *Agent) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	outputBytes, err := cmd.CombinedOutput()
-	output := string(outputBytes)
+	output := truncateOutput(outputBytes)
 
 	var success bool
 	var runErr string

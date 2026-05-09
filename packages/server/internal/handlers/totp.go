@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
@@ -203,17 +202,21 @@ func RegisterTOTPRoutes(publicAPI, api fiber.Router, cfg Config) {
 		// Accept 6-digit TOTP code or XXXXXXXX-XXXXXXXX backup code
 		code := strings.ToUpper(strings.ReplaceAll(req.Code, " ", ""))
 		if len(strings.ReplaceAll(code, "-", "")) == 16 {
-			// Backup code path
+			// Backup code path. Use a single conditional UPDATE so two concurrent
+			// requests with the same code can never both succeed: only the first
+			// to flip used=0→1 will see RowsAffected==1.
 			codeHash := fmt.Sprintf("%x", sha256.Sum256([]byte(code)))
-			var codeID string
-			var used int
-			if err := db.DB.QueryRow(
-				`SELECT id, used FROM user_totp_backup_codes WHERE user_id = ? AND code_hash = ?`, userID, codeHash,
-			).Scan(&codeID, &used); err != nil || used == 1 {
-				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or already-used backup code"})
+			res, err := db.DB.Exec(
+				`UPDATE user_totp_backup_codes SET used = 1, used_at = ? WHERE user_id = ? AND code_hash = ? AND used = 0`,
+				time.Now().Unix(), userID, codeHash,
+			)
+			if err != nil {
+				slog.Warn("failed to consume backup code", "error", err)
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 			}
-			if _, err := db.DB.Exec(`UPDATE user_totp_backup_codes SET used = 1, used_at = ? WHERE id = ?`, time.Now().Unix(), codeID); err != nil {
-				slog.Warn("failed to mark backup code used", "error", err)
+			affected, _ := res.RowsAffected()
+			if affected != 1 {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or already-used backup code"})
 			}
 		} else if !totp.Validate(req.Code, secret) {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid TOTP code"})
@@ -241,7 +244,7 @@ func RegisterTOTPRoutes(publicAPI, api fiber.Router, cfg Config) {
 			slog.Warn("failed to cache session in redis", "error", err)
 		}
 
-		secure := os.Getenv("SERVER_CERT") != ""
+		secure := auth.CookieSecure(c)
 		c.Cookie(&fiber.Cookie{
 			Name: "auth_token", Value: token,
 			HTTPOnly: true, Secure: secure, SameSite: "Strict",

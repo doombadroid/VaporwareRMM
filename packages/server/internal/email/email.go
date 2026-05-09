@@ -4,9 +4,11 @@
 package email
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/smtp"
+	"os"
 	"strings"
 
 	"vaporrmm/server/internal/crypto"
@@ -101,7 +103,86 @@ func Send(tenantID, to, subject, body string) error {
 		auth = smtp.PlainAuth("", cfg.User, cfg.Password, cfg.Host)
 	}
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	return smtp.SendMail(addr, auth, cfg.From, []string{to}, msg)
+	return sendWithTLS(addr, cfg.Host, auth, cfg.From, []string{to}, msg)
+}
+
+// SendWithTLS is the exported variant of sendWithTLS for callers outside this
+// package (events.TriggerEmailAlerts). Same TLS/auth semantics as Send.
+func SendWithTLS(addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	return sendWithTLS(addr, host, auth, from, to, msg)
+}
+
+// sendWithTLS replaces smtp.SendMail to enforce TLS. Stock SendMail will fall
+// back to plaintext silently if the server does not advertise STARTTLS, which
+// would leak SMTP credentials and message contents in cleartext. Set
+// SMTP_ALLOW_PLAINTEXT=1 to opt out (lab/internal SMTP only).
+//
+// Port 465 (SMTPS) is implicit-TLS: the connection is wrapped in TLS from
+// the start and the server never advertises STARTTLS. We detect that case
+// and tls.Dial instead of smtp.Dial.
+func sendWithTLS(addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	tlsCfg := &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+
+	var c *smtp.Client
+	var err error
+	if strings.HasSuffix(addr, ":465") {
+		conn, derr := tls.Dial("tcp", addr, tlsCfg)
+		if derr != nil {
+			return fmt.Errorf("smtps dial: %w", derr)
+		}
+		c, err = smtp.NewClient(conn, host)
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("smtps client: %w", err)
+		}
+	} else {
+		c, err = smtp.Dial(addr)
+		if err != nil {
+			return fmt.Errorf("smtp dial: %w", err)
+		}
+	}
+	defer c.Close()
+
+	if err := c.Hello("vaporrmm"); err != nil {
+		return fmt.Errorf("smtp hello: %w", err)
+	}
+	// Implicit-TLS connections (port 465) are already encrypted; only do the
+	// STARTTLS dance on submission/relay ports.
+	if !strings.HasSuffix(addr, ":465") {
+		if ok, _ := c.Extension("STARTTLS"); ok {
+			if err := c.StartTLS(tlsCfg); err != nil {
+				return fmt.Errorf("smtp starttls: %w", err)
+			}
+		} else if os.Getenv("SMTP_ALLOW_PLAINTEXT") != "1" {
+			return fmt.Errorf("smtp server does not advertise STARTTLS; refusing to send in cleartext (set SMTP_ALLOW_PLAINTEXT=1 to override)")
+		}
+	}
+	if auth != nil {
+		if ok, _ := c.Extension("AUTH"); ok {
+			if err := c.Auth(auth); err != nil {
+				return fmt.Errorf("smtp auth: %w", err)
+			}
+		}
+	}
+	if err := c.Mail(from); err != nil {
+		return fmt.Errorf("smtp mail: %w", err)
+	}
+	for _, addr := range to {
+		if err := c.Rcpt(addr); err != nil {
+			return fmt.Errorf("smtp rcpt: %w", err)
+		}
+	}
+	w, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("smtp data: %w", err)
+	}
+	if _, err := w.Write(msg); err != nil {
+		return fmt.Errorf("smtp write: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("smtp data close: %w", err)
+	}
+	return c.Quit()
 }
 
 // SendInvite emails a tenant invite with the accept link.

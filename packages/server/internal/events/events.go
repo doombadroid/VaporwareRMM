@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
+	"vaporrmm/server/internal/email"
 	"vaporrmm/server/internal/redis"
 )
 
@@ -297,7 +298,7 @@ func TriggerEmailAlerts(tenantID, event string, payload map[string]interface{}) 
 	}
 
 	addr := fmt.Sprintf("%s:%d", smtpHost, smtpPort)
-	if err := smtp.SendMail(addr, auth, smtpFrom, recipients, msg); err != nil {
+	if err := email.SendWithTLS(addr, smtpHost, auth, smtpFrom, recipients, msg); err != nil {
 		slog.Warn("failed to send alert email", "error", err)
 	} else {
 		slog.Info("alert email sent", "event", event, "recipients", len(recipients))

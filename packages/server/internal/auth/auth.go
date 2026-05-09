@@ -248,6 +248,35 @@ func GenerateCSRFToken() string {
 	return hex.EncodeToString(b)
 }
 
+// CookieSecure returns true when the dashboard is being served over HTTPS,
+// covering all the deployment topologies we ship:
+//
+//   - direct-TLS (the Go server itself terminates with SERVER_CERT/SERVER_KEY)
+//   - Caddy / reverse proxy in front, talking plaintext to the server
+//     (X-Forwarded-Proto: https)
+//   - operator opt-in via PUBLIC_URL=https://...
+//
+// Without this, every cookie issuance would default to Secure=false behind
+// Caddy, and the auth_token + csrf_token would be sent over plaintext on a
+// MITM downgrade.
+func CookieSecure(c *fiber.Ctx) bool {
+	if os.Getenv("SERVER_CERT") != "" {
+		return true
+	}
+	if c != nil {
+		if c.Protocol() == "https" {
+			return true
+		}
+		if strings.EqualFold(c.Get("X-Forwarded-Proto"), "https") {
+			return true
+		}
+	}
+	if u := os.Getenv("PUBLIC_URL"); strings.HasPrefix(u, "https://") {
+		return true
+	}
+	return false
+}
+
 // CSRFMiddleware validates X-CSRF-Token header against csrf_token cookie.
 func CSRFMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {

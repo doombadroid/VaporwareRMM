@@ -21,6 +21,7 @@ packages/agent/vaporrmm-agent
 packages/cli/vapor-cli
 packages/cli/vaporRMM_cli
 packages/cli/vaporrmm-cli
+packages/agent/agent
 packages/agent/agent-*-*
 packages/agent/dist/
 

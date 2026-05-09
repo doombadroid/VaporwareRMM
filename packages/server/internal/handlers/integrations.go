@@ -2,15 +2,76 @@ package handlers
 
 import (
 	"context"
+	"crypto/tls"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"vaporrmm/server/internal/auth"
 )
+
+// safeProbeClient returns an http.Client whose Transport refuses to dial
+// loopback / private / link-local destinations. The check happens at dial
+// time using net.Dialer.Control, so DNS rebinding (where LookupIP and the
+// kernel's resolver return different addresses) cannot bypass it: every
+// connection attempt re-validates the resolved IP just before connect.
+func safeProbeClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{
+		Timeout: timeout,
+		Control: func(network, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			ip := net.ParseIP(host)
+			if ip == nil {
+				return fmt.Errorf("dial: address %s is not an IP", address)
+			}
+			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+				return fmt.Errorf("dial: refusing to connect to non-public address %s", ip.String())
+			}
+			return nil
+		},
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext:     dialer.DialContext,
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		},
+	}
+}
+
+// rejectPrivateHost validates an URL's scheme + initial-resolution hosts.
+// This catches obviously-bad URLs early; the dial-time Control function in
+// safeProbeClient is the real defense against DNS rebinding.
+func rejectPrivateHost(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid url: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("url missing host")
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("dns lookup failed: %w", err)
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("url resolves to a non-public address (%s)", ip.String())
+		}
+	}
+	return nil
+}
 
 // RegisterIntegrationProbes adds super_admin-only readiness probes for the
 // out-of-server integrations that an MSP must verify before going live:
@@ -57,12 +118,15 @@ func RegisterIntegrationProbes(api fiber.Router) {
 	probes.Get("/sunshine", func(c *fiber.Ctx) error {
 		// Verify the configured Sunshine release URL is reachable.
 		// Doesn't actually download — HEAD only.
-		version := "v2025.628.4510"
+		version := os.Getenv("SUNSHINE_VERSION")
+		if version == "" {
+			version = "v2025.628.4510"
+		}
 		url := "https://github.com/LizardByte/Sunshine/releases/download/" + version + "/sunshine-ubuntu-24.04-amd64.deb"
 		ctx, cancel := context.WithTimeout(c.Context(), 8*time.Second)
 		defer cancel()
 		req, _ := http.NewRequestWithContext(ctx, "HEAD", url, nil)
-		client := &http.Client{Timeout: 8 * time.Second}
+		client := safeProbeClient(8 * time.Second)
 		resp, err := client.Do(req)
 		if err != nil {
 			return c.JSON(fiber.Map{
@@ -110,10 +174,13 @@ func RegisterIntegrationProbes(api fiber.Router) {
 		if !strings.HasPrefix(body.URL, "http://") && !strings.HasPrefix(body.URL, "https://") {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "url must be http(s)://"})
 		}
+		if err := rejectPrivateHost(body.URL); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
 		ctx, cancel := context.WithTimeout(c.Context(), 5*time.Second)
 		defer cancel()
 		req, _ := http.NewRequestWithContext(ctx, "HEAD", body.URL, nil)
-		client := &http.Client{Timeout: 5 * time.Second}
+		client := safeProbeClient(5 * time.Second)
 		resp, err := client.Do(req)
 		if err != nil {
 			return c.JSON(fiber.Map{

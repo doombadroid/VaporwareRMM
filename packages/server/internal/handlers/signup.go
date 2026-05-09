@@ -117,7 +117,7 @@ func RegisterSignupRoutes(publicAPI fiber.Router) {
 		}
 		_ = redis.SetSession(tokenHash, userID, 24*time.Hour)
 
-		secure := os.Getenv("SERVER_CERT") != ""
+		secure := auth.CookieSecure(c)
 		c.Cookie(&fiber.Cookie{Name: "auth_token", Value: token, HTTPOnly: true, Secure: secure, SameSite: "Strict", MaxAge: 86400, Path: "/"})
 		c.Cookie(&fiber.Cookie{Name: "csrf_token", Value: auth.GenerateCSRFToken(), HTTPOnly: false, Secure: secure, SameSite: "Strict", MaxAge: 86400, Path: "/"})
 

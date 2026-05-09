@@ -53,11 +53,12 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 					return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid registration secret"})
 				}
 				tenantID = "default"
-			} else if regSecret == "" {
-				// No env secret and no header — legacy open registration → default tenant
+			} else if regSecret == "" && os.Getenv("ALLOW_OPEN_REGISTRATION") == "1" {
+				// Open registration explicitly opted in by operator → default tenant.
+				// Use only for dev/CI; never in production.
 				tenantID = "default"
 			} else {
-				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid registration secret"})
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or missing registration secret"})
 			}
 		}
 
@@ -65,6 +66,13 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		if token == authHeader {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Bearer token required"})
+		}
+		// Enforce minimum entropy: a legitimate agent generates a 256-bit token
+		// (43+ chars when base64-url encoded). Rejecting short tokens server-side
+		// stops a misconfigured or malicious caller from registering with a guess
+		// like "Bearer test" and ending up with a permanent device row.
+		if len(token) < 32 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "agent token too short (need ≥32 chars of entropy)"})
 		}
 
 		// Enforce tenant device cap (0 = unlimited)
@@ -103,6 +111,9 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 
 		auth.RegisterAgentToken(token, deviceID, hostname, tenantID)
 		events.TriggerWebhooks(tenantID, "device.registered", map[string]interface{}{"device_id": deviceID, "hostname": hostname, "timestamp": now})
+		// Audit-log every successful registration. Open registration or a
+		// guessed registration secret should leave a clear trail for forensics.
+		events.AuditLogTenant(tenantID, "system", "device.register", "device", deviceID, fmt.Sprintf("registered hostname=%s ip=%s", hostname, c.IP()), c.IP())
 
 		return c.JSON(fiber.Map{"device_id": deviceID, "hostname": hostname, "status": "registered", "message": "Device registered successfully"})
 	})
@@ -150,6 +161,11 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		cpuUsage, _ := heartbeatData["cpu_usage"].(float64)
 		memUsage, _ := heartbeatData["memory_usage"].(float64)
 		diskUsage, _ := heartbeatData["disk_usage"].(float64)
+		// Clamp to [0,100]. A malicious or buggy agent can otherwise stuff
+		// NaN, +Inf, or huge values into metrics_history and break aggregation.
+		cpuUsage = clampPercent(cpuUsage)
+		memUsage = clampPercent(memUsage)
+		diskUsage = clampPercent(diskUsage)
 		if cpuUsage > 0 || memUsage > 0 || diskUsage > 0 {
 			agentTenant, _ := c.Locals("tenant_id").(string)
 			if agentTenant == "" {
@@ -192,6 +208,14 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 				peersFloat, _ := tailscaleMap["peers"].(float64)
 				backendState, _ := tailscaleMap["backend_state"].(string)
 				peers := int(peersFloat)
+				// Cap string fields. The agent is authenticated but a compromised
+				// agent should not be able to push megabyte hostnames into the DB.
+				ip = capLen(ip, 64)
+				tsHostname = capLen(tsHostname, 256)
+				backendState = capLen(backendState, 64)
+				if peers < 0 || peers > 100000 {
+					peers = 0
+				}
 
 				updateSQL := `UPDATE devices SET tailscale_installed=?, tailscale_connected=?, tailscale_ip=?, tailscale_hostname=?, tailscale_peers=?, tailscale_backend_state=?`
 				args := []interface{}{utils.BoolToInt(installed), utils.BoolToInt(connected), ip, tsHostname, peers, backendState}
@@ -295,6 +319,11 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
+		// Hard-cap result batch size. Prevents a compromised agent from filling
+		// the device_commands table or burning a goroutine on a 100k-row update.
+		if len(req.Results) > 1000 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "too many results in one batch (max 1000)"})
+		}
 
 		for _, result := range req.Results {
 			output := result.Output
@@ -393,4 +422,22 @@ echo "  systemctl restart vaporrmm-agent"
 		}
 		return c.JSON(fiber.Map{"message": "File transfer status updated"})
 	})
+}
+
+func clampPercent(v float64) float64 {
+	// Reject NaN / Inf and clamp the rest to [0,100].
+	if v != v || v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
+}
+
+func capLen(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }

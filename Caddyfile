@@ -48,6 +48,16 @@
         reverse_proxy dashboard:3000
     }
 
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        # Server-rendered CSP is set by the Next.js app; this is a coarse fallback.
+        -Server
+    }
+
     log {
         output stdout
         format console
@@ -83,6 +93,16 @@
 
     handle {
         reverse_proxy dashboard:3000
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        # Server-rendered CSP is set by the Next.js app; this is a coarse fallback.
+        -Server
     }
 
     log {

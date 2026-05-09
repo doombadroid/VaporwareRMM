@@ -316,7 +316,7 @@ func RegisterTenantRoutes(api fiber.Router) {
 			slog.Warn("could not record impersonation session", "error", err)
 		}
 
-		secure := os.Getenv("SERVER_CERT") != ""
+		secure := auth.CookieSecure(c)
 		c.Cookie(&fiber.Cookie{
 			Name: "auth_token", Value: newToken,
 			HTTPOnly: true, Secure: secure, SameSite: "Strict",
@@ -375,7 +375,7 @@ func RegisterTenantRoutes(api fiber.Router) {
 			slog.Warn("could not record restored session", "error", err)
 		}
 
-		secure := os.Getenv("SERVER_CERT") != ""
+		secure := auth.CookieSecure(c)
 		c.Cookie(&fiber.Cookie{
 			Name: "auth_token", Value: newToken,
 			HTTPOnly: true, Secure: secure, SameSite: "Strict",

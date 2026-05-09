@@ -40,7 +40,10 @@ func RegisterSystemRoutes(app *fiber.App, cfg Config, openAPISpec []byte) {
 				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
 			}
 			_, _, role, err := auth.ValidateJWT(token)
-			if err != nil || (role != "admin" && role != "super_admin") {
+			// Per-tenant metrics carry tenant_id labels; restrict to super_admin
+			// or METRICS_API_KEY. A tenant-admin scraping /metrics could otherwise
+			// enumerate every other tenant's device + user counts.
+			if err != nil || !auth.IsSuperAdmin(role) {
 				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
 			}
 		}
@@ -87,6 +90,27 @@ func RegisterSystemRoutes(app *fiber.App, cfg Config, openAPISpec []byte) {
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if !websocket.IsWebSocketUpgrade(c) {
 			return fiber.ErrUpgradeRequired
+		}
+		// Same-origin check. The auth cookie is SameSite=Strict, so a cross-site
+		// page can't *send* it on a normal request — but the WebSocket handshake
+		// is governed by Origin alone, and SameSite enforcement on WS is patchy
+		// across browsers. Verifying Origin against CORS_ORIGINS closes the gap.
+		origin := c.Get("Origin")
+		if origin != "" {
+			allowed := false
+			raw := os.Getenv("CORS_ORIGINS")
+			if raw == "" {
+				raw = "http://localhost:3000"
+			}
+			for _, o := range strings.Split(raw, ",") {
+				if strings.TrimSpace(o) == origin {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "WebSocket origin not allowed"})
+			}
 		}
 		token := c.Cookies("auth_token")
 		if token == "" {

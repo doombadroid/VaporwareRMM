@@ -413,7 +413,11 @@ func CSRFMiddleware() fiber.Handler {
 // 401 here before PortalAuthMiddleware ever ran.
 func AuthMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if strings.HasPrefix(c.Path(), "/api/v1/portal") {
+		// Strict prefix match (trailing slash) so a route like
+		// /api/v1/portalfoo (none today, but defence-in-depth) doesn't
+		// inherit the bypass.
+		path := c.Path()
+		if path == "/api/v1/portal" || strings.HasPrefix(path, "/api/v1/portal/") {
 			return c.Next()
 		}
 		var token string

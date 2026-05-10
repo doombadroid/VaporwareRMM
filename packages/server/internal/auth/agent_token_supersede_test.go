@@ -23,13 +23,17 @@ func resetTokenCache() {
 // with supersede only one row stays "active" at a time. The pruner
 // sweeps the superseded rows past their grace window.
 func TestAgentTokenRowCountBoundedAcrossReRegisters(t *testing.T) {
-	dbPath := t.TempDir() + "/token_supersede.db"
-	os.Setenv("DATABASE_PATH", dbPath)
+	if os.Getenv("DATABASE_URL") == "" {
+		os.Setenv("DATABASE_PATH", t.TempDir()+"/token_supersede.db")
+	}
 	if err := db.Init(); err != nil {
 		t.Fatalf("db init: %v", err)
 	}
+	if err := db.ResetForTests(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
 	t.Cleanup(func() {
-		if db.DB != nil {
+		if db.DB != nil && os.Getenv("DATABASE_URL") == "" {
 			db.DB.Close()
 		}
 		resetTokenCache()
@@ -78,13 +82,17 @@ func TestAgentTokenRowCountBoundedAcrossReRegisters(t *testing.T) {
 // agent during a re-registration; without it, the moment a new
 // register lands the old token would be dead.
 func TestAgentTokenSupersedeWindowHonoursInflight(t *testing.T) {
-	dbPath := t.TempDir() + "/token_window.db"
-	os.Setenv("DATABASE_PATH", dbPath)
+	if os.Getenv("DATABASE_URL") == "" {
+		os.Setenv("DATABASE_PATH", t.TempDir()+"/token_window.db")
+	}
 	if err := db.Init(); err != nil {
 		t.Fatalf("db init: %v", err)
 	}
+	if err := db.ResetForTests(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
 	t.Cleanup(func() {
-		if db.DB != nil {
+		if db.DB != nil && os.Getenv("DATABASE_URL") == "" {
 			db.DB.Close()
 		}
 		resetTokenCache()

@@ -191,7 +191,7 @@ jobs:
         id: secret_key
         run: echo "key=$(openssl rand -base64 32)" >> "$GITHUB_OUTPUT"
 
-      - name: Run server tests with coverage
+      - name: Run server tests (SQLite) with coverage
         env:
           SECRETS_ENCRYPTION_KEY: ${{ steps.secret_key.outputs.key }}
           JWT_SECRET: ${{ steps.secret_key.outputs.key }}
@@ -212,10 +212,74 @@ jobs:
           go test -v -race -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out
 
+  go-test-postgres:
+    # Postgres-engine CI lane. The SQLite lane (go-test above) exercises
+    # the default code path; this one runs the same server suite against
+    # a real Postgres instance so regressions like the OIDC-on-Postgres
+    # break, the device-dedup-under-live-writes gap, and the audit-chain-
+    # vs-retention bug — all of which slipped through because tests
+    # assumed Postgres behaves identically to SQLite — fail in CI.
+    # Required-to-merge, not advisory.
+    name: Go Tests (Postgres)
+    runs-on: ubuntu-latest
+    needs: go-lint
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vaporrmm
+          POSTGRES_PASSWORD: vaporrmm-test
+          POSTGRES_DB: vaporrmm_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vaporrmm"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: |
+            go.work.sum
+            packages/server/go.sum
+            packages/agent/go.sum
+            packages/cli/go.sum
+
+      - name: Download Go modules
+        run: cd packages/server && go mod download
+
+      - name: Generate ephemeral SECRETS_ENCRYPTION_KEY
+        id: secret_key_pg
+        run: echo "key=$(openssl rand -base64 32)" >> "$GITHUB_OUTPUT"
+
+      - name: Run server tests (Postgres) with coverage
+        env:
+          SECRETS_ENCRYPTION_KEY: ${{ steps.secret_key_pg.outputs.key }}
+          JWT_SECRET: ${{ steps.secret_key_pg.outputs.key }}
+          DATABASE_URL: postgres://vaporrmm:vaporrmm-test@localhost:5432/vaporrmm_test?sslmode=disable
+        # -p 1 forces serial package execution: every package shares the
+        # same Postgres database, and parallel runs cross-contaminate
+        # via TRUNCATE in ResetForTests. -timeout 900s gives Postgres
+        # round-trip-heavy tests (the 10k dedup seed) room to complete;
+        # they finish in ~25s locally with podman:5.4, slower in CI
+        # runners. Required-to-merge per the audit; the SQLite lane
+        # stays as-is so the cheaper signal lands first.
+        run: |
+          cd packages/server
+          go test -p 1 -v -race -timeout 900s -coverprofile=coverage-pg.out ./...
+          go tool cover -func=coverage-pg.out
+
   build-server:
     name: Build Go Server
     runs-on: ubuntu-latest
-    needs: go-test
+    needs: [go-test, go-test-postgres]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -244,7 +308,7 @@ jobs:
   build-agent:
     name: Build Go Agent
     runs-on: ubuntu-latest
-    needs: go-test
+    needs: [go-test, go-test-postgres]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6

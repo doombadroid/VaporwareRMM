@@ -26,6 +26,10 @@ type migration struct {
 	// PostgresOnly skips this migration on SQLite. Used for things that
 	// only make sense on Postgres — pgvector, vector indexes, etc.
 	PostgresOnly bool
+	// PostgresSQL overrides SQL when running on Postgres. Use when the
+	// dialects need different DDL (e.g. BLOB vs BYTEA, INTEGER PK vs
+	// SERIAL). Leave empty to use SQL for both.
+	PostgresSQL string
 }
 
 // q rewrites ? placeholders to $1,$2,... for PostgreSQL; no-op for SQLite.
@@ -881,6 +885,82 @@ func RunMigrations(dialect string) error {
 		{
 			Version: "040",
 			Name:    "auth_sso_webauthn_policies",
+			// Postgres-specific DDL: BLOB does not exist; use BYTEA.
+			// The SQLite path uses BLOB unchanged. Schema is otherwise
+			// identical between dialects.
+			PostgresSQL: `CREATE TABLE IF NOT EXISTS tenant_oidc_configs (
+				tenant_id TEXT PRIMARY KEY,
+				issuer_url TEXT NOT NULL,
+				client_id TEXT NOT NULL,
+				client_secret_enc TEXT NOT NULL,
+				default_role TEXT NOT NULL DEFAULT 'user',
+				enabled INTEGER NOT NULL DEFAULT 1,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS oidc_states (
+				state TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				nonce TEXT NOT NULL,
+				code_verifier TEXT NOT NULL,
+				redirect_uri TEXT NOT NULL,
+				expires_at INTEGER NOT NULL,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_oidc_states_expires ON oidc_states(expires_at);
+
+			CREATE TABLE IF NOT EXISTS webauthn_credentials (
+				id TEXT PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				credential_id BYTEA NOT NULL,
+				public_key BYTEA NOT NULL,
+				aaguid BYTEA,
+				sign_count INTEGER NOT NULL DEFAULT 0,
+				transports TEXT,
+				name TEXT,
+				created_at INTEGER NOT NULL,
+				last_used_at INTEGER
+			);
+			CREATE INDEX IF NOT EXISTS idx_webauthn_user ON webauthn_credentials(user_id);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_webauthn_credid ON webauthn_credentials(credential_id);
+
+			CREATE TABLE IF NOT EXISTS webauthn_sessions (
+				id TEXT PRIMARY KEY,
+				user_id TEXT,
+				kind TEXT NOT NULL,
+				challenge BYTEA NOT NULL,
+				expires_at INTEGER NOT NULL,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_webauthn_sessions_expires ON webauthn_sessions(expires_at);
+
+			CREATE TABLE IF NOT EXISTS report_schedules (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				name TEXT NOT NULL,
+				report_type TEXT NOT NULL,
+				weekly_cron TEXT NOT NULL,
+				timezone TEXT NOT NULL DEFAULT 'UTC',
+				email_recipients TEXT NOT NULL,
+				enabled INTEGER NOT NULL DEFAULT 1,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				last_run_at INTEGER,
+				last_error TEXT
+			);
+
+			CREATE TABLE IF NOT EXISTS tenant_policies (
+				tenant_id TEXT PRIMARY KEY,
+				audit_retention_days INTEGER NOT NULL DEFAULT 365,
+				metrics_retention_days INTEGER NOT NULL DEFAULT 90,
+				ticket_comment_retention_days INTEGER NOT NULL DEFAULT 0,
+				time_entry_retention_days INTEGER NOT NULL DEFAULT 0,
+				failed_login_threshold INTEGER NOT NULL DEFAULT 10,
+				lockout_minutes INTEGER NOT NULL DEFAULT 15,
+				updated_at INTEGER NOT NULL
+			);`,
 			// tenant_oidc_configs: per-tenant OIDC provider. client_secret
 			// encrypted at rest. JIT-provisioned users get role="user" by
 			// default; admins can promote later.
@@ -1061,7 +1141,11 @@ func RunMigrations(dialect string) error {
 			continue
 		}
 
-		_, err := DB.Exec(m.SQL)
+		sqlStmt := m.SQL
+		if dialect == "postgres" && m.PostgresSQL != "" {
+			sqlStmt = m.PostgresSQL
+		}
+		_, err := DB.Exec(sqlStmt)
 		if err != nil {
 			// Tolerate idempotent re-runs (duplicate column, already exists)
 			// and the special case of CREATE EXTENSION on Postgres without

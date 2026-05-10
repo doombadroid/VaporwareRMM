@@ -23,13 +23,17 @@ import (
 // duplicates means 10k rows that need to be deleted; we reach that with
 // 1000 sets of 11 rows each (1000 winners + 10000 losers).
 func TestDeduplicateDevicesAndCreateIndex_Synthetic10k(t *testing.T) {
-	dbPath := t.TempDir() + "/dedup_test.db"
-	os.Setenv("DATABASE_PATH", dbPath)
+	if os.Getenv("DATABASE_URL") == "" {
+		os.Setenv("DATABASE_PATH", t.TempDir()+"/dedup_test.db")
+	}
 	if err := Init(); err != nil {
 		t.Fatalf("db init: %v", err)
 	}
+	if err := ResetForTests(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
 	t.Cleanup(func() {
-		if DB != nil {
+		if DB != nil && os.Getenv("DATABASE_URL") == "" {
 			DB.Close()
 		}
 	})
@@ -40,36 +44,25 @@ func TestDeduplicateDevicesAndCreateIndex_Synthetic10k(t *testing.T) {
 	// Seed: 1000 unique hostnames; for each, 11 device rows. Increasing
 	// created_at means the last row is the winner. We attach one
 	// device_command row per device so we can assert FK rewiring.
-	tx, err := DB.DB.Begin()
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	stmtDev, err := tx.Prepare(`INSERT INTO devices (id, hostname, mac_address, status, last_seen, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		t.Fatalf("prep dev: %v", err)
-	}
-	stmtCmd, err := tx.Prepare(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at, tenant_id) VALUES (?, ?, 'shell', '{}', 'pending', ?, ?)`)
-	if err != nil {
-		t.Fatalf("prep cmd: %v", err)
-	}
+	//
+	// We go through the Wrapper (not tx.Prepare) so the `?` placeholders
+	// get rewritten to $N for Postgres. The Wrapper's own Exec already
+	// batches efficiently enough for a 10k-row test.
 	for s := 0; s < sets; s++ {
 		host := fmt.Sprintf("host-%04d", s)
 		mac := fmt.Sprintf("aa:bb:cc:%02x:%02x:%02x", (s>>16)&0xff, (s>>8)&0xff, s&0xff)
 		for d := 0; d < dupsPerSet; d++ {
 			devID := fmt.Sprintf("dev-%04d-%02d", s, d)
-			if _, err := stmtDev.Exec(devID, host, mac, "offline", 0, int64(s*100+d), "default"); err != nil {
+			if _, err := DB.Exec(`INSERT INTO devices (id, hostname, mac_address, status, last_seen, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				devID, host, mac, "offline", 0, int64(s*100+d), "default"); err != nil {
 				t.Fatalf("seed dev: %v", err)
 			}
 			cmdID := fmt.Sprintf("cmd-%04d-%02d", s, d)
-			if _, err := stmtCmd.Exec(cmdID, devID, int64(s*100+d), "default"); err != nil {
+			if _, err := DB.Exec(`INSERT INTO device_commands (id, device_id, type, payload, status, created_at, tenant_id) VALUES (?, ?, 'shell', '{}', 'pending', ?, ?)`,
+				cmdID, devID, int64(s*100+d), "default"); err != nil {
 				t.Fatalf("seed cmd: %v", err)
 			}
 		}
-	}
-	stmtDev.Close()
-	stmtCmd.Close()
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
 	}
 
 	// Sanity: pre-dedup we have sets*dupsPerSet device rows and the
@@ -162,13 +155,17 @@ func TestDeduplicateDevicesAndCreateIndex_Synthetic10k(t *testing.T) {
 // 10k-row test was correctness inside a single transaction; this is
 // correctness under concurrent writers.
 func TestDeduplicateDevicesAndCreateIndex_UnderLiveWrites(t *testing.T) {
-	dbPath := t.TempDir() + "/dedup_live_test.db"
-	os.Setenv("DATABASE_PATH", dbPath)
+	if os.Getenv("DATABASE_URL") == "" {
+		os.Setenv("DATABASE_PATH", t.TempDir()+"/dedup_live_test.db")
+	}
 	if err := Init(); err != nil {
 		t.Fatalf("db init: %v", err)
 	}
+	if err := ResetForTests(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
 	t.Cleanup(func() {
-		if DB != nil {
+		if DB != nil && os.Getenv("DATABASE_URL") == "" {
 			DB.Close()
 		}
 	})
@@ -176,27 +173,16 @@ func TestDeduplicateDevicesAndCreateIndex_UnderLiveWrites(t *testing.T) {
 	// Seed: 200 duplicate sets, 4 dups each = 800 rows, 600 duplicates.
 	const sets = 200
 	const dupsPerSet = 4
-	tx, err := DB.DB.Begin()
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	stmt, err := tx.Prepare(`INSERT INTO devices (id, hostname, mac_address, status, last_seen, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		t.Fatalf("prep: %v", err)
-	}
 	for s := 0; s < sets; s++ {
 		host := fmt.Sprintf("host-%03d", s)
 		mac := fmt.Sprintf("aa:bb:00:%02x:%02x:%02x", (s>>16)&0xff, (s>>8)&0xff, s&0xff)
 		for d := 0; d < dupsPerSet; d++ {
 			id := fmt.Sprintf("dev-%03d-%02d", s, d)
-			if _, err := stmt.Exec(id, host, mac, "offline", 0, int64(s*100+d), "default"); err != nil {
+			if _, err := DB.Exec(`INSERT INTO devices (id, hostname, mac_address, status, last_seen, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				id, host, mac, "offline", 0, int64(s*100+d), "default"); err != nil {
 				t.Fatalf("seed: %v", err)
 			}
 		}
-	}
-	stmt.Close()
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
 	}
 
 	// Writer goroutine: while dedup runs, fire register-shaped inserts

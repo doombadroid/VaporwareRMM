@@ -18,19 +18,23 @@ import (
 
 func setupTestDB(t *testing.T) {
 	t.Helper()
-	// Use a file-backed DB per test instead of :memory: so the
-	// connection pool returns the same database across goroutines /
-	// pool checkouts. SQLite's :memory: is per-connection unless we
-	// configure shared cache, and the audit-chain code intentionally
-	// uses background goroutines that can checkout fresh connections.
-	dbPath := t.TempDir() + "/audit_chain_test.db"
-	os.Setenv("DATABASE_PATH", dbPath)
+	// Engine-agnostic. SQLite path: per-test tempdir DB. Postgres path:
+	// reuse the shared DATABASE_URL connection but TRUNCATE every table
+	// so cross-test state doesn't bleed (Postgres in CI has one shared
+	// database for the whole package run).
+	if os.Getenv("DATABASE_URL") == "" {
+		dbPath := t.TempDir() + "/audit_chain_test.db"
+		os.Setenv("DATABASE_PATH", dbPath)
+	}
 	os.Setenv("SECRETS_ENCRYPTION_KEY", "fmZn0pFd/f58gKeknlaECEbcMDh5oQ+nRhFB/sAMScY=")
 	if err := db.Init(); err != nil {
 		t.Fatalf("db init: %v", err)
 	}
+	if err := db.ResetForTests(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
 	t.Cleanup(func() {
-		if db.DB != nil {
+		if db.DB != nil && os.Getenv("DATABASE_URL") == "" {
 			db.DB.Close()
 		}
 	})
@@ -151,18 +155,25 @@ func TestAuditChain_IntactAcrossDBRestart(t *testing.T) {
 	//
 	// This is the regression case the audit calls out: "the restart
 	// case is where these implementations usually break".
-	tmpDB := t.TempDir() + "/restart_test.db"
-	os.Setenv("DATABASE_PATH", tmpDB)
+	if os.Getenv("DATABASE_URL") == "" {
+		os.Setenv("DATABASE_PATH", t.TempDir()+"/restart_test.db")
+	}
 	os.Setenv("SECRETS_ENCRYPTION_KEY", "fmZn0pFd/f58gKeknlaECEbcMDh5oQ+nRhFB/sAMScY=")
 
 	if err := db.Init(); err != nil {
 		t.Fatalf("db init: %v", err)
 	}
+	if err := db.ResetForTests(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
 	for i := 0; i < 3; i++ {
 		writeRow(t, "test.before_restart", "row")
 	}
 
-	// Close and reopen — same on-disk file.
+	// Close and reopen — same backing database. On SQLite that's the
+	// same on-disk file; on Postgres it's a fresh connection to the
+	// same DB. Either way the chain head must be re-derivable from
+	// disk by loadLastAuditState.
 	if err := db.DB.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -170,7 +181,7 @@ func TestAuditChain_IntactAcrossDBRestart(t *testing.T) {
 		t.Fatalf("db re-init: %v", err)
 	}
 	t.Cleanup(func() {
-		if db.DB != nil {
+		if db.DB != nil && os.Getenv("DATABASE_URL") == "" {
 			db.DB.Close()
 		}
 	})

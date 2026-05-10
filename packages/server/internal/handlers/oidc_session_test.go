@@ -30,16 +30,18 @@ func computeTokenHashForTest(jwt string) string {
 // Any future schema change to user_sessions must update both
 // createOIDCSession and this test in the same commit.
 func TestOIDCCreateSessionPopulatesAllNotNull(t *testing.T) {
-	dbPath := t.TempDir() + "/oidc_session_test.db"
 	if os.Getenv("DATABASE_URL") == "" {
-		os.Setenv("DATABASE_PATH", dbPath)
+		os.Setenv("DATABASE_PATH", t.TempDir()+"/oidc_session_test.db")
 	}
 	os.Setenv("SECRETS_ENCRYPTION_KEY", "fmZn0pFd/f58gKeknlaECEbcMDh5oQ+nRhFB/sAMScY=")
 	if err := db.Init(); err != nil {
 		t.Fatalf("db init: %v", err)
 	}
+	if err := db.ResetForTests(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
 	t.Cleanup(func() {
-		if db.DB != nil {
+		if db.DB != nil && os.Getenv("DATABASE_URL") == "" {
 			db.DB.Close()
 		}
 	})

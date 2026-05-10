@@ -27,6 +27,12 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
+# wget is the minimum extra dependency we need for a working
+# HEALTHCHECK; the alternative was juggling node -e quoting (which
+# silently broke twice) or busybox builtins which don't exist in
+# node:22-alpine. ~1 MiB image cost beats the debugging time.
+RUN apk add --no-cache wget
+
 RUN addgroup -g 1001 -S nodejs && \
     adduser  -S nextjs -u 1001 -G nodejs
 
@@ -38,13 +44,7 @@ EXPOSE 3000
 
 USER nextjs
 
-# node:22-alpine ships only node + npm — no wget, no curl, and the
-# previous shell-form 'node -e "fetch(...)"' was silently failing
-# (probably shell quoting around the arrow functions). Use exec form
-# with a TCP connect, which is the minimum the orchestrator needs to
-# know: 'is something listening on :3000?'. Keeps the probe trivial
-# and immune to dashboard route latency / 5xx flakes.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=8 \
-    CMD ["node", "-e", "require('net').createConnection({host:'127.0.0.1',port:3000}).on('connect',function(){process.exit(0);}).on('error',function(){process.exit(1);});"]
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
 
 CMD ["node", "apps/dashboard/server.js"]

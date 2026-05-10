@@ -160,7 +160,7 @@ export default function SSOPage() {
                       {loginURL}
                     </code>
                     <p className="text-xs text-slate-500 mt-2">
-                      Configure your IdP's redirect URI to: <code className="font-mono">{typeof window !== 'undefined' ? `${window.location.origin}/api/auth/oidc/callback` : ''}</code>
+                      Configure your IdP&apos;s redirect URI to: <code className="font-mono">{typeof window !== 'undefined' ? `${window.location.origin}/api/auth/oidc/callback` : ''}</code>
                     </p>
                   </CardContent>
                 </Card>

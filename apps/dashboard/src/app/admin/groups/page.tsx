@@ -232,7 +232,7 @@ export default function GroupsPage() {
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setPickerOpen(false)}>
               <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-lg w-full mx-4 max-h-[80vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
                 <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
-                  <p className="font-medium">Add devices to "{activeGroup.name}"</p>
+                  <p className="font-medium">Add devices to &ldquo;{activeGroup.name}&rdquo;</p>
                   <button className="text-slate-400" onClick={() => setPickerOpen(false)}>×</button>
                 </div>
                 <div className="overflow-y-auto p-3 space-y-1">

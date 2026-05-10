@@ -29,7 +29,7 @@ export default function NeighborsPage() {
             <Button size="sm" variant="outline" onClick={load}>Refresh</Button>
           </div>
           <p className="text-sm text-slate-400">
-            IPs your agents have observed via ARP / ip-neigh that don't match any registered device. Useful for finding rogue or unmanaged hardware on the LAN.
+            IPs your agents have observed via ARP / ip-neigh that don&apos;t match any registered device. Useful for finding rogue or unmanaged hardware on the LAN.
           </p>
           {loading ? (
             <Card className="bg-slate-900/60 border-slate-800/50"><CardContent className="py-12 text-center text-slate-400">Loading…</CardContent></Card>

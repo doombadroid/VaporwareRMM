@@ -120,7 +120,7 @@ export default function ReportsPage() {
                   <CardContent className="py-4 flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-white truncate">{s.name}</p>
-                      <p className="text-xs text-slate-400 mt-1 font-mono">{s.report_type} · cron "{s.weekly_cron}" {s.timezone}</p>
+                      <p className="text-xs text-slate-400 mt-1 font-mono">{s.report_type} · cron &ldquo;{s.weekly_cron}&rdquo; {s.timezone}</p>
                       <p className="text-xs text-slate-500 mt-1 truncate">→ {s.email_recipients}</p>
                       {s.last_error && <p className="text-xs text-rose-400 mt-1">{s.last_error}</p>}
                     </div>

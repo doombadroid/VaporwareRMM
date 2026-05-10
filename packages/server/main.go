@@ -138,6 +138,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Collapse duplicate device rows produced by the agent's pre-fix
+	// re-register loop, then install the UNIQUE INDEX that prevents
+	// future duplicates. Idempotent on a clean DB. The merge is logged
+	// to the (now tamper-evident) audit chain so operators can see
+	// what was collapsed and when.
+	if merged, err := db.DeduplicateDevicesAndCreateIndex(); err != nil {
+		slog.Error("device dedup failed at startup", "error", err)
+		os.Exit(1)
+	} else if merged > 0 {
+		events.AuditLogTenantSync("default", "system", "device.dedup_merge", "devices", "", fmt.Sprintf("collapsed %d duplicate device rows into surviving registrations", merged), "")
+		slog.Info("device dedup pass complete", "rows_merged", merged)
+	}
+
 	redis.Init()
 	defer redis.Close()
 

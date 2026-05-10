@@ -92,7 +92,6 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 			}
 		}
 
-		deviceID := uuid.New().String()
 		now := time.Now().Unix()
 
 		osName, _ := regInfo["os"].(string)
@@ -103,22 +102,59 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		agentVersion, _ := regInfo["agent_version"].(string)
 		osClass := sysfeatures.ClassifyOS(osName)
 
-		_, err := db.DB.Exec(
-			`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, agent_version, status, last_seen, created_at, cpu, agent_ip, tenant_id, os_class)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, agentVersion, "online", now, now, cpuModel, localIP, tenantID, osClass,
-		)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register device", "message": err.Error()})
+		// Re-registration check: if a row already exists for
+		// (tenant_id, hostname, mac_address) — installed by the
+		// idx_devices_dedup unique index — refresh that row and reuse
+		// the existing device_id instead of creating a duplicate. The
+		// agent's heartbeat-retry-exhaustion loop used to mint a new
+		// device_id on every re-register, which produced ghost rows
+		// and unbounded agent_token entries. The dedup pass at startup
+		// collapsed the historical duplicates; this UPSERT prevents
+		// future ones.
+		var existingID string
+		err := db.DB.QueryRow(
+			`SELECT id FROM devices WHERE tenant_id = ? AND hostname = ? AND COALESCE(mac_address, '') = ?`,
+			tenantID, hostname, macAddr,
+		).Scan(&existingID)
+		var deviceID string
+		var registered bool
+		switch {
+		case err == nil && existingID != "":
+			deviceID = existingID
+			if _, err := db.DB.Exec(
+				`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
+				localIP, osName, osVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
+			); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
+			}
+		default:
+			deviceID = uuid.New().String()
+			if _, err := db.DB.Exec(
+				`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, agent_version, status, last_seen, created_at, cpu, agent_ip, tenant_id, os_class)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, agentVersion, "online", now, now, cpuModel, localIP, tenantID, osClass,
+			); err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register device", "message": err.Error()})
+			}
+			registered = true
 		}
 
 		auth.RegisterAgentToken(token, deviceID, hostname, tenantID)
-		events.TriggerWebhooks(tenantID, "device.registered", map[string]interface{}{"device_id": deviceID, "hostname": hostname, "timestamp": now})
-		// Audit-log every successful registration. Open registration or a
-		// guessed registration secret should leave a clear trail for forensics.
-		events.AuditLogTenant(tenantID, "system", "device.register", "device", deviceID, fmt.Sprintf("registered hostname=%s ip=%s", hostname, c.IP()), c.IP())
+		if registered {
+			events.TriggerWebhooks(tenantID, "device.registered", map[string]interface{}{"device_id": deviceID, "hostname": hostname, "timestamp": now})
+			// Audit-log every NEW registration. Re-registers (token
+			// rotation, agent reinstall) hit the UPDATE branch and don't
+			// emit a new audit row; the heartbeat keeps the device
+			// liveness signal flowing and the audit log doesn't need a
+			// row per re-register flap.
+			events.AuditLogTenant(tenantID, "system", "device.register", "device", deviceID, fmt.Sprintf("registered hostname=%s ip=%s", hostname, c.IP()), c.IP())
+		}
 
-		return c.JSON(fiber.Map{"device_id": deviceID, "hostname": hostname, "status": "registered", "message": "Device registered successfully"})
+		statusMsg := "registered"
+		if !registered {
+			statusMsg = "refreshed"
+		}
+		return c.JSON(fiber.Map{"device_id": deviceID, "hostname": hostname, "status": statusMsg, "message": "Device " + statusMsg + " successfully"})
 	})
 
 	// Agent heartbeat

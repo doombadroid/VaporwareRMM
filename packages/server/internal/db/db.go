@@ -1023,6 +1023,25 @@ func RunMigrations(dialect string) error {
 			// starting from 1 per tenant.
 			SQL: `ALTER TABLE audit_logs ADD COLUMN chain_seq INTEGER NOT NULL DEFAULT 0;`,
 		},
+		{
+			Version: "044",
+			Name:    "agent_tokens_supersede",
+			// Bound the growth of agent_tokens across re-registers.
+			// Pre-fix, every re-registration (token rotation, agent
+			// reinstall, the old retry-exhaustion loop) inserted a
+			// fresh row and left every prior token row in place. Over
+			// months a single host accumulated dozens of rows that
+			// were no longer reachable from any current agent.
+			//
+			// superseded_at marks rows replaced by a newer
+			// registration for the same (tenant_id, device_id,
+			// hostname). AuthMiddleware rejects tokens past their
+			// superseded_at; the in-memory cache prune sweeps them.
+			// A small overlap window (default 60s) prevents an
+			// in-flight heartbeat carrying the old token from
+			// 401-flapping during rotation.
+			SQL: `ALTER TABLE agent_tokens ADD COLUMN superseded_at INTEGER NOT NULL DEFAULT 0;`,
+		},
 	}
 
 	for _, m := range migrations {

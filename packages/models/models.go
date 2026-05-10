@@ -278,12 +278,20 @@ type CommandResult struct {
 }
 
 // AgentToken stores registered agent tokens with their device IDs.
+//
+// SupersededAt is non-zero for tokens that have been replaced by a
+// newer registration for the same (tenant_id, device_id, hostname).
+// AuthMiddleware rejects requests bearing a superseded token once
+// the timestamp is in the past — the small overlap window lets an
+// in-flight heartbeat carrying the old token complete instead of
+// 401-flapping a healthy agent during a re-registration.
 type AgentToken struct {
-	TokenHash string
-	DeviceID  string
-	Hostname  string
-	TenantID  string
-	ExpiresAt int64 // Unix timestamp; 0 means no expiration
+	TokenHash    string
+	DeviceID     string
+	Hostname     string
+	TenantID     string
+	ExpiresAt    int64 // Unix timestamp; 0 means no expiration
+	SupersededAt int64 // Unix timestamp; 0 means active (not superseded)
 }
 
 // Migration represents a single database migration.

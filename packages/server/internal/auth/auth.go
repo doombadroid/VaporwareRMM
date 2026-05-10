@@ -773,6 +773,19 @@ func AgentAuthMiddleware() fiber.Handler {
 			})
 		}
 
+		// Reject tokens past their supersede TTL. Inside the grace
+		// window we still honour the token so an in-flight request
+		// from the rotating agent completes; past the window the
+		// agent should already be using the new token, so any traffic
+		// on the old one is either a misconfigured agent or replay.
+		if agentTok.SupersededAt > 0 && time.Now().Unix() > agentTok.SupersededAt {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Invalid agent token",
+				"message": "Agent token superseded; re-register or rotate",
+				"code":    401,
+			})
+		}
+
 		// Block agents whose tenant has been suspended or deleted.
 		if !TenantAllowed(agentTok.TenantID) {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
@@ -789,17 +802,42 @@ func AgentAuthMiddleware() fiber.Handler {
 	}
 }
 
-// RegisterAgentToken stores an agent token in memory and persists it to the database.
+// AgentTokenSupersedeWindow is the grace period after which a
+// superseded token stops being honoured. Long enough for an
+// in-flight heartbeat to complete; short enough to bound the row
+// count to ~1 active + 0-1 grace-window rows per device.
+const AgentTokenSupersedeWindow = 60 * time.Second
+
+// RegisterAgentToken stores an agent token in memory and persists it
+// to the database. Any prior tokens for the same (tenant_id, device_id,
+// hostname) are marked superseded with a short overlap window so an
+// in-flight heartbeat carrying the old token doesn't 401-flap during
+// rotation; once the window passes, both the in-memory cache prune and
+// the AuthMiddleware reject the old tokens.
 func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 	if tenantID == "" {
 		tenantID = "default"
 	}
 	tokenHash := HashToken(token)
 	now := time.Now().Unix()
-	// Default agent token expiry: 90 days
-	expiresAt := now + 90*24*60*60
+	supersedeAt := now + int64(AgentTokenSupersedeWindow.Seconds())
+	expiresAt := now + 90*24*60*60 // 90 days
 	TokenMu.Lock()
 	defer TokenMu.Unlock()
+
+	// Mark every prior token for this (tenant, device, hostname) tuple
+	// as superseded in the cache. Skip the row we're about to insert
+	// (token_hash collisions are statistically impossible but the
+	// guard keeps the contract clean).
+	for h, tok := range RegisteredTokens {
+		if h == tokenHash {
+			continue
+		}
+		if tok.TenantID == tenantID && tok.DeviceID == deviceID && tok.Hostname == hostname && tok.SupersededAt == 0 {
+			tok.SupersededAt = supersedeAt
+		}
+	}
+
 	RegisteredTokens[tokenHash] = &models.AgentToken{
 		TokenHash: tokenHash,
 		DeviceID:  deviceID,
@@ -807,16 +845,27 @@ func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 		TenantID:  tenantID,
 		ExpiresAt: expiresAt,
 	}
+
 	var upsertToken string
 	if db.DB.Dialect == "postgres" {
-		upsertToken = `INSERT INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)
-			ON CONFLICT (token_hash) DO UPDATE SET device_id=EXCLUDED.device_id, hostname=EXCLUDED.hostname, tenant_id=EXCLUDED.tenant_id, created_at=EXCLUDED.created_at, expires_at=EXCLUDED.expires_at`
+		upsertToken = `INSERT INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at, superseded_at) VALUES (?, ?, ?, ?, ?, ?, 0)
+			ON CONFLICT (token_hash) DO UPDATE SET device_id=EXCLUDED.device_id, hostname=EXCLUDED.hostname, tenant_id=EXCLUDED.tenant_id, created_at=EXCLUDED.created_at, expires_at=EXCLUDED.expires_at, superseded_at=0`
 	} else {
-		upsertToken = `INSERT OR REPLACE INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`
+		upsertToken = `INSERT OR REPLACE INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at, superseded_at) VALUES (?, ?, ?, ?, ?, ?, 0)`
 	}
-	_, err := db.DB.Exec(upsertToken, tokenHash, deviceID, hostname, tenantID, now, expiresAt)
-	if err != nil {
+	if _, err := db.DB.Exec(upsertToken, tokenHash, deviceID, hostname, tenantID, now, expiresAt); err != nil {
 		slog.Warn("could not persist agent token", "error", err)
+	}
+
+	// Persist the supersede mark for every prior token row keyed by
+	// the same (tenant, device, hostname) tuple. Only flip rows whose
+	// superseded_at is 0 so a token already on its way out doesn't
+	// get its TTL extended by another rotation.
+	if _, err := db.DB.Exec(
+		`UPDATE agent_tokens SET superseded_at = ? WHERE tenant_id = ? AND device_id = ? AND hostname = ? AND token_hash <> ? AND (superseded_at IS NULL OR superseded_at = 0)`,
+		supersedeAt, tenantID, deviceID, hostname, tokenHash,
+	); err != nil {
+		slog.Warn("could not supersede prior agent tokens", "error", err)
 	}
 }
 
@@ -825,7 +874,7 @@ func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 func LoadAgentTokens() {
 	MigrateLegacyTokens()
 
-	rows, err := db.DB.Query(`SELECT token_hash, device_id, hostname, COALESCE(tenant_id,'default'), expires_at FROM agent_tokens`)
+	rows, err := db.DB.Query(`SELECT token_hash, device_id, hostname, COALESCE(tenant_id,'default'), expires_at, COALESCE(superseded_at, 0) FROM agent_tokens`)
 	if err != nil {
 		slog.Warn("could not load agent tokens", "error", err)
 		return
@@ -838,7 +887,7 @@ func LoadAgentTokens() {
 	count := 0
 	for rows.Next() {
 		var tok models.AgentToken
-		if err := rows.Scan(&tok.TokenHash, &tok.DeviceID, &tok.Hostname, &tok.TenantID, &tok.ExpiresAt); err != nil {
+		if err := rows.Scan(&tok.TokenHash, &tok.DeviceID, &tok.Hostname, &tok.TenantID, &tok.ExpiresAt, &tok.SupersededAt); err != nil {
 			continue
 		}
 		RegisteredTokens[tok.TokenHash] = &tok
@@ -852,23 +901,41 @@ func LoadAgentTokens() {
 	go pruneExpiredTokens()
 }
 
-// pruneExpiredTokens removes expired tokens from the in-memory map every hour.
+// pruneExpiredTokens removes expired tokens AND tokens whose
+// supersede grace window has elapsed. Runs every minute so the supersede
+// window (default 60s) actually limits the population. Prior loop was
+// hourly which made the supersede TTL meaningless.
 func pruneExpiredTokens() {
-	ticker := time.NewTicker(time.Hour)
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
 		now := time.Now().Unix()
 		TokenMu.Lock()
-		pruned := 0
+		var toDeleteHashes []string
 		for hash, tok := range RegisteredTokens {
 			if tok.ExpiresAt > 0 && now > tok.ExpiresAt {
 				delete(RegisteredTokens, hash)
-				pruned++
+				toDeleteHashes = append(toDeleteHashes, hash)
+				continue
+			}
+			if tok.SupersededAt > 0 && now > tok.SupersededAt {
+				delete(RegisteredTokens, hash)
+				toDeleteHashes = append(toDeleteHashes, hash)
 			}
 		}
 		TokenMu.Unlock()
-		if pruned > 0 {
-			slog.Info("pruned expired agent tokens", "count", pruned)
+		if len(toDeleteHashes) > 0 {
+			slog.Info("pruned agent tokens", "count", len(toDeleteHashes))
+			// Best-effort DB cleanup. We don't hold TokenMu across the
+			// DB call; if a row is re-registered between cache delete
+			// and DB delete, the new row's superseded_at=0 INSERT will
+			// have already replaced the old row's state (token_hash
+			// is the PK, so collisions overwrite).
+			for _, h := range toDeleteHashes {
+				if _, err := db.DB.Exec(`DELETE FROM agent_tokens WHERE token_hash = ?`, h); err != nil {
+					slog.Warn("agent_tokens prune DELETE failed", "hash", h, "error", err)
+				}
+			}
 		}
 	}
 }

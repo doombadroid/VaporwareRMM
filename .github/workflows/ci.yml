@@ -412,7 +412,12 @@ jobs:
           # anyway, the file mount is a runtime fallback for swarm mode.
           mkdir -p secrets
           openssl rand -base64 48 > secrets/jwt_secret.txt
-          docker compose up --build -d
+          # Smoke test only needs the Go server to come up against a real
+          # Postgres + Redis. The dashboard + Caddy add 90s of build +
+          # opaque healthcheck issues that don't validate anything the
+          # server-tests + e2e jobs aren't already covering. Bring up the
+          # backend slice only.
+          docker compose up --build -d postgres redis server
 
       - name: Wait for services to be ready
         run: |

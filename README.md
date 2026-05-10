@@ -1,5 +1,9 @@
 # Vaporware RMM
 
+[![CI/CD Pipeline](https://github.com/tabiznet/VaporwareRMM/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tabiznet/VaporwareRMM/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/tabiznet/VaporwareRMM?include_prereleases&sort=semver)](https://github.com/tabiznet/VaporwareRMM/releases)
+
 Self-hosted Remote Monitoring & Management for MSPs and small ops teams. Multi-tenant by design. Sunshine + Moonlight for remote desktop. Tailscale for agent transport.
 
 > ## ⚠️ ALPHA SOFTWARE — USE AT YOUR OWN RISK

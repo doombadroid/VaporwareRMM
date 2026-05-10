@@ -422,7 +422,10 @@ jobs:
       - name: Wait for services to be ready
         run: |
           sleep 30
-          curl -f http://localhost:8080/health || exit 1
+          # Server doesn't publish 8080 to the host (Caddy fronts it in
+          # prod). Curl from inside the network via the wget that the
+          # server image installed for its own healthcheck.
+          docker compose exec -T server wget -q -O - http://localhost:8080/health || exit 1
 
       # Surface container output when something failed earlier in the job
       # so the failure log shows the actual error instead of just

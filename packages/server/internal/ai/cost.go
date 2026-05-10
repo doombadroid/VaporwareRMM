@@ -129,7 +129,11 @@ func reserveViaDB(ctx context.Context, tenantID string, kind CostKind, micros, c
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.Exec(`SELECT id FROM tenants WHERE id = ? FOR UPDATE`, tenantID); err != nil {
+	// Raw *sql.Tx skips the dbWrapper rewrite, so we have to call db.DB.Q
+	// explicitly to translate '?' to '$N' on Postgres. Without this the
+	// tenants lock + spend SUM both fail at parse time on Postgres
+	// deployments (the SQLite path was unaffected — Q is a no-op there).
+	if _, err := tx.Exec(db.DB.Q(`SELECT id FROM tenants WHERE id = ? FOR UPDATE`), tenantID); err != nil {
 		return fmt.Errorf("ai: cost reserve lock: %w", err)
 	}
 
@@ -139,10 +143,10 @@ func reserveViaDB(ctx context.Context, tenantID string, kind CostKind, micros, c
 	if kind == CostEmbedding {
 		runType = "embed"
 	}
-	if err := tx.QueryRow(`
+	if err := tx.QueryRow(db.DB.Q(`
 		SELECT COALESCE(SUM(cost_usd_micros),0)
 		  FROM ai_runs
-		 WHERE tenant_id = ? AND created_at >= ? AND run_type = ?`,
+		 WHERE tenant_id = ? AND created_at >= ? AND run_type = ?`),
 		tenantID, dayStart, runType,
 	).Scan(&spent); err != nil {
 		return fmt.Errorf("ai: cost reserve sum: %w", err)

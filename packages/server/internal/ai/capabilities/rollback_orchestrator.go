@@ -116,7 +116,12 @@ func runRollbackPass(ctx context.Context) {
 		slog.Warn("rollback orchestrator: tx begin failed", "error", err)
 		return
 	}
-	rows, err := tx.QueryContext(ctx, `
+	// db.DB.Q rewrites '?' to '$N' for postgres. Without it the literal
+	// '?' reaches pg verbatim and the parser errors at the next clause:
+	// 'syntax error at or near "ORDER" at position 7:4'. Wrapper.Exec /
+	// QueryRow auto-rewrite for us, but a raw *sql.Tx doesn't go through
+	// the wrapper, so we have to rewrite explicitly here.
+	rows, err := tx.QueryContext(ctx, db.DB.Q(`
 		SELECT id, tenant_id, device_id, capability_id, playbook, token,
 		       COALESCE(alert_signature,''), COALESCE(preconditions,''),
 		       run_at, rollback_window_ends
@@ -124,7 +129,7 @@ func runRollbackPass(ctx context.Context) {
 		 WHERE status = 'pending' AND run_at <= ?
 		 ORDER BY run_at ASC
 		 LIMIT 50
-		 FOR UPDATE SKIP LOCKED`, now)
+		 FOR UPDATE SKIP LOCKED`), now)
 	if err != nil {
 		_ = tx.Rollback()
 		slog.Warn("rollback orchestrator: claim query failed", "error", err)
@@ -144,7 +149,7 @@ func runRollbackPass(ctx context.Context) {
 	// Mark them in-progress inside the same tx so nobody else grabs them
 	// while we're processing. Failure to update is fatal for this pass.
 	for _, p := range due {
-		if _, err := tx.ExecContext(ctx, `UPDATE ai_rollback_probes SET status = 'in_progress', attempts = attempts + 1, updated_at = ? WHERE id = ?`, now, p.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, db.DB.Q(`UPDATE ai_rollback_probes SET status = 'in_progress', attempts = attempts + 1, updated_at = ? WHERE id = ?`), now, p.ID); err != nil {
 			slog.Warn("rollback orchestrator: mark in_progress failed", "id", p.ID, "error", err)
 		}
 	}

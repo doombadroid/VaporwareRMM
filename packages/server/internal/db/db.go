@@ -66,6 +66,12 @@ func (d *Wrapper) Query(query string, args ...interface{}) (*sql.Rows, error) {
 func (d *Wrapper) QueryRow(query string, args ...interface{}) *sql.Row {
 	return d.DB.QueryRow(d.q(query), args...)
 }
+
+// Q exposes the placeholder rewrite for callers that hold a raw *sql.Tx
+// (where the wrapper's auto-rewrite doesn't apply). Use as
+// `tx.QueryContext(ctx, db.DB.Q("... ?"), arg)` so the same SQL works on
+// SQLite and Postgres.
+func (d *Wrapper) Q(query string) string { return d.q(query) }
 func RunMigrations(dialect string) error {
 	// Create schema_migrations table
 	createMigrationsTable := `

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
@@ -30,15 +30,16 @@ import {
   Activity,
   Wifi,
   KeyRound,
-  ScrollText as ScrollTextPolicies,
+  ScrollText as PolicyIcon,
   DollarSign,
   FileSpreadsheet,
-  ScrollText as ScrollTextLogs,
+  Terminal,
+  ChevronDown,
 } from 'lucide-react'
-import { ThemeToggle } from '@/components/ThemeToggle'
 import { useBranding } from '@/components/BrandingProvider'
 import { useCurrentUser } from '@/components/CurrentUserProvider'
 import api from '@/lib/api'
+import CommandPalette from '@/components/CommandPalette'
 
 type NavItem = {
   label: string
@@ -48,32 +49,70 @@ type NavItem = {
   adminOnly?: boolean
 }
 
-const navItems: NavItem[] = [
-  { label: 'Dashboard', href: '/', icon: BarChart3 },
-  { label: 'Agents', href: '/agents', icon: Server },
-  { label: 'Tickets', href: '/tickets', icon: Ticket },
-  { label: 'Alerts', href: '/alerts', icon: AlertTriangle },
-  { label: 'Network Map', href: '/network', icon: Globe },
-  { label: 'Patches', href: '/patches', icon: Package },
-  { label: 'Maintenance', href: '/admin/maintenance', icon: CalendarClock, adminOnly: true },
-  { label: 'Software', href: '/admin/software', icon: Boxes, adminOnly: true },
-  { label: 'Groups', href: '/admin/groups', icon: Users, adminOnly: true },
-  { label: 'Portal users', href: '/admin/customers', icon: UserCircle, adminOnly: true },
-  { label: 'Neighbors', href: '/admin/neighbors', icon: Wifi, adminOnly: true },
-  { label: 'Cert monitors', href: '/admin/cert-monitors', icon: ShieldEllipsis, adminOnly: true },
-  { label: 'SNMP', href: '/admin/snmp', icon: Activity, adminOnly: true },
-  { label: 'SSO', href: '/admin/sso', icon: KeyRound, adminOnly: true },
-  { label: 'Policies', href: '/admin/policies', icon: ScrollTextPolicies, adminOnly: true },
-  { label: 'AI cost', href: '/admin/ai/cost', icon: DollarSign, adminOnly: true },
-  { label: 'Reports', href: '/admin/reports', icon: FileSpreadsheet, adminOnly: true },
-  { label: 'Logs', href: '/admin/logs', icon: ScrollTextLogs, superAdminOnly: true },
-  { label: 'Alert Rules', href: '/admin/alert-rules', icon: BellRing, adminOnly: true },
-  { label: 'Webhooks', href: '/admin/webhooks', icon: Webhook, adminOnly: true },
-  { label: 'Compliance', href: '/admin/compliance', icon: ShieldCheck, adminOnly: true },
-  { label: 'Audit Log', href: '/admin/audit', icon: ScrollText, adminOnly: true },
-  { label: 'AI', href: '/admin/ai', icon: Sparkles },
-  { label: 'Settings', href: '/settings', icon: Settings },
-  { label: 'Tenants', href: '/admin/tenants', icon: Building2, superAdminOnly: true },
+type NavGroup = {
+  label: string
+  items: NavItem[]
+}
+
+// Nav grouped by operator workflow. Six clusters keeps the sidebar
+// scannable at the 25+ item count we're at after Stages 8-17 — flat
+// lists past ~10 entries cease to be navigation, they become noise.
+const navGroups: NavGroup[] = [
+  {
+    label: 'Operate',
+    items: [
+      { label: 'Dashboard', href: '/', icon: BarChart3 },
+      { label: 'Devices', href: '/agents', icon: Server },
+      { label: 'Tickets', href: '/tickets', icon: Ticket },
+      { label: 'Alerts', href: '/alerts', icon: AlertTriangle },
+    ],
+  },
+  {
+    label: 'Manage',
+    items: [
+      { label: 'Patches', href: '/patches', icon: Package },
+      { label: 'Maintenance', href: '/admin/maintenance', icon: CalendarClock, adminOnly: true },
+      { label: 'Software', href: '/admin/software', icon: Boxes, adminOnly: true },
+      { label: 'Groups', href: '/admin/groups', icon: Users, adminOnly: true },
+      { label: 'Customers', href: '/admin/customers', icon: UserCircle, adminOnly: true },
+    ],
+  },
+  {
+    label: 'Network',
+    items: [
+      { label: 'Map', href: '/network', icon: Globe },
+      { label: 'Neighbors', href: '/admin/neighbors', icon: Wifi, adminOnly: true },
+      { label: 'Cert monitors', href: '/admin/cert-monitors', icon: ShieldEllipsis, adminOnly: true },
+      { label: 'SNMP', href: '/admin/snmp', icon: Activity, adminOnly: true },
+    ],
+  },
+  {
+    label: 'Automation',
+    items: [
+      { label: 'Alert rules', href: '/admin/alert-rules', icon: BellRing, adminOnly: true },
+      { label: 'Webhooks', href: '/admin/webhooks', icon: Webhook, adminOnly: true },
+      { label: 'Reports', href: '/admin/reports', icon: FileSpreadsheet, adminOnly: true },
+      { label: 'AI', href: '/admin/ai', icon: Sparkles },
+    ],
+  },
+  {
+    label: 'Audit',
+    items: [
+      { label: 'Audit log', href: '/admin/audit', icon: ScrollText, adminOnly: true },
+      { label: 'Compliance', href: '/admin/compliance', icon: ShieldCheck, adminOnly: true },
+      { label: 'AI cost', href: '/admin/ai/cost', icon: DollarSign, adminOnly: true },
+    ],
+  },
+  {
+    label: 'System',
+    items: [
+      { label: 'SSO', href: '/admin/sso', icon: KeyRound, adminOnly: true },
+      { label: 'Policies', href: '/admin/policies', icon: PolicyIcon, adminOnly: true },
+      { label: 'Settings', href: '/settings', icon: Settings },
+      { label: 'Tenants', href: '/admin/tenants', icon: Building2, superAdminOnly: true },
+      { label: 'Logs', href: '/admin/logs', icon: Terminal, superAdminOnly: true },
+    ],
+  },
 ]
 
 export default function DashboardShell({
@@ -84,7 +123,9 @@ export default function DashboardShell({
   alertCount?: number
 }) {
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [time, setTime] = useState<Date | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const profileRef = useRef<HTMLDivElement | null>(null)
   const pathname = usePathname()
   const { branding } = useBranding()
   const { user, refresh } = useCurrentUser()
@@ -102,12 +143,6 @@ export default function DashboardShell({
     }
   }
 
-  useEffect(() => {
-    setTime(new Date())
-    const timer = setInterval(() => setTime(new Date()), 1000)
-    return () => clearInterval(timer)
-  }, [])
-
   const handleSignOut = async () => {
     try {
       await api.post('/auth/logout')
@@ -120,8 +155,55 @@ export default function DashboardShell({
     window.location.href = '/login'
   }
 
+  // Global ⌘K / Ctrl-K opens the command palette. Single source of nav
+  // truth from anywhere in the app — operators don't need to think about
+  // which page they're on to jump elsewhere.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen((s) => !s)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  useEffect(() => {
+    if (!profileOpen) return
+    const handler = (e: MouseEvent) => {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setProfileOpen(false)
+      }
+    }
+    window.addEventListener('mousedown', handler)
+    return () => window.removeEventListener('mousedown', handler)
+  }, [profileOpen])
+
+  const visibleGroups = navGroups
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((item) => {
+        if (item.superAdminOnly && !isSuperAdmin) return false
+        if (item.adminOnly && user?.role !== 'admin' && !isSuperAdmin) return false
+        return true
+      }),
+    }))
+    .filter((g) => g.items.length > 0)
+
+  const isActive = (href: string) =>
+    pathname === href ||
+    (href !== '/' && pathname.startsWith(href + '/')) ||
+    (href === '/' && pathname === '/')
+
   return (
-    <div className={`min-h-screen bg-[#030308] text-white flex relative ${isImpersonating || user?.tenant_in_grace ? 'pt-9' : ''}`}>
+    <div
+      className={`min-h-screen bg-[#030308] text-white flex relative ${
+        isImpersonating || user?.tenant_in_grace ? 'pt-9' : ''
+      }`}
+    >
+      {/* Super-admin amber hairline. The ONE place amber appears in chrome —
+          announces "you're seeing across all tenants". */}
       {isSuperAdmin && !isImpersonating && (
         <div
           className="fixed top-0 left-0 right-0 h-px bg-amber-500/50 z-50 pointer-events-none"
@@ -158,99 +240,93 @@ export default function DashboardShell({
           </span>
         </div>
       )}
-      {/* Desktop Sidebar */}
+
+      {/* Desktop sidebar */}
       <aside className="hidden md:flex w-60 flex-col border-r border-white/[0.06] bg-[#030308] fixed h-screen z-40">
-        {/* Logo */}
-        <div className="h-16 flex items-center px-5 border-b border-white/[0.06]">
-          <Link href="/" className="flex items-center gap-2.5">
-            <div
-              className="w-8 h-8 rounded-lg flex items-center justify-center"
-              style={{
-                background: `linear-gradient(135deg, var(--brand-primary), var(--brand-secondary))`,
-              }}
-            >
-              <span className="text-white font-bold text-sm">
+        <div className="h-14 flex items-center px-4 border-b border-white/[0.06]">
+          <Link href="/" className="flex items-center gap-2.5 min-w-0">
+            <div className="w-7 h-7 rounded-md bg-gradient-to-br from-cyan-500 to-violet-600 flex items-center justify-center shrink-0">
+              <span className="text-white font-bold text-xs">
                 {branding.company_name.charAt(0).toUpperCase()}
               </span>
             </div>
-            <div>
-              <span
-                className="text-base font-bold bg-clip-text text-transparent"
-                style={{
-                  backgroundImage: `linear-gradient(to right, var(--brand-primary), var(--brand-secondary))`,
-                }}
-              >
+            <div className="min-w-0">
+              <p className="text-[13px] font-semibold text-white truncate leading-tight">
+                {branding.app_name}
+              </p>
+              <p className="text-[10px] text-white/35 truncate leading-tight tracking-wide">
                 {branding.company_name}
-              </span>
-              <p className="text-[10px] text-white/30 -mt-0.5">{branding.app_name}</p>
+              </p>
             </div>
           </Link>
         </div>
 
-        {/* Navigation */}
-        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-          {navItems.filter((item) => {
-            if (item.superAdminOnly && !isSuperAdmin) return false
-            if (item.adminOnly && user?.role !== 'admin' && !isSuperAdmin) return false
-            return true
-          }).map((item) => {
-            const active =
-              pathname === item.href || pathname.startsWith(item.href + '/')
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                  active
-                    ? 'text-cyan-400 bg-cyan-500/5 border-l-2 border-cyan-400 shadow-[0_0_12px_rgba(0,240,255,0.08)]'
-                    : 'text-white/50 hover:text-white hover:bg-white/[0.04]'
-                }`}
-              >
-                <item.icon className="w-4 h-4" />
-                {item.label}
-              </Link>
-            )
-          })}
-        </nav>
-
-        {/* Tenant + user footer */}
-        <div className="px-4 py-3 border-t border-white/[0.06] space-y-3">
-          <div>
-            <p className="text-[10px] uppercase tracking-[0.14em] text-white/30 mb-0.5">
+        {/* Tenant chip — second-most-prominent fixed UI after the brand,
+            because PRODUCT.md says "every screen answers: what tenant am
+            I in." */}
+        <div className="px-3 pt-3 pb-2 border-b border-white/[0.06]">
+          <div className="px-2.5 py-1.5 rounded-md bg-white/[0.03]">
+            <p className="text-[9px] uppercase tracking-[0.18em] text-white/30 leading-none mb-1">
               Tenant
             </p>
             <p
-              className={`text-xs font-medium truncate ${
-                isSuperAdmin ? 'text-amber-300/90' : 'text-white/85'
+              className={`text-xs font-medium truncate leading-tight ${
+                isSuperAdmin ? 'text-amber-300/90' : 'text-white/90'
               }`}
             >
               {isSuperAdmin ? 'All tenants' : user?.tenant_name || '—'}
             </p>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center text-xs font-bold">
+        </div>
+
+        <nav className="flex-1 px-2 py-3 overflow-y-auto">
+          {visibleGroups.map((group) => (
+            <div key={group.label} className="mb-4 last:mb-0">
+              <p className="px-3 mb-1 text-[10px] uppercase tracking-[0.16em] text-white/25 font-medium">
+                {group.label}
+              </p>
+              <div className="space-y-px">
+                {group.items.map((item) => {
+                  const active = isActive(item.href)
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={`flex items-center gap-3 px-3 py-1.5 rounded-md text-[13px] transition-colors ${
+                        active
+                          ? 'bg-white/[0.06] text-white font-medium'
+                          : 'text-white/55 hover:text-white hover:bg-white/[0.03]'
+                      }`}
+                    >
+                      <item.icon
+                        className={`w-3.5 h-3.5 shrink-0 ${active ? 'text-cyan-400' : ''}`}
+                      />
+                      <span className="truncate">{item.label}</span>
+                    </Link>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
+
+        <div className="px-3 py-3 border-t border-white/[0.06]">
+          <div className="flex items-center gap-2.5 px-2">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center text-[11px] font-bold shrink-0">
               {user?.name?.charAt(0).toUpperCase() || '?'}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-white truncate">
+              <p className="text-xs font-medium text-white truncate leading-tight">
                 {user?.name || '—'}
               </p>
-              <p className="text-[10px] text-white/30 truncate capitalize">
+              <p className="text-[10px] text-white/35 truncate capitalize leading-tight">
                 {user?.role?.replace('_', ' ') || '—'}
               </p>
             </div>
-            <button
-              onClick={handleSignOut}
-              className="text-white/30 hover:text-rose-400 transition-colors"
-              title="Sign out"
-            >
-              <LogOut className="w-4 h-4" />
-            </button>
           </div>
         </div>
       </aside>
 
-      {/* Mobile overlay */}
       {mobileOpen && (
         <div
           className="fixed inset-0 bg-black/60 z-40 md:hidden"
@@ -258,108 +334,124 @@ export default function DashboardShell({
         />
       )}
 
-      {/* Mobile Sidebar Drawer */}
       <aside
-        className={`fixed inset-y-0 left-0 w-60 bg-[#0a0a10] border-r border-white/[0.06] z-50 transform transition-transform duration-300 md:hidden ${
+        className={`fixed inset-y-0 left-0 w-64 bg-[#0a0a10] border-r border-white/[0.06] z-50 transform transition-transform duration-200 md:hidden flex flex-col ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="h-16 flex items-center justify-between px-5 border-b border-white/[0.06]">
-          <span className="text-base font-bold text-white">{branding.app_name}</span>
-          <button
-            onClick={() => setMobileOpen(false)}
-            className="text-white/40 hover:text-white"
-          >
+        <div className="h-14 flex items-center justify-between px-4 border-b border-white/[0.06]">
+          <span className="text-sm font-semibold text-white">{branding.app_name}</span>
+          <button onClick={() => setMobileOpen(false)} className="text-white/40 hover:text-white">
             <X className="w-5 h-5" />
           </button>
         </div>
-        <nav className="p-3 space-y-1">
-          {navItems.filter((item) => {
-            if (item.superAdminOnly && !isSuperAdmin) return false
-            if (item.adminOnly && user?.role !== 'admin' && !isSuperAdmin) return false
-            return true
-          }).map((item) => {
-            const active =
-              pathname === item.href || pathname.startsWith(item.href + '/')
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                onClick={() => setMobileOpen(false)}
-                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                  active
-                    ? 'text-cyan-400 bg-cyan-500/5 border-l-2 border-cyan-400'
-                    : 'text-white/50 hover:text-white hover:bg-white/[0.04]'
-                }`}
-              >
-                <item.icon className="w-4 h-4" />
-                {item.label}
-              </Link>
-            )
-          })}
+        <nav className="flex-1 px-2 py-3 overflow-y-auto">
+          {visibleGroups.map((group) => (
+            <div key={group.label} className="mb-4">
+              <p className="px-3 mb-1 text-[10px] uppercase tracking-[0.16em] text-white/25 font-medium">
+                {group.label}
+              </p>
+              <div className="space-y-px">
+                {group.items.map((item) => {
+                  const active = isActive(item.href)
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      onClick={() => setMobileOpen(false)}
+                      className={`flex items-center gap-3 px-3 py-1.5 rounded-md text-[13px] transition-colors ${
+                        active
+                          ? 'bg-white/[0.06] text-white font-medium'
+                          : 'text-white/55 hover:text-white'
+                      }`}
+                    >
+                      <item.icon className={`w-3.5 h-3.5 ${active ? 'text-cyan-400' : ''}`} />
+                      {item.label}
+                    </Link>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
         </nav>
       </aside>
 
-      {/* Main Content Area */}
       <div className="flex-1 md:ml-60 flex flex-col min-h-screen">
-        {/* Top Bar */}
-        <header className="h-16 border-b border-white/[0.06] bg-[#030308]/80 backdrop-blur-xl sticky top-0 z-30 flex items-center justify-between px-6">
-          <div className="flex items-center gap-4">
+        <header className="h-14 border-b border-white/[0.06] bg-[#030308]/80 backdrop-blur-xl sticky top-0 z-30 flex items-center justify-between px-4 md:px-6">
+          <div className="flex items-center gap-3 min-w-0">
             <button
               className="md:hidden text-white/50 hover:text-white"
               onClick={() => setMobileOpen(true)}
+              aria-label="Open menu"
             >
               <Menu className="w-5 h-5" />
             </button>
-            <div className="relative hidden sm:block">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
-              <input
-                type="text"
-                placeholder="Search..."
-                className="bg-white/[0.04] border border-white/[0.06] rounded-lg pl-9 pr-3 py-1.5 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-cyan-500/40 w-64 transition-colors"
-              />
-            </div>
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              className="group flex items-center gap-2 bg-white/[0.03] border border-white/[0.06] hover:border-white/[0.12] rounded-md pl-2.5 pr-1.5 py-1.5 text-xs text-white/40 hover:text-white/60 transition-colors min-w-[180px] sm:min-w-[280px]"
+            >
+              <Search className="w-3.5 h-3.5" />
+              <span className="flex-1 text-left">Search devices, tickets…</span>
+              <kbd className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/[0.06] text-white/45 group-hover:text-white/70">
+                ⌘K
+              </kbd>
+            </button>
           </div>
 
-          <div className="flex items-center gap-4">
-            {time && (
-              <div className="hidden lg:block text-right">
-                <div className="text-sm font-mono text-white/80">
-                  {time.toLocaleTimeString('en-US', {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit',
-                  })}
-                </div>
-                <div className="text-[10px] text-white/30">
-                  {time.toLocaleDateString('en-US', {
-                    weekday: 'short',
-                    month: 'short',
-                    day: 'numeric',
-                  })}
-                </div>
-              </div>
-            )}
-
-            <ThemeToggle />
-
-            <button className="relative text-white/40 hover:text-white transition-colors">
-              <Bell className="w-5 h-5" />
+          <div className="flex items-center gap-2">
+            <Link
+              href="/alerts"
+              className="relative text-white/40 hover:text-white p-1.5 transition-colors"
+              aria-label={`${alertCount} alerts`}
+            >
+              <Bell className="w-4 h-4" />
               {alertCount > 0 && (
-                <span className="absolute -top-1 -right-1 w-4 h-4 bg-rose-500 rounded-full text-[10px] flex items-center justify-center animate-pulse">
-                  {alertCount}
+                <span className="absolute top-0 right-0 min-w-[14px] h-[14px] bg-rose-500 rounded-full text-[9px] font-medium flex items-center justify-center px-1">
+                  {alertCount > 9 ? '9+' : alertCount}
                 </span>
               )}
-            </button>
+            </Link>
 
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center text-xs font-bold">
-              A
+            <div className="relative" ref={profileRef}>
+              <button
+                onClick={() => setProfileOpen((s) => !s)}
+                className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-white/[0.04] transition-colors"
+              >
+                <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center text-[10px] font-bold">
+                  {user?.name?.charAt(0).toUpperCase() || '?'}
+                </div>
+                <ChevronDown className="w-3 h-3 text-white/40" />
+              </button>
+              {profileOpen && (
+                <div className="absolute right-0 top-full mt-1 w-56 bg-[#0a0a10] border border-white/[0.08] rounded-lg shadow-2xl py-1 text-sm">
+                  <div className="px-3 py-2 border-b border-white/[0.06]">
+                    <p className="text-white text-xs font-medium truncate">{user?.name || '—'}</p>
+                    <p className="text-white/40 text-[11px] truncate">{user?.email || ''}</p>
+                  </div>
+                  <Link
+                    href="/settings"
+                    onClick={() => setProfileOpen(false)}
+                    className="flex items-center gap-2 px-3 py-2 text-white/70 hover:text-white hover:bg-white/[0.04] text-xs"
+                  >
+                    <Settings className="w-3.5 h-3.5" /> Settings
+                  </Link>
+                  <button
+                    onClick={handleSignOut}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-rose-300 hover:bg-rose-500/10 text-xs"
+                  >
+                    <LogOut className="w-3.5 h-3.5" /> Sign out
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </header>
 
-        <main className="flex-1 p-6">{children}</main>
+        <main className="flex-1 px-4 md:px-6 py-6">{children}</main>
       </div>
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   )
 }

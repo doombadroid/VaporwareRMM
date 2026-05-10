@@ -1,68 +1,153 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { devices as devicesApi, type Device } from '@/lib/api'
 import AuthGuard from '@/components/AuthGuard'
-import { ThemeToggle } from '@/components/ThemeToggle'
+import DashboardShell from '@/components/layout/DashboardShell'
+import { PageHeader } from '@/components/ui/page'
+import { DataTable, FilterBar, FilterChip, type Column } from '@/components/ui/data-table'
+import { StatusDot, statusTone, Code } from '@/components/ui/status'
+import { Button } from '@/components/ui/button'
+import { Download, Search } from 'lucide-react'
+
+type StatusFilter = 'all' | 'online' | 'offline' | 'warning'
 
 export default function AgentsPage() {
-  const [deviceList, setDeviceList] = useState<Device[]>([])
+  const [devices, setDevices] = useState<Device[]>([])
   const [loading, setLoading] = useState(true)
+  const [filter, setFilter] = useState<StatusFilter>('all')
+  const [query, setQuery] = useState('')
 
   useEffect(() => {
-    devicesApi.getAll()
-      .then(setDeviceList)
-      .catch(() => toast.error('Failed to load agents'))
+    devicesApi
+      .getAll()
+      .then(setDevices)
+      .catch(() => toast.error('Failed to load devices'))
       .finally(() => setLoading(false))
   }, [])
 
+  const counts = useMemo(() => {
+    const total = devices.length
+    const online = devices.filter((d) => d.status === 'online').length
+    const offline = devices.filter((d) => d.status === 'offline').length
+    const warning = devices.filter((d) => d.status === 'warning').length
+    return { total, online, offline, warning }
+  }, [devices])
+
+  const visible = useMemo(() => {
+    let rows = devices
+    if (filter !== 'all') rows = rows.filter((d) => d.status === filter)
+    if (query) {
+      const q = query.toLowerCase()
+      rows = rows.filter(
+        (d) =>
+          (d.hostname || '').toLowerCase().includes(q) ||
+          (d.ip_address || '').toLowerCase().includes(q) ||
+          (d.os_name || '').toLowerCase().includes(q),
+      )
+    }
+    return rows
+  }, [devices, filter, query])
+
+  const handleExport = async () => {
+    try {
+      const blob = await devicesApi.exportCSV()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'devices.csv'
+      a.click()
+      window.URL.revokeObjectURL(url)
+      toast.success('Exported devices.csv')
+    } catch {
+      toast.error('Export failed')
+    }
+  }
+
+  const columns: Column<Device>[] = [
+    {
+      key: 'hostname',
+      header: 'Hostname',
+      primary: true,
+      render: (d) => (
+        <Link
+          href={`/devices/${d.id}`}
+          className="text-white/90 hover:text-cyan-400 font-medium transition-colors"
+        >
+          {d.hostname || d.id.slice(0, 8)}
+        </Link>
+      ),
+    },
+    {
+      key: 'status',
+      header: 'Status',
+      render: (d) => (
+        <span className="inline-flex items-center gap-1.5 text-[12px] text-white/65">
+          <StatusDot tone={statusTone(d.status)} pulse={d.status === 'online'} />
+          {d.status}
+        </span>
+      ),
+    },
+    { key: 'os', header: 'OS', render: (d) => <span className="text-white/55 text-[12px]">{d.os_name} {d.os_version}</span> },
+    { key: 'ip', header: 'IP', render: (d) => <Code>{d.ip_address || '—'}</Code> },
+    {
+      key: 'last',
+      header: 'Last seen',
+      render: (d) => (
+        <span className="text-white/40 text-[11.5px]">
+          {d.last_seen ? new Date(d.last_seen * 1000).toLocaleString() : 'never'}
+        </span>
+      ),
+    },
+  ]
+
   return (
     <AuthGuard>
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white">
-        <header className="border-b border-slate-800/50 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-50">
-          <div className="container mx-auto px-6 py-3">
-            <div className="flex items-center justify-between">
-              <Link href="/" className="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-                vaporRMM
-              </Link>
-              <div className="flex items-center gap-3">
-                <ThemeToggle />
-                <Link href="/">
-                  <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">← Dashboard</Button>
-                </Link>
-              </div>
-            </div>
-          </div>
-        </header>
-        <main className="container mx-auto px-6 py-8">
-          <h1 className="text-2xl font-bold mb-6">Agents</h1>
-          {loading ? (
-            <p className="text-slate-400">Loading...</p>
-          ) : (
-            <div className="grid gap-4">
-              {deviceList.map(d => (
-                <Card key={d.id} className="bg-slate-900/60 border-slate-800/50">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-base">{d.hostname}</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="flex items-center gap-4 text-sm text-slate-400">
-                      <span className={`w-2 h-2 rounded-full ${d.status === 'online' ? 'bg-green-500' : 'bg-red-500'}`} />
-                      <span>{d.status}</span>
-                      <span>{d.os_name} {d.os_version}</span>
-                      <span>{d.ip_address}</span>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
+      <DashboardShell>
+        <PageHeader
+          eyebrow="Operate"
+          title="Devices"
+          description={`${counts.total} reporting · ${counts.online} online, ${counts.offline} offline.`}
+          actions={
+            <Button variant="outline" size="sm" onClick={handleExport}>
+              <Download className="w-3.5 h-3.5 mr-1.5" />
+              Export CSV
+            </Button>
+          }
+          separator={false}
+        />
+
+        <FilterBar>
+          <FilterChip label="All" active={filter === 'all'} onClick={() => setFilter('all')} count={counts.total} />
+          <FilterChip label="Online" active={filter === 'online'} onClick={() => setFilter('online')} count={counts.online} />
+          <FilterChip label="Offline" active={filter === 'offline'} onClick={() => setFilter('offline')} count={counts.offline} />
+          {counts.warning > 0 && (
+            <FilterChip label="Warning" active={filter === 'warning'} onClick={() => setFilter('warning')} count={counts.warning} />
           )}
-        </main>
-      </div>
+          <div className="ml-auto relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/35" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Filter hostname, IP, OS"
+              className="bg-white/[0.04] border border-white/[0.08] rounded-md pl-8 pr-3 py-1 text-[12px] text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2] w-64"
+            />
+          </div>
+        </FilterBar>
+
+        {loading ? (
+          <p className="text-[13px] text-white/45">Loading devices…</p>
+        ) : (
+          <DataTable
+            rows={visible}
+            columns={columns}
+            rowKey={(d) => d.id}
+            empty={query || filter !== 'all' ? 'No matches.' : 'No devices reporting yet.'}
+          />
+        )}
+      </DashboardShell>
     </AuthGuard>
   )
 }

@@ -4,10 +4,12 @@ import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { toast } from 'sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
+import { PageHeader, Section, EmptyState } from '@/components/ui/page'
+import { Pill, severityTone, statusTone, Code } from '@/components/ui/status'
+import { ConfirmDialog } from '@/components/ui/sheet'
 import { useCurrentUser } from '@/components/CurrentUserProvider'
 import {
   ticketsApi,
@@ -22,23 +24,9 @@ import { ArrowLeft, Send, Lock, Unlock, Clock, Trash2 } from 'lucide-react'
 
 const STATUS_OPTIONS: Ticket['status'][] = ['open', 'in_progress', 'pending', 'resolved', 'closed']
 const PRIORITY_OPTIONS: Ticket['priority'][] = ['low', 'medium', 'high', 'critical']
-
-const priorityClass: Record<string, string> = {
-  critical: 'bg-red-500/15 border-red-500/40 text-red-300',
-  high: 'bg-orange-500/15 border-orange-500/40 text-orange-300',
-  medium: 'bg-amber-500/15 border-amber-500/40 text-amber-300',
-  low: 'bg-slate-500/15 border-slate-500/40 text-slate-300',
-}
-
-const statusClass: Record<string, string> = {
-  open: 'bg-blue-500/15 border-blue-500/40 text-blue-300',
-  in_progress: 'bg-purple-500/15 border-purple-500/40 text-purple-300',
-  pending: 'bg-amber-500/15 border-amber-500/40 text-amber-300',
-  resolved: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300',
-  closed: 'bg-slate-500/15 border-slate-500/40 text-slate-300',
-}
-
 const MAX_COMMENT_BYTES = 32 * 1024
+
+const inputCls = 'bg-white/[0.04] border border-white/[0.08] rounded-md px-2.5 py-1 text-[12.5px] text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2]'
 
 export default function TicketDetailPage() {
   const params = useParams()
@@ -58,14 +46,12 @@ export default function TicketDetailPage() {
   const [entries, setEntries] = useState<TimeEntry[]>([])
   const [timeForm, setTimeForm] = useState({ minutes: 30, note: '', billable: true })
   const [loggingTime, setLoggingTime] = useState(false)
+  const [confirmEntryDelete, setConfirmEntryDelete] = useState<string | null>(null)
 
   const loadAll = async () => {
     setLoading(true)
     try {
-      const [t, c] = await Promise.all([
-        ticketsApi.get(ticketId),
-        ticketsApi.listComments(ticketId),
-      ])
+      const [t, c] = await Promise.all([ticketsApi.get(ticketId), ticketsApi.listComments(ticketId)])
       setTicket(t)
       setComments(c)
     } catch {
@@ -95,7 +81,7 @@ export default function TicketDetailPage() {
       setTicket({ ...ticket, ...patch })
       toast.success('Updated')
     } catch {
-      toast.error('Update failed (admin only?)')
+      toast.error('Update failed')
     } finally {
       setSavingField(null)
     }
@@ -125,10 +111,10 @@ export default function TicketDetailPage() {
   }
 
   const removeEntry = async (id: string) => {
-    if (!confirm('Delete this time entry?')) return
     try {
       await timeEntriesApi.remove(id)
-      setEntries((prev) => prev.filter((e) => e.id !== id))
+      setEntries((p) => p.filter((e) => e.id !== id))
+      setConfirmEntryDelete(null)
     } catch {
       toast.error('Failed to delete')
     }
@@ -161,7 +147,7 @@ export default function TicketDetailPage() {
     return (
       <AuthGuard>
         <DashboardShell>
-          <p className="text-center text-slate-400 py-12">Loading…</p>
+          <p className="text-[13px] text-white/45">Loading ticket…</p>
         </DashboardShell>
       </AuthGuard>
     )
@@ -171,239 +157,263 @@ export default function TicketDetailPage() {
     return (
       <AuthGuard>
         <DashboardShell>
-          <div className="text-center py-12">
-            <p className="text-slate-400 mb-4">Ticket not found</p>
-            <Button onClick={() => router.push('/tickets')}>
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back to Tickets
-            </Button>
-          </div>
+          <EmptyState
+            title="Ticket not found."
+            action={
+              <Button size="sm" onClick={() => router.push('/tickets')}>
+                <ArrowLeft className="w-3.5 h-3.5 mr-1.5" />
+                Back to tickets
+              </Button>
+            }
+          />
         </DashboardShell>
       </AuthGuard>
     )
   }
 
-  const userById = (id: string) => users.find((u) => u.id === id)?.name || users.find((u) => u.id === id)?.email || id.slice(0, 8)
+  const userById = (id: string) =>
+    users.find((u) => u.id === id)?.name || users.find((u) => u.id === id)?.email || id.slice(0, 8)
 
   return (
     <AuthGuard>
       <DashboardShell>
-        <div className="space-y-6 max-w-4xl">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <Link href="/tickets" className="text-xs text-slate-400 hover:text-white">← Tickets</Link>
-              <h1 className="text-2xl font-bold mt-1 truncate">{ticket.title}</h1>
-              <div className="flex items-center gap-2 flex-wrap mt-2">
-                <span className={`px-2 py-0.5 rounded border text-xs ${priorityClass[ticket.priority] ?? priorityClass.medium}`}>
-                  {ticket.priority}
+        <PageHeader
+          breadcrumbs={[
+            { href: '/tickets', label: 'Tickets' },
+            { label: ticket.title },
+          ]}
+          title={ticket.title}
+          description={`Opened ${new Date(ticket.created_at * 1000).toLocaleString()}`}
+          actions={
+            <div className="flex items-center gap-1.5">
+              <Pill tone={severityTone(ticket.priority)}>{ticket.priority}</Pill>
+              <Pill tone={statusTone(ticket.status)}>{ticket.status}</Pill>
+            </div>
+          }
+        />
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-6">
+          <Section title="Description" className="lg:col-span-2 mb-0">
+            <div className="border border-white/[0.06] rounded-lg bg-white/[0.01] px-4 py-3">
+              <p className="text-[13px] text-white/85 whitespace-pre-wrap leading-relaxed">
+                {ticket.description || <span className="text-white/35 italic">no description</span>}
+              </p>
+            </div>
+          </Section>
+
+          <Section title="Properties" className="mb-0">
+            <div className="border border-white/[0.06] rounded-lg bg-white/[0.01] divide-y divide-white/[0.04]">
+              <div className="px-3 py-2.5">
+                <p className="text-[10.5px] uppercase tracking-[0.12em] text-white/40 mb-1.5">Status</p>
+                <select
+                  value={ticket.status}
+                  onChange={(e) => updateField({ status: e.target.value as Ticket['status'] })}
+                  disabled={!isAdmin || savingField === 'status'}
+                  className={`w-full ${inputCls} disabled:opacity-50`}
+                >
+                  {STATUS_OPTIONS.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="px-3 py-2.5">
+                <p className="text-[10.5px] uppercase tracking-[0.12em] text-white/40 mb-1.5">Priority</p>
+                <select
+                  value={ticket.priority}
+                  onChange={(e) => updateField({ priority: e.target.value as Ticket['priority'] })}
+                  disabled={!isAdmin || savingField === 'priority'}
+                  className={`w-full ${inputCls} disabled:opacity-50`}
+                >
+                  {PRIORITY_OPTIONS.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+              {isAdmin && (
+                <div className="px-3 py-2.5">
+                  <p className="text-[10.5px] uppercase tracking-[0.12em] text-white/40 mb-1.5">Assigned to</p>
+                  <select
+                    value={ticket.assigned_to || ''}
+                    onChange={(e) => updateField({ assigned_to: e.target.value })}
+                    disabled={savingField === 'assigned_to'}
+                    className={`w-full ${inputCls} disabled:opacity-50`}
+                  >
+                    <option value="">unassigned</option>
+                    {users.map((u) => (
+                      <option key={u.id} value={u.id}>{u.name || u.email}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {ticket.device_id && (
+                <div className="px-3 py-2.5">
+                  <p className="text-[10.5px] uppercase tracking-[0.12em] text-white/40 mb-1.5">Device</p>
+                  <Link
+                    href={`/devices/${ticket.device_id}`}
+                    className="text-[12.5px] text-cyan-400 hover:text-cyan-300 font-mono"
+                  >
+                    {ticket.device_name || ticket.device_id.slice(0, 8)}
+                  </Link>
+                </div>
+              )}
+              <div className="px-3 py-2.5">
+                <p className="text-[10.5px] uppercase tracking-[0.12em] text-white/40 mb-1.5">Category</p>
+                <Code>{ticket.category}</Code>
+              </div>
+            </div>
+          </Section>
+        </div>
+
+        {isAdmin && (
+          <Section
+            title="Time tracking"
+            description={
+              `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m logged` +
+              (billableMinutes !== totalMinutes
+                ? ` · ${Math.floor(billableMinutes / 60)}h ${billableMinutes % 60}m billable`
+                : '')
+            }
+          >
+            <div className="border border-white/[0.06] rounded-lg bg-white/[0.01] px-4 py-3 space-y-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Clock className="w-3.5 h-3.5 text-white/45" />
+                <input
+                  type="number"
+                  min={1}
+                  max={1440}
+                  value={timeForm.minutes}
+                  onChange={(e) => setTimeForm({ ...timeForm, minutes: parseInt(e.target.value) || 0 })}
+                  className={`w-20 ${inputCls}`}
+                />
+                <span className="text-[11.5px] text-white/45">min</span>
+                <input
+                  type="text"
+                  placeholder="note (optional)"
+                  value={timeForm.note}
+                  onChange={(e) => setTimeForm({ ...timeForm, note: e.target.value })}
+                  maxLength={1024}
+                  className={`flex-1 min-w-[120px] ${inputCls}`}
+                />
+                <label className="flex items-center gap-1.5 text-[11.5px] text-white/55 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={timeForm.billable}
+                    onChange={(e) => setTimeForm({ ...timeForm, billable: e.target.checked })}
+                    className="rounded bg-white/[0.04] border-white/[0.12]"
+                  />
+                  billable
+                </label>
+                <Button size="sm" onClick={logTime} disabled={loggingTime}>
+                  {loggingTime ? 'Saving…' : 'Log'}
+                </Button>
+              </div>
+              {entries.length > 0 && (
+                <ul className="divide-y divide-white/[0.04] -mx-4">
+                  {entries.map((e) => (
+                    <li key={e.id} className="px-4 py-2 flex items-center gap-3 text-[12px]">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-white/85">
+                          {Math.floor(e.minutes / 60) > 0 && `${Math.floor(e.minutes / 60)}h `}
+                          {e.minutes % 60}m
+                          {!e.billable && <span className="text-white/35"> · non-billable</span>}
+                          {e.note && <span className="text-white/55"> — {e.note}</span>}
+                        </p>
+                        <p className="text-[11px] text-white/35 mt-0.5">
+                          {userById(e.user_id)} · {new Date(e.started_at * 1000).toLocaleString()}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => setConfirmEntryDelete(e.id)}
+                        className="text-white/30 hover:text-rose-300 p-1"
+                        aria-label="Delete entry"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Section>
+        )}
+
+        <Section
+          title="Activity"
+          description={`${comments.length} ${comments.length === 1 ? 'comment' : 'comments'}`}
+          className="mb-0"
+        >
+          <div className="space-y-3">
+            {comments.length === 0 ? (
+              <EmptyState title="No comments yet." />
+            ) : (
+              <ul className="space-y-2">
+                {comments.map((c) => (
+                  <li
+                    key={c.id}
+                    className={`px-4 py-3 rounded-lg border ${
+                      c.internal
+                        ? 'border-amber-500/15 bg-amber-500/[0.03]'
+                        : 'border-white/[0.06] bg-white/[0.01]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 text-[11.5px] text-white/45">
+                      <span className="font-medium text-white/85">{userById(c.user_id)}</span>
+                      {c.internal && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-amber-300/85 bg-amber-500/10 border border-amber-500/20">
+                          <Lock className="w-2.5 h-2.5" />
+                          internal
+                        </span>
+                      )}
+                      <span className="text-white/30">{new Date(c.created_at * 1000).toLocaleString()}</span>
+                    </div>
+                    <p className="text-[13px] text-white/85 mt-2 whitespace-pre-wrap leading-relaxed">{c.body}</p>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div className="border-t border-white/[0.06] pt-4 space-y-2">
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="Add a comment…"
+                rows={3}
+                maxLength={MAX_COMMENT_BYTES}
+                className="w-full bg-white/[0.04] border border-white/[0.08] rounded-md px-3 py-2 text-[13px] text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2]"
+              />
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                {isAdmin && (
+                  <label className="flex items-center gap-1.5 text-[11.5px] text-white/55 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={draftInternal}
+                      onChange={(e) => setDraftInternal(e.target.checked)}
+                      className="rounded bg-white/[0.04] border-white/[0.12]"
+                    />
+                    {draftInternal ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                    Internal note (staff only)
+                  </label>
+                )}
+                <span className="text-[11px] text-white/30 ml-auto tabular-nums">
+                  {draft.length} / {MAX_COMMENT_BYTES}
                 </span>
-                <span className={`px-2 py-0.5 rounded border text-xs ${statusClass[ticket.status] ?? statusClass.open}`}>
-                  {ticket.status}
-                </span>
-                <span className="text-xs text-slate-500">
-                  opened {new Date(ticket.created_at * 1000).toLocaleString()}
-                </span>
+                <Button size="sm" onClick={post} disabled={posting || !draft.trim()}>
+                  <Send className="w-3.5 h-3.5 mr-1.5" />
+                  {posting ? 'Posting…' : 'Post'}
+                </Button>
               </div>
             </div>
           </div>
+        </Section>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <Card className="lg:col-span-2 bg-slate-900/60 border-slate-800/50">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium text-slate-300">Description</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-slate-300 whitespace-pre-wrap">
-                  {ticket.description || <span className="text-slate-500 italic">no description</span>}
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm font-medium text-slate-300">Properties</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <div>
-                  <p className="text-xs text-slate-400 mb-1">Status</p>
-                  <select
-                    value={ticket.status}
-                    onChange={(e) => updateField({ status: e.target.value as Ticket['status'] })}
-                    disabled={!isAdmin || savingField === 'status'}
-                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-1 text-xs disabled:opacity-50"
-                  >
-                    {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400 mb-1">Priority</p>
-                  <select
-                    value={ticket.priority}
-                    onChange={(e) => updateField({ priority: e.target.value as Ticket['priority'] })}
-                    disabled={!isAdmin || savingField === 'priority'}
-                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-1 text-xs disabled:opacity-50"
-                  >
-                    {PRIORITY_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-                {isAdmin && (
-                  <div>
-                    <p className="text-xs text-slate-400 mb-1">Assigned to</p>
-                    <select
-                      value={ticket.assigned_to || ''}
-                      onChange={(e) => updateField({ assigned_to: e.target.value })}
-                      disabled={savingField === 'assigned_to'}
-                      className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-1 text-xs disabled:opacity-50"
-                    >
-                      <option value="">unassigned</option>
-                      {users.map((u) => <option key={u.id} value={u.id}>{u.name || u.email}</option>)}
-                    </select>
-                  </div>
-                )}
-                {ticket.device_id && (
-                  <div>
-                    <p className="text-xs text-slate-400 mb-1">Device</p>
-                    <Link href={`/devices/${ticket.device_id}`} className="text-xs text-blue-400 hover:underline font-mono">
-                      {ticket.device_name || ticket.device_id.slice(0, 8)}
-                    </Link>
-                  </div>
-                )}
-                <div>
-                  <p className="text-xs text-slate-400 mb-1">Category</p>
-                  <p className="text-xs text-slate-300">{ticket.category}</p>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-
-          {isAdmin && (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardHeader className="pb-3 flex flex-row items-center justify-between">
-                <CardTitle className="text-sm font-medium text-slate-300 flex items-center gap-2">
-                  <Clock className="w-4 h-4" />
-                  Time tracking
-                </CardTitle>
-                <span className="text-xs text-slate-500">
-                  {Math.floor(totalMinutes / 60)}h {totalMinutes % 60}m logged
-                  {billableMinutes !== totalMinutes && <> · {Math.floor(billableMinutes / 60)}h {billableMinutes % 60}m billable</>}
-                </span>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <input
-                    type="number"
-                    min={1}
-                    max={1440}
-                    value={timeForm.minutes}
-                    onChange={(e) => setTimeForm({ ...timeForm, minutes: parseInt(e.target.value) || 0 })}
-                    className="w-20 bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-1.5 text-sm"
-                  />
-                  <span className="text-xs text-slate-400">min</span>
-                  <input
-                    type="text"
-                    placeholder="note (optional)"
-                    value={timeForm.note}
-                    onChange={(e) => setTimeForm({ ...timeForm, note: e.target.value })}
-                    maxLength={1024}
-                    className="flex-1 min-w-[120px] bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-1.5 text-sm"
-                  />
-                  <label className="flex items-center gap-1 text-xs text-slate-400 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={timeForm.billable}
-                      onChange={(e) => setTimeForm({ ...timeForm, billable: e.target.checked })}
-                      className="rounded border-slate-600 bg-slate-800"
-                    />
-                    billable
-                  </label>
-                  <Button size="sm" onClick={logTime} disabled={loggingTime}>
-                    {loggingTime ? 'Saving…' : 'Log'}
-                  </Button>
-                </div>
-                {entries.length > 0 && (
-                  <div className="divide-y divide-slate-800/50">
-                    {entries.map((e) => (
-                      <div key={e.id} className="py-2 flex items-center justify-between text-xs">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-slate-200">
-                            {Math.floor(e.minutes / 60) > 0 && `${Math.floor(e.minutes / 60)}h `}{e.minutes % 60}m
-                            {!e.billable && <span className="text-slate-500"> · non-billable</span>}
-                            {e.note && <span className="text-slate-400"> — {e.note}</span>}
-                          </p>
-                          <p className="text-slate-500">{userById(e.user_id)} · {new Date(e.started_at * 1000).toLocaleString()}</p>
-                        </div>
-                        <button onClick={() => removeEntry(e.id)} className="text-rose-400 hover:text-rose-300 p-1">
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-          <Card className="bg-slate-900/60 border-slate-800/50">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-slate-300">
-                Activity ({comments.length} comment{comments.length === 1 ? '' : 's'})
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {comments.length === 0 ? (
-                <p className="text-sm text-slate-500 text-center py-6">No comments yet.</p>
-              ) : (
-                <div className="space-y-3">
-                  {comments.map((c) => (
-                    <div key={c.id} className={`p-3 rounded-lg border ${c.internal ? 'border-amber-500/20 bg-amber-500/5' : 'border-slate-800/50 bg-slate-800/30'}`}>
-                      <div className="flex items-center gap-2 text-xs text-slate-400">
-                        <span className="font-medium text-slate-300">{userById(c.user_id)}</span>
-                        {c.internal && (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300">
-                            <Lock className="w-3 h-3" />
-                            internal
-                          </span>
-                        )}
-                        <span className="text-slate-500">{new Date(c.created_at * 1000).toLocaleString()}</span>
-                      </div>
-                      <p className="text-sm text-slate-200 mt-2 whitespace-pre-wrap">{c.body}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="border-t border-slate-800/50 pt-4 space-y-2">
-                <textarea
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  placeholder="Add a comment…"
-                  rows={3}
-                  maxLength={MAX_COMMENT_BYTES}
-                  className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                />
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  {isAdmin && (
-                    <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={draftInternal}
-                        onChange={(e) => setDraftInternal(e.target.checked)}
-                        className="rounded border-slate-600 bg-slate-800"
-                      />
-                      {draftInternal ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
-                      Internal note (staff only)
-                    </label>
-                  )}
-                  <span className="text-xs text-slate-500 ml-auto">{draft.length} / {MAX_COMMENT_BYTES}</span>
-                  <Button onClick={post} disabled={posting || !draft.trim()}>
-                    <Send className="w-4 h-4 mr-1" />
-                    {posting ? 'Posting…' : 'Post'}
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+        <ConfirmDialog
+          open={!!confirmEntryDelete}
+          onClose={() => setConfirmEntryDelete(null)}
+          onConfirm={() => confirmEntryDelete && void removeEntry(confirmEntryDelete)}
+          title="Delete time entry?"
+          description="The entry is removed from this ticket's billable record."
+          confirmLabel="Delete"
+        />
       </DashboardShell>
     </AuthGuard>
   )

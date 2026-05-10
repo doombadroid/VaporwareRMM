@@ -2,20 +2,27 @@
 
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
+import { PageHeader, EmptyState } from '@/components/ui/page'
+import { Pill, severityTone, Code } from '@/components/ui/status'
+import { Sheet, ConfirmDialog } from '@/components/ui/sheet'
+import { Button } from '@/components/ui/button'
+import { Plus } from 'lucide-react'
 import { alertRulesApi, type AlertRule } from '@/lib/api'
 
 const KNOWN_EVENTS = ['device.offline', 'device.online', 'cpu.high', 'memory.high', 'disk.full', 'security', 'custom']
 const SEVERITY_OPTIONS = ['low', 'medium', 'high', 'critical']
+
+const inputCls = 'bg-white/[0.04] border border-white/[0.08] rounded-md px-3 py-1.5 text-[13px] text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2]'
+const labelCls = 'block text-[11px] uppercase tracking-[0.12em] text-white/40 mb-1.5'
 
 export default function AlertRulesPage() {
   const [rules, setRules] = useState<AlertRule[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<AlertRule | null>(null)
   const [form, setForm] = useState({
     name: '',
     event_type: 'device.offline',
@@ -29,13 +36,14 @@ export default function AlertRulesPage() {
     try {
       setRules(await alertRulesApi.list())
     } catch {
-      toast.error('Failed to load alert rules (admin only)')
+      toast.error('Failed to load')
     } finally {
       setLoading(false)
     }
   }
-
-  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    void load()
+  }, [])
 
   const create = async () => {
     if (!form.name) {
@@ -50,155 +58,162 @@ export default function AlertRulesPage() {
       setShowCreate(false)
       await load()
     } catch {
-      toast.error('Failed to create rule')
+      toast.error('Failed to create')
     } finally {
       setCreating(false)
     }
   }
 
-  const remove = async (id: string) => {
-    if (!confirm('Delete this rule?')) return
+  const remove = async (r: AlertRule) => {
     try {
-      await alertRulesApi.remove(id)
-      toast.success('Rule deleted')
-      setRules((prev) => prev.filter((r) => r.id !== id))
+      await alertRulesApi.remove(r.id)
+      setRules((p) => p.filter((x) => x.id !== r.id))
+      setConfirmDelete(null)
     } catch {
-      toast.error('Failed to delete rule')
+      toast.error('Failed to delete')
     }
   }
 
   return (
     <AuthGuard>
       <DashboardShell>
-        <div className="max-w-4xl space-y-6">
-          <div className="flex items-center justify-between mb-6">
-            <h1 className="text-2xl font-bold">Alert Rules</h1>
-            <Button onClick={() => setShowCreate((s) => !s)}>
-              {showCreate ? 'Cancel' : 'New rule'}
+        <PageHeader
+          eyebrow="Automation"
+          title="Alert rules"
+          description="Translate events into emails, webhooks, and ticket creation."
+          actions={
+            <Button size="sm" onClick={() => setShowCreate(true)}>
+              <Plus className="w-3.5 h-3.5 mr-1.5" />
+              New rule
             </Button>
-          </div>
+          }
+        />
 
-          {showCreate && (
-            <Card className="bg-slate-900/60 border-slate-800/50 mb-6">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base">Create rule</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Name</label>
-                  <input
-                    type="text"
-                    value={form.name}
-                    onChange={(e) => setForm({ ...form, name: e.target.value })}
-                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white"
-                    placeholder="e.g. Critical CPU on prod fleet"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-slate-400 mb-1">Event type</label>
-                    <select
-                      value={form.event_type}
-                      onChange={(e) => setForm({ ...form, event_type: e.target.value })}
-                      className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white"
-                    >
-                      {KNOWN_EVENTS.map((ev) => <option key={ev} value={ev}>{ev}</option>)}
-                    </select>
+        {loading ? (
+          <p className="text-[13px] text-white/45">Loading…</p>
+        ) : rules.length === 0 ? (
+          <EmptyState
+            title="No alert rules configured."
+            hint="Create one to wire alerts to email or a webhook."
+            action={
+              <Button size="sm" onClick={() => setShowCreate(true)}>
+                Create first rule
+              </Button>
+            }
+          />
+        ) : (
+          <ul className="border border-white/[0.06] rounded-lg overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
+            {rules.map((r) => (
+              <li key={r.id} className="flex items-start gap-3 px-4 py-3 hover:bg-white/[0.02]">
+                <div className="flex-1 min-w-0">
+                  <p className="text-[13.5px] font-medium text-white">{r.name}</p>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                    <Code>{r.event_type}</Code>
+                    <Pill tone={severityTone(r.severity)}>{r.severity}</Pill>
+                    {r.enabled ? <Pill tone="success">enabled</Pill> : <Pill tone="muted">disabled</Pill>}
                   </div>
-                  <div>
-                    <label className="block text-sm text-slate-400 mb-1">Severity</label>
-                    <select
-                      value={form.severity}
-                      onChange={(e) => setForm({ ...form, severity: e.target.value })}
-                      className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white"
-                    >
-                      {SEVERITY_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Email recipients (comma-separated, optional)</label>
-                  <input
-                    type="text"
-                    value={form.email_recipients}
-                    onChange={(e) => setForm({ ...form, email_recipients: e.target.value })}
-                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white font-mono"
-                    placeholder="ops@example.com,oncall@example.com"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Webhook URL (optional)</label>
-                  <input
-                    type="url"
-                    value={form.webhook_url}
-                    onChange={(e) => setForm({ ...form, webhook_url: e.target.value })}
-                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white"
-                    placeholder="https://hooks.example.com/abc"
-                  />
-                </div>
-                <div className="flex justify-end gap-2 pt-2 border-t border-slate-800/50">
-                  <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-                  <Button onClick={create} disabled={creating}>
-                    {creating ? 'Creating…' : 'Create'}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {loading ? (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="py-12 text-center text-slate-400">Loading…</CardContent>
-            </Card>
-          ) : rules.length === 0 ? (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="py-12 text-center text-slate-400">
-                <p>No alert rules configured.</p>
-                <p className="text-sm mt-2">Create one to wire alerts to email or a webhook.</p>
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="grid gap-3">
-              {rules.map((r) => (
-                <Card key={r.id} className="bg-slate-900/60 border-slate-800/50">
-                  <CardContent className="py-4 flex items-start justify-between gap-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-white">{r.name}</p>
-                      <div className="flex flex-wrap gap-2 mt-2">
-                        <span className="px-2 py-0.5 rounded border border-slate-700 bg-slate-800 text-xs text-slate-300 font-mono">
-                          {r.event_type}
-                        </span>
-                        <span className="px-2 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
-                          {r.severity}
-                        </span>
-                        {r.enabled ? (
-                          <span className="px-2 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-300">enabled</span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded border border-slate-700 bg-slate-800 text-xs text-slate-400">disabled</span>
-                        )}
-                      </div>
-                      {(r.email_recipients || r.webhook_url) && (
-                        <p className="text-xs text-slate-500 mt-2">
-                          {r.email_recipients && <>email: {r.email_recipients}</>}
-                          {r.email_recipients && r.webhook_url && ' · '}
-                          {r.webhook_url && <>webhook: <span className="font-mono">{r.webhook_url}</span></>}
-                        </p>
+                  {(r.email_recipients || r.webhook_url) && (
+                    <p className="text-[11.5px] text-white/40 mt-2">
+                      {r.email_recipients && <>email: {r.email_recipients}</>}
+                      {r.email_recipients && r.webhook_url && ' · '}
+                      {r.webhook_url && (
+                        <>
+                          webhook: <span className="font-mono text-white/55">{r.webhook_url}</span>
+                        </>
                       )}
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="border-red-500/30 text-red-400 hover:bg-red-500/10"
-                      onClick={() => remove(r.id)}
-                    >
-                      Delete
-                    </Button>
-                  </CardContent>
-                </Card>
-              ))}
+                    </p>
+                  )}
+                </div>
+                <Button size="sm" variant="ghost" onClick={() => setConfirmDelete(r)}>
+                  Delete
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <Sheet
+          open={showCreate}
+          onClose={() => setShowCreate(false)}
+          title="New alert rule"
+          width="lg"
+          footer={
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setShowCreate(false)}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={create} disabled={creating}>
+                {creating ? 'Creating…' : 'Create'}
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div>
+              <label className={labelCls}>Name</label>
+              <input
+                placeholder="e.g. Critical CPU on prod fleet"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                className={`w-full ${inputCls}`}
+              />
             </div>
-          )}
-        </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Event type</label>
+                <select
+                  value={form.event_type}
+                  onChange={(e) => setForm({ ...form, event_type: e.target.value })}
+                  className={`w-full ${inputCls}`}
+                >
+                  {KNOWN_EVENTS.map((ev) => (
+                    <option key={ev} value={ev}>{ev}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>Severity</label>
+                <select
+                  value={form.severity}
+                  onChange={(e) => setForm({ ...form, severity: e.target.value })}
+                  className={`w-full ${inputCls}`}
+                >
+                  {SEVERITY_OPTIONS.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div>
+              <label className={labelCls}>Email recipients (comma-separated)</label>
+              <input
+                value={form.email_recipients}
+                onChange={(e) => setForm({ ...form, email_recipients: e.target.value })}
+                className={`w-full ${inputCls} font-mono`}
+                placeholder="ops@example.com,oncall@example.com"
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Webhook URL (optional)</label>
+              <input
+                type="url"
+                value={form.webhook_url}
+                onChange={(e) => setForm({ ...form, webhook_url: e.target.value })}
+                className={`w-full ${inputCls} font-mono`}
+                placeholder="https://hooks.example.com/abc"
+              />
+            </div>
+          </div>
+        </Sheet>
+
+        <ConfirmDialog
+          open={!!confirmDelete}
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={() => confirmDelete && void remove(confirmDelete)}
+          title="Delete alert rule?"
+          description={`Removes "${confirmDelete?.name || ''}".`}
+          confirmLabel="Delete"
+        />
       </DashboardShell>
     </AuthGuard>
   )

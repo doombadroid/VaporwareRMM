@@ -2,10 +2,13 @@
 
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
+import { PageHeader, EmptyState } from '@/components/ui/page'
+import { Pill, Code } from '@/components/ui/status'
+import { Sheet, ConfirmDialog } from '@/components/ui/sheet'
+import { Button } from '@/components/ui/button'
+import { Plus } from 'lucide-react'
 import { webhooksApi, type Webhook } from '@/lib/api'
 
 const KNOWN_EVENTS = [
@@ -18,11 +21,15 @@ const KNOWN_EVENTS = [
   'patch.installed',
 ]
 
+const inputCls = 'bg-white/[0.04] border border-white/[0.08] rounded-md px-3 py-1.5 text-[13px] text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2]'
+const labelCls = 'block text-[11px] uppercase tracking-[0.12em] text-white/40 mb-1.5'
+
 export default function WebhooksPage() {
   const [hooks, setHooks] = useState<Webhook[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<Webhook | null>(null)
   const [form, setForm] = useState({ url: '', secret: '', events: '', enabled: true })
 
   const load = async () => {
@@ -30,17 +37,18 @@ export default function WebhooksPage() {
     try {
       setHooks(await webhooksApi.list())
     } catch {
-      toast.error('Failed to load webhooks (admin only)')
+      toast.error('Failed to load')
     } finally {
       setLoading(false)
     }
   }
-
-  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    void load()
+  }, [])
 
   const create = async () => {
     if (!form.url || !form.events) {
-      toast.error('URL and events are required')
+      toast.error('URL + events required')
       return
     }
     setCreating(true)
@@ -51,20 +59,19 @@ export default function WebhooksPage() {
       setShowCreate(false)
       await load()
     } catch {
-      toast.error('Failed to create webhook')
+      toast.error('Failed to create')
     } finally {
       setCreating(false)
     }
   }
 
-  const remove = async (id: string) => {
-    if (!confirm('Delete this webhook?')) return
+  const remove = async (h: Webhook) => {
     try {
-      await webhooksApi.remove(id)
-      toast.success('Webhook deleted')
-      setHooks((prev) => prev.filter((h) => h.id !== id))
+      await webhooksApi.remove(h.id)
+      setHooks((p) => p.filter((x) => x.id !== h.id))
+      setConfirmDelete(null)
     } catch {
-      toast.error('Failed to delete webhook')
+      toast.error('Failed to delete')
     }
   }
 
@@ -82,127 +89,141 @@ export default function WebhooksPage() {
   return (
     <AuthGuard>
       <DashboardShell>
-        <div className="max-w-4xl space-y-6">
-          <div className="flex items-center justify-between mb-6">
-            <h1 className="text-2xl font-bold">Webhooks</h1>
-            <Button onClick={() => setShowCreate((s) => !s)}>
-              {showCreate ? 'Cancel' : 'New webhook'}
+        <PageHeader
+          eyebrow="Automation"
+          title="Webhooks"
+          description="Outbound HTTP notifications for events. Signed with HMAC when a secret is set."
+          actions={
+            <Button size="sm" onClick={() => setShowCreate(true)}>
+              <Plus className="w-3.5 h-3.5 mr-1.5" />
+              New webhook
             </Button>
-          </div>
+          }
+        />
 
-          {showCreate && (
-            <Card className="bg-slate-900/60 border-slate-800/50 mb-6">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base">Create webhook</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">URL (https://, no private IPs)</label>
-                  <input
-                    type="url"
-                    value={form.url}
-                    onChange={(e) => setForm({ ...form, url: e.target.value })}
-                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white"
-                    placeholder="https://hooks.example.com/abc"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Secret (HMAC, optional)</label>
-                  <input
-                    type="password"
-                    value={form.secret}
-                    onChange={(e) => setForm({ ...form, secret: e.target.value })}
-                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white font-mono"
-                    placeholder="signing secret"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-slate-400 mb-2">Events</label>
-                  <div className="flex flex-wrap gap-2">
-                    {KNOWN_EVENTS.map((ev) => (
-                      <button
+        {loading ? (
+          <p className="text-[13px] text-white/45">Loading…</p>
+        ) : hooks.length === 0 ? (
+          <EmptyState
+            title="No webhooks configured."
+            hint="Create one to fan out events to Slack, PagerDuty, or your own service."
+          />
+        ) : (
+          <ul className="border border-white/[0.06] rounded-lg overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
+            {hooks.map((h) => (
+              <li key={h.id} className="flex items-start gap-3 px-4 py-3 hover:bg-white/[0.02]">
+                <div className="flex-1 min-w-0">
+                  <Code>{h.url}</Code>
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {h.events.split(',').map((ev) => ev.trim()).filter(Boolean).map((ev) => (
+                      <span
                         key={ev}
-                        type="button"
-                        onClick={() => toggleEvent(ev)}
-                        className={`px-2 py-1 rounded border text-xs ${
-                          formEvents.includes(ev)
-                            ? 'bg-blue-500/15 border-blue-500/40 text-blue-300'
-                            : 'bg-slate-800 border-slate-700 text-slate-400'
-                        }`}
+                        className="px-2 py-0.5 rounded bg-white/[0.04] border border-white/[0.06] text-[10.5px] text-white/65 font-mono"
                       >
                         {ev}
-                      </button>
+                      </span>
                     ))}
                   </div>
-                  <input
-                    type="text"
-                    value={form.events}
-                    onChange={(e) => setForm({ ...form, events: e.target.value })}
-                    className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white font-mono mt-2"
-                    placeholder="comma-separated event names"
-                  />
+                  <p className="text-[11px] text-white/35 mt-2">
+                    {h.enabled ? <Pill tone="success">enabled</Pill> : <Pill tone="muted">disabled</Pill>}
+                    {h.secret && <span className="ml-2">secret set</span>}
+                    <span className="ml-2">created {new Date(h.created_at * 1000).toLocaleDateString()}</span>
+                  </p>
                 </div>
-                <label className="flex items-center gap-2 text-sm text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={form.enabled}
-                    onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
-                    className="rounded border-slate-600 bg-slate-800"
-                  />
-                  Enabled
-                </label>
-                <div className="flex justify-end gap-2 pt-2 border-t border-slate-800/50">
-                  <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-                  <Button onClick={create} disabled={creating}>
-                    {creating ? 'Creating…' : 'Create'}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          )}
+                <Button size="sm" variant="ghost" onClick={() => setConfirmDelete(h)}>
+                  Delete
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
 
-          {loading ? (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="py-12 text-center text-slate-400">Loading…</CardContent>
-            </Card>
-          ) : hooks.length === 0 ? (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="py-12 text-center text-slate-400">No webhooks configured.</CardContent>
-            </Card>
-          ) : (
-            <div className="grid gap-3">
-              {hooks.map((h) => (
-                <Card key={h.id} className="bg-slate-900/60 border-slate-800/50">
-                  <CardContent className="py-4 flex items-start justify-between gap-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-mono text-white break-all">{h.url}</p>
-                      <div className="flex flex-wrap gap-1 mt-2">
-                        {h.events.split(',').map((ev) => ev.trim()).filter(Boolean).map((ev) => (
-                          <span key={ev} className="px-2 py-0.5 rounded border border-slate-700 bg-slate-800 text-xs text-slate-300">
-                            {ev}
-                          </span>
-                        ))}
-                      </div>
-                      <p className="text-xs text-slate-500 mt-2">
-                        {h.enabled ? <span className="text-emerald-400">enabled</span> : <span className="text-slate-500">disabled</span>}
-                        {h.secret && <span> · secret set</span>}
-                        <span> · created {new Date(h.created_at * 1000).toLocaleDateString()}</span>
-                      </p>
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="border-red-500/30 text-red-400 hover:bg-red-500/10"
-                      onClick={() => remove(h.id)}
-                    >
-                      Delete
-                    </Button>
-                  </CardContent>
-                </Card>
-              ))}
+        <Sheet
+          open={showCreate}
+          onClose={() => setShowCreate(false)}
+          title="New webhook"
+          description="Public HTTPS endpoints only. RFC1918 addresses are rejected."
+          width="lg"
+          footer={
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setShowCreate(false)}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={create} disabled={creating}>
+                {creating ? 'Creating…' : 'Create'}
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div>
+              <label className={labelCls}>URL</label>
+              <input
+                type="url"
+                placeholder="https://hooks.example.com/abc"
+                value={form.url}
+                onChange={(e) => setForm({ ...form, url: e.target.value })}
+                className={`w-full ${inputCls} font-mono`}
+              />
             </div>
-          )}
-        </div>
+            <div>
+              <label className={labelCls}>HMAC secret (optional)</label>
+              <input
+                type="password"
+                value={form.secret}
+                onChange={(e) => setForm({ ...form, secret: e.target.value })}
+                className={`w-full ${inputCls} font-mono`}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Events</label>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {KNOWN_EVENTS.map((ev) => {
+                  const active = formEvents.includes(ev)
+                  return (
+                    <button
+                      key={ev}
+                      type="button"
+                      onClick={() => toggleEvent(ev)}
+                      className={`px-2 py-1 rounded text-[11px] font-mono transition-colors ${
+                        active
+                          ? 'bg-white/[0.08] text-white border border-white/[0.12]'
+                          : 'bg-white/[0.02] text-white/55 border border-white/[0.05] hover:text-white/85'
+                      }`}
+                    >
+                      {ev}
+                    </button>
+                  )
+                })}
+              </div>
+              <input
+                type="text"
+                value={form.events}
+                onChange={(e) => setForm({ ...form, events: e.target.value })}
+                className={`w-full ${inputCls} font-mono`}
+                placeholder="comma-separated event names"
+              />
+            </div>
+            <label className="flex items-center gap-2 text-[12.5px] text-white/85 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.enabled}
+                onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
+                className="rounded bg-white/[0.04] border-white/[0.12]"
+              />
+              Enabled
+            </label>
+          </div>
+        </Sheet>
+
+        <ConfirmDialog
+          open={!!confirmDelete}
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={() => confirmDelete && void remove(confirmDelete)}
+          title="Delete webhook?"
+          description="Stops outbound deliveries for this URL."
+          confirmLabel="Delete"
+        />
       </DashboardShell>
     </AuthGuard>
   )

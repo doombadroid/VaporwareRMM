@@ -2,21 +2,28 @@
 
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
+import { PageHeader, EmptyState } from '@/components/ui/page'
+import { Sheet, ConfirmDialog } from '@/components/ui/sheet'
+import { Code } from '@/components/ui/status'
+import { Button } from '@/components/ui/button'
+import { Plus } from 'lucide-react'
 import { reportsApi, type ReportSchedule } from '@/lib/api'
 
 const REPORT_TYPES = ['fleet_status', 'sla_monthly', 'patch_compliance', 'ticket_volume', 'billing_hours']
 const DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const TZ = ['UTC', 'America/New_York', 'America/Chicago', 'America/Los_Angeles', 'Europe/London', 'Europe/Paris', 'Asia/Tokyo', 'Australia/Sydney']
 
+const inputCls = 'bg-white/[0.04] border border-white/[0.08] rounded-md px-3 py-1.5 text-[13px] text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2]'
+const labelCls = 'block text-[11px] uppercase tracking-[0.12em] text-white/40 mb-1.5'
+
 export default function ReportsPage() {
   const [schedules, setSchedules] = useState<ReportSchedule[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<ReportSchedule | null>(null)
   const [form, setForm] = useState({
     name: '',
     report_type: 'fleet_status',
@@ -29,11 +36,17 @@ export default function ReportsPage() {
 
   const load = async () => {
     setLoading(true)
-    try { setSchedules(await reportsApi.list()) }
-    catch { toast.error('Failed to load (admin only?)') }
-    finally { setLoading(false) }
+    try {
+      setSchedules(await reportsApi.list())
+    } catch {
+      toast.error('Failed to load')
+    } finally {
+      setLoading(false)
+    }
   }
-  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    void load()
+  }, [])
 
   const create = async () => {
     if (!form.name || !form.email_recipients) {
@@ -56,84 +69,159 @@ export default function ReportsPage() {
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Save failed'
       toast.error(msg)
-    } finally { setCreating(false) }
+    } finally {
+      setCreating(false)
+    }
   }
 
   const remove = async (s: ReportSchedule) => {
-    if (!confirm(`Delete ${s.name}?`)) return
-    try { await reportsApi.remove(s.id); setSchedules((p) => p.filter((x) => x.id !== s.id)) }
-    catch { toast.error('Delete failed') }
+    try {
+      await reportsApi.remove(s.id)
+      setSchedules((p) => p.filter((x) => x.id !== s.id))
+      setConfirmDelete(null)
+    } catch {
+      toast.error('Delete failed')
+    }
   }
 
   const runNow = async (s: ReportSchedule) => {
     try {
-      const blob = await reportsApi.run(s.id) as Blob
+      const blob = (await reportsApi.run(s.id)) as Blob
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
       a.download = `${s.report_type}-${new Date().toISOString().slice(0, 10)}.csv`
       a.click()
       window.URL.revokeObjectURL(url)
-    } catch { toast.error('Run failed') }
+    } catch {
+      toast.error('Run failed')
+    }
   }
 
   return (
     <AuthGuard>
       <DashboardShell>
-        <div className="max-w-4xl space-y-6">
-          <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold">Scheduled reports</h1>
-            <Button onClick={() => setShowCreate((s) => !s)}>{showCreate ? 'Cancel' : 'New schedule'}</Button>
-          </div>
-          {showCreate && (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="space-y-3 py-4">
-                <input type="text" placeholder="Name (e.g. Weekly fleet status)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" />
-                <div className="grid grid-cols-2 gap-3">
-                  <select value={form.report_type} onChange={(e) => setForm({ ...form, report_type: e.target.value })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-2 text-sm">
-                    {REPORT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                  <select value={form.dow} onChange={(e) => setForm({ ...form, dow: parseInt(e.target.value) })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-2 text-sm">
-                    {DOW.map((d, i) => <option key={i} value={i}>{d}</option>)}
-                  </select>
-                  <input type="number" min={0} max={23} value={form.hour} onChange={(e) => setForm({ ...form, hour: parseInt(e.target.value) || 0 })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" placeholder="hour" />
-                  <input type="number" min={0} max={59} value={form.minute} onChange={(e) => setForm({ ...form, minute: parseInt(e.target.value) || 0 })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" placeholder="minute" />
-                  <select value={form.timezone} onChange={(e) => setForm({ ...form, timezone: e.target.value })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-2 text-sm">
-                    {TZ.map((t) => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                  <input type="text" placeholder="emails comma-separated" value={form.email_recipients} onChange={(e) => setForm({ ...form, email_recipients: e.target.value })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" />
+        <PageHeader
+          eyebrow="Audit"
+          title="Scheduled reports"
+          description="Recurring CSV exports emailed to stakeholders."
+          actions={
+            <Button size="sm" onClick={() => setShowCreate(true)}>
+              <Plus className="w-3.5 h-3.5 mr-1.5" />
+              New schedule
+            </Button>
+          }
+        />
+
+        {loading ? (
+          <p className="text-[13px] text-white/45">Loading…</p>
+        ) : schedules.length === 0 ? (
+          <EmptyState title="No scheduled reports." hint="Create a schedule to email a recurring CSV." />
+        ) : (
+          <ul className="border border-white/[0.06] rounded-lg overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
+            {schedules.map((s) => (
+              <li key={s.id} className="flex items-start gap-3 px-4 py-3 hover:bg-white/[0.02]">
+                <div className="flex-1 min-w-0">
+                  <p className="text-[13.5px] font-medium text-white truncate">{s.name}</p>
+                  <p className="text-[11.5px] text-white/55 mt-1">
+                    <Code>{s.report_type}</Code>
+                    <span className="mx-1.5">·</span>
+                    cron <Code>{s.weekly_cron}</Code> {s.timezone}
+                  </p>
+                  <p className="text-[11px] text-white/40 mt-1 truncate">→ {s.email_recipients}</p>
+                  {s.last_error && <p className="text-[11px] text-rose-300/85 mt-1">{s.last_error}</p>}
                 </div>
-                <div className="flex justify-end">
-                  <Button onClick={create} disabled={creating}>{creating ? 'Saving…' : 'Create'}</Button>
+                <div className="flex items-center gap-1 shrink-0">
+                  <Button size="sm" variant="ghost" onClick={() => runNow(s)}>
+                    Run now
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setConfirmDelete(s)}>
+                    Delete
+                  </Button>
                 </div>
-              </CardContent>
-            </Card>
-          )}
-          {loading ? (
-            <Card className="bg-slate-900/60 border-slate-800/50"><CardContent className="py-12 text-center text-slate-400">Loading…</CardContent></Card>
-          ) : schedules.length === 0 ? (
-            <Card className="bg-slate-900/60 border-slate-800/50"><CardContent className="py-12 text-center text-slate-400">No scheduled reports.</CardContent></Card>
-          ) : (
-            <div className="grid gap-3">
-              {schedules.map((s) => (
-                <Card key={s.id} className="bg-slate-900/60 border-slate-800/50">
-                  <CardContent className="py-4 flex items-start justify-between gap-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-white truncate">{s.name}</p>
-                      <p className="text-xs text-slate-400 mt-1 font-mono">{s.report_type} · cron &ldquo;{s.weekly_cron}&rdquo; {s.timezone}</p>
-                      <p className="text-xs text-slate-500 mt-1 truncate">→ {s.email_recipients}</p>
-                      {s.last_error && <p className="text-xs text-rose-400 mt-1">{s.last_error}</p>}
-                    </div>
-                    <div className="flex flex-col gap-1 shrink-0">
-                      <Button size="sm" variant="ghost" onClick={() => runNow(s)}>Run now</Button>
-                      <Button size="sm" variant="outline" className="border-red-500/30 text-red-400 hover:bg-red-500/10" onClick={() => remove(s)}>Delete</Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <Sheet
+          open={showCreate}
+          onClose={() => setShowCreate(false)}
+          title="New report schedule"
+          footer={
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setShowCreate(false)}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={create} disabled={creating}>
+                {creating ? 'Saving…' : 'Create'}
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div>
+              <label className={labelCls}>Name</label>
+              <input
+                placeholder="e.g. Weekly fleet status"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                className={`w-full ${inputCls}`}
+              />
             </div>
-          )}
-        </div>
+            <div>
+              <label className={labelCls}>Report type</label>
+              <select value={form.report_type} onChange={(e) => setForm({ ...form, report_type: e.target.value })} className={`w-full ${inputCls}`}>
+                {REPORT_TYPES.map((t) => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Day of week</label>
+                <select value={form.dow} onChange={(e) => setForm({ ...form, dow: parseInt(e.target.value) })} className={`w-full ${inputCls}`}>
+                  {DOW.map((d, i) => (
+                    <option key={i} value={i}>{d}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>Timezone</label>
+                <select value={form.timezone} onChange={(e) => setForm({ ...form, timezone: e.target.value })} className={`w-full ${inputCls}`}>
+                  {TZ.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>Hour (0-23)</label>
+                <input type="number" min={0} max={23} value={form.hour} onChange={(e) => setForm({ ...form, hour: parseInt(e.target.value) || 0 })} className={`w-full ${inputCls}`} />
+              </div>
+              <div>
+                <label className={labelCls}>Minute (0-59)</label>
+                <input type="number" min={0} max={59} value={form.minute} onChange={(e) => setForm({ ...form, minute: parseInt(e.target.value) || 0 })} className={`w-full ${inputCls}`} />
+              </div>
+            </div>
+            <div>
+              <label className={labelCls}>Email recipients (comma-separated)</label>
+              <input
+                value={form.email_recipients}
+                onChange={(e) => setForm({ ...form, email_recipients: e.target.value })}
+                className={`w-full ${inputCls}`}
+              />
+            </div>
+          </div>
+        </Sheet>
+
+        <ConfirmDialog
+          open={!!confirmDelete}
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={() => confirmDelete && void remove(confirmDelete)}
+          title="Delete schedule?"
+          description={`Stops emailing ${confirmDelete?.name || ''}.`}
+          confirmLabel="Delete"
+        />
       </DashboardShell>
     </AuthGuard>
   )

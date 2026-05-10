@@ -2,17 +2,23 @@
 
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
+import { PageHeader, EmptyState } from '@/components/ui/page'
+import { Sheet, ConfirmDialog } from '@/components/ui/sheet'
+import { Button } from '@/components/ui/button'
+import { Plus, AlertTriangle } from 'lucide-react'
 import { snmpApi, type SNMPTarget } from '@/lib/api'
+
+const inputCls = 'bg-white/[0.04] border border-white/[0.08] rounded-md px-3 py-1.5 text-[13px] text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2]'
+const labelCls = 'block text-[11px] uppercase tracking-[0.12em] text-white/40 mb-1.5'
 
 export default function SNMPPage() {
   const [targets, setTargets] = useState<SNMPTarget[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<SNMPTarget | null>(null)
   const [form, setForm] = useState({
     name: '',
     host: '',
@@ -28,11 +34,17 @@ export default function SNMPPage() {
 
   const load = async () => {
     setLoading(true)
-    try { setTargets(await snmpApi.list()) }
-    catch { toast.error('Failed to load (admin only?)') }
-    finally { setLoading(false) }
+    try {
+      setTargets(await snmpApi.list())
+    } catch {
+      toast.error('Failed to load')
+    } finally {
+      setLoading(false)
+    }
   }
-  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    void load()
+  }, [])
 
   const create = async () => {
     if (!form.name || !form.host || !form.v3_username || !form.v3_auth_pass || !form.v3_priv_pass) {
@@ -51,80 +63,166 @@ export default function SNMPPage() {
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Create failed'
       toast.error(msg)
-    } finally { setCreating(false) }
+    } finally {
+      setCreating(false)
+    }
   }
 
   const remove = async (t: SNMPTarget) => {
-    if (!confirm(`Delete ${t.name}?`)) return
-    try { await snmpApi.remove(t.id); setTargets((p) => p.filter((x) => x.id !== t.id)) }
-    catch { toast.error('Delete failed') }
+    try {
+      await snmpApi.remove(t.id)
+      setTargets((p) => p.filter((x) => x.id !== t.id))
+      setConfirmDelete(null)
+    } catch {
+      toast.error('Delete failed')
+    }
   }
 
   return (
     <AuthGuard>
       <DashboardShell>
-        <div className="max-w-4xl space-y-6">
-          <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold">SNMPv3 targets</h1>
-            <Button onClick={() => setShowCreate((s) => !s)}>{showCreate ? 'Cancel' : 'New target'}</Button>
-          </div>
-          <Card className="bg-amber-500/5 border border-amber-500/20">
-            <CardContent className="py-3 text-xs text-amber-300">
-              Configuration UI only. Polling worker not yet wired — operators can declare targets but no SNMP traffic flows until follow-up stage. v3 auth+priv (authPriv level) only.
-            </CardContent>
-          </Card>
-          {showCreate && (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="space-y-3 py-4">
-                <div className="grid grid-cols-2 gap-3">
-                  <input type="text" placeholder="name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" />
-                  <input type="text" placeholder="host or IP" value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm font-mono" />
-                  <input type="number" min={1} max={65535} value={form.port} onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 161 })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" placeholder="port" />
-                  <input type="number" min={30} value={form.poll_interval_seconds} onChange={(e) => setForm({ ...form, poll_interval_seconds: parseInt(e.target.value) || 300 })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" placeholder="poll seconds" />
-                </div>
-                <input type="text" placeholder="v3 username" value={form.v3_username} onChange={(e) => setForm({ ...form, v3_username: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" />
-                <div className="grid grid-cols-2 gap-3">
-                  <select value={form.v3_auth_protocol} onChange={(e) => setForm({ ...form, v3_auth_protocol: e.target.value as 'SHA' | 'SHA256' | 'SHA512' })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm">
-                    <option value="SHA">SHA</option><option value="SHA256">SHA256</option><option value="SHA512">SHA512</option>
-                  </select>
-                  <input type="password" placeholder="auth password" value={form.v3_auth_pass} onChange={(e) => setForm({ ...form, v3_auth_pass: e.target.value })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" />
-                  <select value={form.v3_priv_protocol} onChange={(e) => setForm({ ...form, v3_priv_protocol: e.target.value as 'AES' | 'AES256' })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm">
-                    <option value="AES">AES</option><option value="AES256">AES256</option>
-                  </select>
-                  <input type="password" placeholder="privacy password" value={form.v3_priv_pass} onChange={(e) => setForm({ ...form, v3_priv_pass: e.target.value })} className="bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm" />
-                </div>
-                <textarea placeholder="OIDs (comma-separated, dotted-decimal)" rows={2} value={form.oids} onChange={(e) => setForm({ ...form, oids: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm font-mono" />
-                <div className="flex justify-end">
-                  <Button onClick={create} disabled={creating}>{creating ? 'Adding…' : 'Add'}</Button>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-          {loading ? (
-            <Card className="bg-slate-900/60 border-slate-800/50"><CardContent className="py-12 text-center text-slate-400">Loading…</CardContent></Card>
-          ) : targets.length === 0 ? (
-            <Card className="bg-slate-900/60 border-slate-800/50"><CardContent className="py-12 text-center text-slate-400">No SNMP targets configured.</CardContent></Card>
-          ) : (
-            <div className="grid gap-3">
-              {targets.map((t) => (
-                <Card key={t.id} className="bg-slate-900/60 border-slate-800/50">
-                  <CardContent className="py-4 flex items-start justify-between gap-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-white">{t.name}</p>
-                      <p className="text-xs text-slate-400 mt-1 font-mono">{t.host}:{t.port} · user {t.v3_username}</p>
-                      <p className="text-xs text-slate-500 mt-1">
-                        auth {t.v3_auth_protocol} · priv {t.v3_priv_protocol} · poll {t.poll_interval_seconds}s
-                      </p>
-                      <p className="text-xs text-slate-500 mt-1 font-mono break-all">{t.oids}</p>
-                      {t.last_error && <p className="text-xs text-rose-400 mt-1">{t.last_error}</p>}
-                    </div>
-                    <Button size="sm" variant="outline" className="border-red-500/30 text-red-400 hover:bg-red-500/10" onClick={() => remove(t)}>Delete</Button>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          )}
+        <PageHeader
+          eyebrow="Network"
+          title="SNMPv3 targets"
+          description="authPriv level only. v1/v2c communities are not supported on principle."
+          actions={
+            <Button size="sm" onClick={() => setShowCreate(true)}>
+              <Plus className="w-3.5 h-3.5 mr-1.5" />
+              New target
+            </Button>
+          }
+        />
+
+        <div className="mb-5 flex items-start gap-2 text-[12px] text-amber-200/85 bg-amber-500/[0.04] border border-amber-500/15 rounded-lg px-3 py-2">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 text-amber-400 shrink-0" />
+          <span>
+            Configuration UI only. Polling worker not yet wired — operators can declare targets but no SNMP traffic flows
+            yet.
+          </span>
         </div>
+
+        {loading ? (
+          <p className="text-[13px] text-white/45">Loading…</p>
+        ) : targets.length === 0 ? (
+          <EmptyState title="No SNMP targets configured." />
+        ) : (
+          <ul className="border border-white/[0.06] rounded-lg overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
+            {targets.map((t) => (
+              <li key={t.id} className="flex items-start gap-3 px-4 py-3 hover:bg-white/[0.02]">
+                <div className="flex-1 min-w-0">
+                  <p className="text-[13.5px] font-medium text-white">{t.name}</p>
+                  <p className="text-[11.5px] text-white/55 mt-1 font-mono">
+                    {t.host}:{t.port} · user {t.v3_username}
+                  </p>
+                  <p className="text-[11px] text-white/35 mt-0.5">
+                    auth {t.v3_auth_protocol} · priv {t.v3_priv_protocol} · poll {t.poll_interval_seconds}s
+                  </p>
+                  <p className="text-[11px] text-white/35 mt-1 font-mono break-all">{t.oids}</p>
+                  {t.last_error && <p className="text-[11.5px] text-rose-300/85 mt-1">{t.last_error}</p>}
+                </div>
+                <Button size="sm" variant="ghost" onClick={() => setConfirmDelete(t)}>
+                  Delete
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <Sheet
+          open={showCreate}
+          onClose={() => setShowCreate(false)}
+          title="New SNMPv3 target"
+          width="lg"
+          footer={
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setShowCreate(false)}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={create} disabled={creating}>
+                {creating ? 'Adding…' : 'Add target'}
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Name</label>
+                <input className={`w-full ${inputCls}`} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              </div>
+              <div>
+                <label className={labelCls}>Host / IP</label>
+                <input className={`w-full ${inputCls} font-mono`} value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} />
+              </div>
+              <div>
+                <label className={labelCls}>Port</label>
+                <input type="number" className={`w-full ${inputCls}`} min={1} max={65535} value={form.port} onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 161 })} />
+              </div>
+              <div>
+                <label className={labelCls}>Poll interval (sec)</label>
+                <input type="number" className={`w-full ${inputCls}`} min={30} value={form.poll_interval_seconds} onChange={(e) => setForm({ ...form, poll_interval_seconds: parseInt(e.target.value) || 300 })} />
+              </div>
+            </div>
+
+            <div>
+              <label className={labelCls}>v3 Username</label>
+              <input className={`w-full ${inputCls}`} value={form.v3_username} onChange={(e) => setForm({ ...form, v3_username: e.target.value })} />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Auth protocol</label>
+                <select
+                  value={form.v3_auth_protocol}
+                  onChange={(e) => setForm({ ...form, v3_auth_protocol: e.target.value as 'SHA' | 'SHA256' | 'SHA512' })}
+                  className={`w-full ${inputCls}`}
+                >
+                  <option value="SHA">SHA</option>
+                  <option value="SHA256">SHA256</option>
+                  <option value="SHA512">SHA512</option>
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>Auth password</label>
+                <input type="password" className={`w-full ${inputCls}`} value={form.v3_auth_pass} onChange={(e) => setForm({ ...form, v3_auth_pass: e.target.value })} />
+              </div>
+              <div>
+                <label className={labelCls}>Priv protocol</label>
+                <select
+                  value={form.v3_priv_protocol}
+                  onChange={(e) => setForm({ ...form, v3_priv_protocol: e.target.value as 'AES' | 'AES256' })}
+                  className={`w-full ${inputCls}`}
+                >
+                  <option value="AES">AES</option>
+                  <option value="AES256">AES256</option>
+                </select>
+              </div>
+              <div>
+                <label className={labelCls}>Priv password</label>
+                <input type="password" className={`w-full ${inputCls}`} value={form.v3_priv_pass} onChange={(e) => setForm({ ...form, v3_priv_pass: e.target.value })} />
+              </div>
+            </div>
+
+            <div>
+              <label className={labelCls}>OIDs (comma-separated)</label>
+              <textarea
+                rows={2}
+                className={`w-full ${inputCls} font-mono`}
+                value={form.oids}
+                onChange={(e) => setForm({ ...form, oids: e.target.value })}
+              />
+            </div>
+          </div>
+        </Sheet>
+
+        <ConfirmDialog
+          open={!!confirmDelete}
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={() => confirmDelete && void remove(confirmDelete)}
+          title="Delete target?"
+          description={`Stops collection from ${confirmDelete?.name || ''}.`}
+          confirmLabel="Delete"
+        />
       </DashboardShell>
     </AuthGuard>
   )

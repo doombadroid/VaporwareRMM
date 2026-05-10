@@ -2,10 +2,13 @@
 
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
+import { PageHeader, Section, EmptyState } from '@/components/ui/page'
+import { StatusDot, statusTone } from '@/components/ui/status'
+import { Sheet, ConfirmDialog } from '@/components/ui/sheet'
+import { Button } from '@/components/ui/button'
+import { Plus, X } from 'lucide-react'
 import {
   deviceGroupsApi,
   devices as devicesApi,
@@ -13,6 +16,9 @@ import {
   type DeviceGroupMember,
   type Device,
 } from '@/lib/api'
+
+const inputCls = 'bg-white/[0.04] border border-white/[0.08] rounded-md px-3 py-1.5 text-[13px] text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2]'
+const labelCls = 'block text-[11px] uppercase tracking-[0.12em] text-white/40 mb-1.5'
 
 export default function GroupsPage() {
   const [groups, setGroups] = useState<DeviceGroup[]>([])
@@ -24,6 +30,7 @@ export default function GroupsPage() {
   const [members, setMembers] = useState<DeviceGroupMember[]>([])
   const [allDevices, setAllDevices] = useState<Device[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<DeviceGroup | null>(null)
 
   const loadGroups = async () => {
     setLoading(true)
@@ -35,8 +42,9 @@ export default function GroupsPage() {
       setLoading(false)
     }
   }
-
-  useEffect(() => { void loadGroups() }, [])
+  useEffect(() => {
+    void loadGroups()
+  }, [])
 
   const create = async () => {
     if (!form.name) {
@@ -51,14 +59,13 @@ export default function GroupsPage() {
       setShowCreate(false)
       await loadGroups()
     } catch {
-      toast.error('Failed to create group (admin only?)')
+      toast.error('Failed to create')
     } finally {
       setCreating(false)
     }
   }
 
   const remove = async (g: DeviceGroup) => {
-    if (!confirm(`Delete group "${g.name}"?`)) return
     try {
       await deviceGroupsApi.remove(g.id)
       toast.success('Group deleted')
@@ -66,9 +73,10 @@ export default function GroupsPage() {
         setActiveGroup(null)
         setMembers([])
       }
-      setGroups((prev) => prev.filter((x) => x.id !== g.id))
+      setGroups((p) => p.filter((x) => x.id !== g.id))
+      setConfirmDelete(null)
     } catch {
-      toast.error('Failed to delete group')
+      toast.error('Failed to delete')
     }
   }
 
@@ -89,7 +97,7 @@ export default function GroupsPage() {
       setAllDevices(list)
       setPickerOpen(true)
     } catch {
-      toast.error('Failed to load device list')
+      toast.error('Failed to load devices')
     }
   }
 
@@ -97,12 +105,11 @@ export default function GroupsPage() {
     if (!activeGroup || deviceIds.length === 0) return
     try {
       await deviceGroupsApi.addMembers(activeGroup.id, deviceIds)
-      toast.success(`Added ${deviceIds.length} device${deviceIds.length === 1 ? '' : 's'}`)
-      setPickerOpen(false)
+      toast.success(`Added ${deviceIds.length}`)
       const m = await deviceGroupsApi.members(activeGroup.id)
       setMembers(m)
     } catch {
-      toast.error('Failed to add members')
+      toast.error('Failed to add')
     }
   }
 
@@ -110,7 +117,7 @@ export default function GroupsPage() {
     if (!activeGroup) return
     try {
       await deviceGroupsApi.removeMember(activeGroup.id, deviceId)
-      setMembers((prev) => prev.filter((m) => m.id !== deviceId))
+      setMembers((p) => p.filter((m) => m.id !== deviceId))
     } catch {
       toast.error('Failed to remove')
     }
@@ -122,139 +129,177 @@ export default function GroupsPage() {
   return (
     <AuthGuard>
       <DashboardShell>
-        <div className="space-y-6 max-w-5xl">
-          <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold">Device groups</h1>
-            <Button onClick={() => setShowCreate((s) => !s)}>
-              {showCreate ? 'Cancel' : 'New group'}
+        <PageHeader
+          eyebrow="Manage"
+          title="Device groups"
+          description="Slice the fleet by site, owner, or function."
+          actions={
+            <Button size="sm" onClick={() => setShowCreate(true)}>
+              <Plus className="w-3.5 h-3.5 mr-1.5" />
+              New group
             </Button>
-          </div>
+          }
+        />
 
-          {showCreate && (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="space-y-3 py-4">
-                <input
-                  type="text"
-                  placeholder="Group name"
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm"
-                />
-                <textarea
-                  placeholder="Description (optional)"
-                  rows={2}
-                  value={form.description}
-                  onChange={(e) => setForm({ ...form, description: e.target.value })}
-                  className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm"
-                />
-                <div className="flex justify-end">
-                  <Button onClick={create} disabled={creating}>
-                    {creating ? 'Creating…' : 'Create'}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+          <Section title={`Groups (${groups.length})`} className="lg:col-span-1 mb-0">
+            {loading ? (
+              <p className="text-[13px] text-white/45 px-1">Loading…</p>
+            ) : groups.length === 0 ? (
+              <EmptyState title="No groups yet." />
+            ) : (
+              <ul className="border border-white/[0.06] rounded-lg overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
+                {groups.map((g) => (
+                  <li key={g.id}>
+                    <button
+                      onClick={() => open(g)}
+                      className={`w-full text-left px-3.5 py-2.5 transition-colors ${
+                        activeGroup?.id === g.id
+                          ? 'bg-white/[0.06]'
+                          : 'hover:bg-white/[0.02]'
+                      }`}
+                    >
+                      <p className="text-[13px] text-white/90 font-medium truncate">{g.name}</p>
+                      {g.description && (
+                        <p className="text-[11.5px] text-white/40 truncate mt-0.5">{g.description}</p>
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
+
+          <Section
+            className="lg:col-span-2 mb-0"
+            title={activeGroup ? activeGroup.name : 'Members'}
+            description={activeGroup ? `${members.length} ${members.length === 1 ? 'device' : 'devices'}` : undefined}
+            actions={
+              activeGroup && (
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={openPicker}>
+                    Add devices
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setConfirmDelete(activeGroup)}>
+                    Delete group
                   </Button>
                 </div>
-              </CardContent>
-            </Card>
-          )}
-
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm">Groups ({groups.length})</CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                {loading ? (
-                  <p className="px-4 py-6 text-center text-slate-400 text-sm">Loading…</p>
-                ) : groups.length === 0 ? (
-                  <p className="px-4 py-6 text-center text-slate-400 text-sm">No groups yet.</p>
-                ) : (
-                  <div className="divide-y divide-slate-800/50">
-                    {groups.map((g) => (
-                      <button
-                        key={g.id}
-                        onClick={() => open(g)}
-                        className={`w-full text-left px-4 py-2 hover:bg-slate-800/40 ${activeGroup?.id === g.id ? 'bg-blue-500/10 border-l-2 border-blue-400' : ''}`}
-                      >
-                        <p className="text-sm font-medium text-slate-200 truncate">{g.name}</p>
-                        {g.description && <p className="text-xs text-slate-500 truncate">{g.description}</p>}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card className="lg:col-span-2 bg-slate-900/60 border-slate-800/50">
-              {!activeGroup ? (
-                <CardContent className="py-12 text-center text-slate-400 text-sm">
-                  Select a group to view members.
-                </CardContent>
-              ) : (
-                <>
-                  <CardHeader className="pb-3 flex flex-row items-center justify-between gap-2">
-                    <CardTitle className="text-sm">{activeGroup.name} ({members.length} member{members.length === 1 ? '' : 's'})</CardTitle>
-                    <div className="flex gap-2">
-                      <Button size="sm" onClick={openPicker}>Add members</Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="border-red-500/30 text-red-400 hover:bg-red-500/10"
-                        onClick={() => remove(activeGroup)}
-                      >
-                        Delete group
-                      </Button>
+              )
+            }
+          >
+            {!activeGroup ? (
+              <EmptyState title="Select a group to view its members." />
+            ) : members.length === 0 ? (
+              <EmptyState
+                title="No devices in this group."
+                action={
+                  <Button size="sm" onClick={openPicker}>
+                    Add devices
+                  </Button>
+                }
+              />
+            ) : (
+              <ul className="border border-white/[0.06] rounded-lg overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
+                {members.map((m) => (
+                  <li key={m.id} className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.02]">
+                    <StatusDot tone={statusTone(m.status)} />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] text-white/90 truncate">{m.hostname || m.id.slice(0, 8)}</p>
+                      <p className="text-[11px] text-white/35 mt-0.5">
+                        {m.status} · last seen {m.last_seen > 0 ? new Date(m.last_seen * 1000).toLocaleString() : 'never'}
+                      </p>
                     </div>
-                  </CardHeader>
-                  <CardContent className="p-0">
-                    {members.length === 0 ? (
-                      <p className="px-4 py-6 text-center text-slate-400 text-sm">No devices in this group.</p>
-                    ) : (
-                      <div className="divide-y divide-slate-800/50">
-                        {members.map((m) => (
-                          <div key={m.id} className="px-4 py-2 flex items-center justify-between gap-3">
-                            <div className="min-w-0">
-                              <p className="text-sm text-slate-200 truncate">{m.hostname || m.id.slice(0, 8)}</p>
-                              <p className="text-xs text-slate-500">
-                                {m.status} · last seen {m.last_seen > 0 ? new Date(m.last_seen * 1000).toLocaleString() : 'never'}
-                              </p>
-                            </div>
-                            <Button size="sm" variant="ghost" onClick={() => removeMember(m.id)}>Remove</Button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </CardContent>
-                </>
-              )}
-            </Card>
-          </div>
-
-          {pickerOpen && activeGroup && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setPickerOpen(false)}>
-              <div className="bg-slate-900 border border-slate-700 rounded-xl max-w-lg w-full mx-4 max-h-[80vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
-                <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
-                  <p className="font-medium">Add devices to &ldquo;{activeGroup.name}&rdquo;</p>
-                  <button className="text-slate-400" onClick={() => setPickerOpen(false)}>×</button>
-                </div>
-                <div className="overflow-y-auto p-3 space-y-1">
-                  {candidates.length === 0 ? (
-                    <p className="text-sm text-slate-400 text-center py-6">All devices already in this group.</p>
-                  ) : (
-                    candidates.map((d) => (
-                      <button
-                        key={d.id}
-                        onClick={() => addMembers([d.id])}
-                        className="w-full text-left px-3 py-2 rounded hover:bg-slate-800/50"
-                      >
-                        <p className="text-sm">{d.hostname}</p>
-                        <p className="text-xs text-slate-500">{d.os_name} · {d.status}</p>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
+                    <button
+                      onClick={() => removeMember(m.id)}
+                      className="text-white/40 hover:text-rose-300 transition-colors"
+                      aria-label="Remove from group"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
         </div>
+
+        <Sheet
+          open={showCreate}
+          onClose={() => setShowCreate(false)}
+          title="New device group"
+          footer={
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setShowCreate(false)}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={create} disabled={creating}>
+                {creating ? 'Creating…' : 'Create'}
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div>
+              <label className={labelCls}>Name</label>
+              <input
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                className={`w-full ${inputCls}`}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Description (optional)</label>
+              <textarea
+                rows={3}
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                className={`w-full ${inputCls}`}
+              />
+            </div>
+          </div>
+        </Sheet>
+
+        <Sheet
+          open={pickerOpen && !!activeGroup}
+          onClose={() => setPickerOpen(false)}
+          title="Add devices"
+          description={activeGroup ? `Pick devices to add to "${activeGroup.name}".` : ''}
+          width="lg"
+        >
+          {candidates.length === 0 ? (
+            <EmptyState title="All devices are already in this group." />
+          ) : (
+            <ul className="border border-white/[0.06] rounded-lg overflow-hidden divide-y divide-white/[0.04]">
+              {candidates.map((d) => (
+                <li key={d.id}>
+                  <button
+                    onClick={() => addMembers([d.id])}
+                    className="w-full text-left px-3.5 py-2.5 hover:bg-white/[0.02] transition-colors flex items-center gap-3"
+                  >
+                    <StatusDot tone={statusTone(d.status)} />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] text-white/90 truncate">{d.hostname}</p>
+                      <p className="text-[11px] text-white/35">
+                        {d.os_name} · {d.status}
+                      </p>
+                    </div>
+                    <Plus className="w-3.5 h-3.5 text-white/45" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Sheet>
+
+        <ConfirmDialog
+          open={!!confirmDelete}
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={() => confirmDelete && void remove(confirmDelete)}
+          title="Delete device group?"
+          description={`Removes "${confirmDelete?.name || ''}" and unassigns its members. The devices themselves stay.`}
+          confirmLabel="Delete"
+          tone="danger"
+        />
       </DashboardShell>
     </AuthGuard>
   )

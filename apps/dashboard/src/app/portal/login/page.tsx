@@ -3,14 +3,15 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { portalAuth } from '@/lib/portal-api'
 
-// Customer portal login. Deliberately separate from /login (admin) to
-// keep auth scopes visually distinct as well as on the wire. Tenant ID
-// is required because the portal_users table is keyed by (tenant_id,
-// email).
+const inputCls = 'w-full bg-white/[0.04] border border-white/[0.08] rounded-md px-3 py-2 text-[13px] text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2]'
+const labelCls = 'block text-[11px] uppercase tracking-[0.12em] text-white/40 mb-1.5'
+
+// Customer portal login. Deliberately separate from /login (admin)
+// because the auth scope is different: portal_users are tenant-scoped,
+// not full users.
 export default function PortalLoginPage() {
   const router = useRouter()
   const [form, setForm] = useState({ email: '', password: '', tenant_id: '' })
@@ -34,47 +35,52 @@ export default function PortalLoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 flex items-center justify-center p-4">
-      <Card className="bg-slate-900/60 border-slate-800/50 w-full max-w-md">
-        <CardHeader>
-          <CardTitle className="text-xl text-white">Customer portal</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={submit} className="space-y-3">
-            <div>
-              <label className="block text-sm text-slate-400 mb-1">Tenant ID</label>
-              <input
-                type="text"
-                value={form.tenant_id}
-                onChange={(e) => setForm({ ...form, tenant_id: e.target.value })}
-                className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white font-mono"
-                placeholder="provided by your IT support"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-400 mb-1">Email</label>
-              <input
-                type="email"
-                value={form.email}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
-                className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-400 mb-1">Password</label>
-              <input
-                type="password"
-                value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })}
-                className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm text-white"
-              />
-            </div>
-            <Button type="submit" disabled={submitting} className="w-full">
-              {submitting ? 'Signing in…' : 'Sign in'}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+    <div className="min-h-screen bg-[#030308] flex items-center justify-center p-4">
+      <div className="w-full max-w-sm">
+        <div className="mb-6 text-center">
+          <p className="text-[10.5px] uppercase tracking-[0.2em] text-white/30 font-medium mb-2">vaporRMM</p>
+          <h1 className="text-xl font-semibold text-white tracking-tight">Customer portal</h1>
+          <p className="text-[12.5px] text-white/45 mt-1.5">Sign in to track your service requests.</p>
+        </div>
+        <form
+          onSubmit={submit}
+          className="border border-white/[0.06] bg-white/[0.01] rounded-xl p-5 space-y-4"
+        >
+          <div>
+            <label className={labelCls}>Tenant ID</label>
+            <input
+              type="text"
+              value={form.tenant_id}
+              onChange={(e) => setForm({ ...form, tenant_id: e.target.value })}
+              className={`${inputCls} font-mono`}
+              placeholder="provided by your IT support"
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Email</label>
+            <input
+              type="email"
+              autoComplete="email"
+              value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+              className={inputCls}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Password</label>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+              className={inputCls}
+            />
+          </div>
+          <Button type="submit" disabled={submitting} className="w-full">
+            {submitting ? 'Signing in…' : 'Sign in'}
+          </Button>
+        </form>
+      </div>
     </div>
   )
 }

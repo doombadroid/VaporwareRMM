@@ -1,12 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import Link from 'next/link'
 import { toast } from 'sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import AuthGuard from '@/components/AuthGuard'
-import { ThemeToggle } from '@/components/ThemeToggle'
+import DashboardShell from '@/components/layout/DashboardShell'
+import { PageHeader, EmptyState } from '@/components/ui/page'
+import { Pill, statusTone, StatusDot, Code } from '@/components/ui/status'
+import { FilterChip } from '@/components/ui/data-table'
 import TopologyGraph from '@/components/dashboard/TopologyGraph'
 import { networkApi, type NetworkTopology } from '@/lib/api'
 
@@ -18,7 +18,8 @@ export default function NetworkPage() {
   const [view, setView] = useState<NetworkView>('graph')
 
   useEffect(() => {
-    networkApi.getTopology()
+    networkApi
+      .getTopology()
       .then(setTopology)
       .catch(() => toast.error('Failed to load topology'))
       .finally(() => setLoading(false))
@@ -30,129 +31,97 @@ export default function NetworkPage() {
 
   return (
     <AuthGuard>
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white">
-        <header className="border-b border-slate-800/50 bg-slate-950/80 backdrop-blur-xl sticky top-0 z-50">
-          <div className="container mx-auto px-6 py-3">
-            <div className="flex items-center justify-between">
-              <Link href="/" className="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-                vaporRMM
-              </Link>
-              <div className="flex items-center gap-3">
-                <ThemeToggle />
-                <Link href="/">
-                  <Button variant="ghost" size="sm" className="text-slate-400 hover:text-white">← Dashboard</Button>
-                </Link>
-              </div>
+      <DashboardShell>
+        <PageHeader
+          eyebrow="Network"
+          title="Network map"
+          description="Tailscale tailnet plus device connectivity, observed by the server."
+          actions={
+            <div className="flex items-center gap-1">
+              <FilterChip label="Graph" active={view === 'graph'} onClick={() => setView('graph')} />
+              <FilterChip label="List" active={view === 'list'} onClick={() => setView('list')} />
+            </div>
+          }
+        />
+
+        <div className="grid grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-lg overflow-hidden mb-6">
+          {[
+            { label: 'Devices', value: summary.total, color: 'text-white' },
+            { label: 'Tailscale installed', value: summary.installed, color: 'text-white/85' },
+            { label: 'Tailscale connected', value: summary.connected, color: 'text-emerald-300' },
+          ].map((s) => (
+            <div key={s.label} className="bg-[#030308] px-4 py-4">
+              <p className="text-[10.5px] uppercase tracking-[0.14em] text-white/40 font-medium">{s.label}</p>
+              <p className={`text-2xl font-semibold tabular-nums tracking-tight mt-1 ${s.color}`}>{s.value}</p>
+            </div>
+          ))}
+        </div>
+
+        {loading ? (
+          <p className="text-[13px] text-white/45">Loading topology…</p>
+        ) : !topology || topology.nodes.length === 0 ? (
+          <EmptyState
+            title="No devices yet."
+            hint="Install agents to populate the network map."
+          />
+        ) : view === 'graph' ? (
+          <div className="border border-white/[0.06] rounded-lg bg-white/[0.01] p-4">
+            <TopologyGraph nodes={topology.nodes} />
+            <div className="flex items-center justify-center gap-4 text-[11.5px] text-white/45 mt-4 pt-4 border-t border-white/[0.04] flex-wrap">
+              <span className="inline-flex items-center gap-1.5">
+                <StatusDot tone="online" />
+                online
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <StatusDot tone="danger" />
+                offline
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-3 h-0.5 bg-emerald-500/60" />
+                tailscale connected
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-3 h-0.5 bg-amber-500/60" />
+                disconnected
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-3 h-0.5 bg-white/20" />
+                no tailscale
+              </span>
             </div>
           </div>
-        </header>
-        <main className="container mx-auto px-6 py-8">
-          <div className="flex items-center justify-between mb-6">
-            <h1 className="text-2xl font-bold">Network Map</h1>
-            <div className="flex gap-1 bg-slate-800 border border-slate-700 rounded-md p-1">
-              {(['graph', 'list'] as const).map((v) => (
-                <button
-                  key={v}
-                  onClick={() => setView(v)}
-                  className={`px-3 py-1 text-xs rounded ${
-                    view === v ? 'bg-blue-500/20 text-blue-300' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {v}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-3 gap-3 mb-6">
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="py-4">
-                <p className="text-xs text-slate-400">Devices</p>
-                <p className="text-2xl font-bold">{summary.total}</p>
-              </CardContent>
-            </Card>
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="py-4">
-                <p className="text-xs text-slate-400">Tailscale installed</p>
-                <p className="text-2xl font-bold">{summary.installed}</p>
-              </CardContent>
-            </Card>
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="py-4">
-                <p className="text-xs text-slate-400">Tailscale connected</p>
-                <p className="text-2xl font-bold text-emerald-300">{summary.connected}</p>
-              </CardContent>
-            </Card>
-          </div>
-
-          {loading ? (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="py-12 text-center text-slate-400">Loading…</CardContent>
-            </Card>
-          ) : !topology || topology.nodes.length === 0 ? (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="py-12 text-center text-slate-400">
-                <p>No devices yet.</p>
-                <p className="text-sm mt-2">Install agents to populate the network map.</p>
-              </CardContent>
-            </Card>
-          ) : view === 'graph' ? (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardHeader>
-                <CardTitle className="text-base">Topology</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <TopologyGraph nodes={topology.nodes} />
-                <div className="flex items-center justify-center gap-4 text-xs text-slate-400 mt-4 pt-4 border-t border-slate-800/50 flex-wrap">
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" /> online</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-rose-500" /> offline</span>
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-emerald-500/60" /> tailscale connected</span>
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-amber-500/60" /> tailscale disconnected</span>
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-slate-500/40" /> no tailscale</span>
-                </div>
-              </CardContent>
-            </Card>
-          ) : (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardHeader>
-                <CardTitle className="text-base">Nodes</CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className="divide-y divide-slate-800/50">
-                  {topology.nodes.map((n) => {
-                    // Server is authoritative for online/offline (set by the
-                    // periodic offline sweep using OFFLINE_THRESHOLD_SECONDS).
-                    const onlineDot = n.status === 'online' ? 'bg-emerald-500' : 'bg-red-500'
-                    const tsBadge = !n.tailscale_installed
-                      ? { label: 'no tailscale', cls: 'bg-slate-500/15 border-slate-500/40 text-slate-300' }
-                      : n.tailscale_connected
-                      ? { label: 'connected', cls: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300' }
-                      : { label: 'disconnected', cls: 'bg-amber-500/15 border-amber-500/40 text-amber-300' }
-                    return (
-                      <div key={n.id} className="flex items-center justify-between gap-4 px-4 py-3">
-                        <div className="flex items-center gap-3 min-w-0">
-                          <span className={`w-2 h-2 rounded-full shrink-0 ${onlineDot}`} />
-                          <div className="min-w-0">
-                            <p className="font-medium truncate">{n.hostname || n.id.slice(0, 8)}</p>
-                            <p className="text-xs text-slate-500 truncate">
-                              {n.ip_address || '—'}
-                              {n.tailscale_ip && <> · ts {n.tailscale_ip}</>}
-                              {n.tailscale_peers > 0 && <> · {n.tailscale_peers} peer{n.tailscale_peers === 1 ? '' : 's'}</>}
-                            </p>
-                          </div>
-                        </div>
-                        <span className={`px-2 py-0.5 rounded border text-xs whitespace-nowrap ${tsBadge.cls}`}>
-                          {tsBadge.label}
+        ) : (
+          <ul className="border border-white/[0.06] rounded-lg overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
+            {topology.nodes.map((n) => {
+              const tsTone = !n.tailscale_installed ? 'muted' : n.tailscale_connected ? 'success' : 'warn'
+              const tsLabel = !n.tailscale_installed ? 'no tailscale' : n.tailscale_connected ? 'connected' : 'disconnected'
+              return (
+                <li key={n.id} className="flex items-center gap-3 px-4 py-3 hover:bg-white/[0.02] transition-colors">
+                  <StatusDot tone={statusTone(n.status)} pulse={n.status === 'online'} />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[13px] text-white/90 font-medium truncate">{n.hostname || n.id.slice(0, 8)}</p>
+                    <p className="text-[11.5px] text-white/40 truncate">
+                      <Code>{n.ip_address || '—'}</Code>
+                      {n.tailscale_ip && (
+                        <>
+                          <span className="mx-1.5">·</span>
+                          ts <Code>{n.tailscale_ip}</Code>
+                        </>
+                      )}
+                      {n.tailscale_peers > 0 && (
+                        <span className="ml-2">
+                          {n.tailscale_peers} {n.tailscale_peers === 1 ? 'peer' : 'peers'}
                         </span>
-                      </div>
-                    )
-                  })}
-                </div>
-              </CardContent>
-            </Card>
-          )}
-        </main>
-      </div>
+                      )}
+                    </p>
+                  </div>
+                  <Pill tone={tsTone}>{tsLabel}</Pill>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </DashboardShell>
     </AuthGuard>
   )
 }

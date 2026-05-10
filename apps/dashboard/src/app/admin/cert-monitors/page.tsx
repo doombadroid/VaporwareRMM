@@ -2,17 +2,14 @@
 
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
+import { PageHeader, EmptyState } from '@/components/ui/page'
+import { Pill, statusTone, Code } from '@/components/ui/status'
+import { Sheet, ConfirmDialog } from '@/components/ui/sheet'
+import { Button } from '@/components/ui/button'
+import { Plus } from 'lucide-react'
 import { certMonitorsApi, type CertMonitor } from '@/lib/api'
-
-const statusClass: Record<string, string> = {
-  ok: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300',
-  expired: 'bg-red-500/15 border-red-500/40 text-red-300',
-  error: 'bg-amber-500/15 border-amber-500/40 text-amber-300',
-}
 
 function daysUntil(unixSec?: number): number | null {
   if (!unixSec) return null
@@ -26,17 +23,27 @@ export default function CertMonitorsPage() {
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState({ url: '', alert_threshold_days: 14, internal_allowed: false })
   const [checkingId, setCheckingId] = useState('')
+  const [confirmDelete, setConfirmDelete] = useState<CertMonitor | null>(null)
 
   const load = async () => {
     setLoading(true)
-    try { setMonitors(await certMonitorsApi.list()) }
-    catch { toast.error('Failed to load (admin only?)') }
-    finally { setLoading(false) }
+    try {
+      setMonitors(await certMonitorsApi.list())
+    } catch {
+      toast.error('Failed to load (admin only?)')
+    } finally {
+      setLoading(false)
+    }
   }
-  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    void load()
+  }, [])
 
   const create = async () => {
-    if (!form.url) { toast.error('URL required'); return }
+    if (!form.url) {
+      toast.error('URL required')
+      return
+    }
     setCreating(true)
     try {
       await certMonitorsApi.create(form)
@@ -47,110 +54,167 @@ export default function CertMonitorsPage() {
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error || 'Create failed'
       toast.error(msg)
-    } finally { setCreating(false) }
+    } finally {
+      setCreating(false)
+    }
   }
 
   const remove = async (m: CertMonitor) => {
-    if (!confirm(`Delete ${m.url}?`)) return
-    try { await certMonitorsApi.remove(m.id); setMonitors((p) => p.filter((x) => x.id !== m.id)) }
-    catch { toast.error('Delete failed') }
+    try {
+      await certMonitorsApi.remove(m.id)
+      setMonitors((p) => p.filter((x) => x.id !== m.id))
+      setConfirmDelete(null)
+    } catch {
+      toast.error('Delete failed')
+    }
   }
 
   const recheck = async (m: CertMonitor) => {
     setCheckingId(m.id)
-    try { await certMonitorsApi.check(m.id); toast.success('Probed'); await load() }
-    catch { toast.error('Probe failed') }
-    finally { setCheckingId('') }
+    try {
+      await certMonitorsApi.check(m.id)
+      toast.success('Probed')
+      await load()
+    } catch {
+      toast.error('Probe failed')
+    } finally {
+      setCheckingId('')
+    }
   }
 
   return (
     <AuthGuard>
       <DashboardShell>
-        <div className="max-w-4xl space-y-6">
-          <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold">Certificate monitors</h1>
-            <Button onClick={() => setShowCreate((s) => !s)}>{showCreate ? 'Cancel' : 'New monitor'}</Button>
-          </div>
-          {showCreate && (
-            <Card className="bg-slate-900/60 border-slate-800/50">
-              <CardContent className="space-y-3 py-4">
-                <input
-                  type="text"
-                  placeholder="https://example.com or example.com:8443"
-                  value={form.url}
-                  onChange={(e) => setForm({ ...form, url: e.target.value })}
-                  className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm font-mono"
-                />
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">Alert threshold (days)</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={365}
-                      value={form.alert_threshold_days}
-                      onChange={(e) => setForm({ ...form, alert_threshold_days: parseInt(e.target.value) || 14 })}
-                      className="w-full bg-slate-800/50 border border-slate-700/50 rounded-md px-3 py-2 text-sm"
-                    />
+        <PageHeader
+          eyebrow="Network"
+          title="Certificate monitors"
+          description="Track TLS expiry on URLs the fleet depends on."
+          actions={
+            <Button size="sm" onClick={() => setShowCreate(true)}>
+              <Plus className="w-3.5 h-3.5 mr-1.5" />
+              New monitor
+            </Button>
+          }
+        />
+
+        {loading ? (
+          <p className="text-[13px] text-white/45">Loading…</p>
+        ) : monitors.length === 0 ? (
+          <EmptyState
+            title="No monitors yet."
+            hint="Add a URL to track its TLS expiry."
+            action={
+              <Button size="sm" onClick={() => setShowCreate(true)}>
+                Add first monitor
+              </Button>
+            }
+          />
+        ) : (
+          <ul className="border border-white/[0.06] rounded-lg overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
+            {monitors.map((m) => {
+              const d = daysUntil(m.last_expiry_at)
+              return (
+                <li key={m.id} className="flex items-start gap-3 px-4 py-3 hover:bg-white/[0.02]">
+                  <div className="flex-1 min-w-0">
+                    <Code className="text-white/95">{m.url}</Code>
+                    <div className="flex items-center gap-2 flex-wrap mt-2 text-[11.5px]">
+                      {m.last_status && <Pill tone={statusTone(m.last_status)}>{m.last_status}</Pill>}
+                      {d !== null && (
+                        <span className={d <= 14 ? 'text-amber-300' : 'text-white/55'}>
+                          {d > 0 ? `${d} days left` : `expired ${Math.abs(d)} days ago`}
+                        </span>
+                      )}
+                      <span className="text-white/30">·</span>
+                      <span className="text-white/40">threshold {m.alert_threshold_days}d</span>
+                      {m.internal_allowed && (
+                        <>
+                          <span className="text-white/30">·</span>
+                          <span className="text-amber-300/80">internal allowed</span>
+                        </>
+                      )}
+                    </div>
+                    {m.last_error && <p className="text-[11.5px] text-rose-300/85 mt-1.5 break-all">{m.last_error}</p>}
                   </div>
-                  <div className="flex items-end">
-                    <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={form.internal_allowed}
-                        onChange={(e) => setForm({ ...form, internal_allowed: e.target.checked })}
-                        className="rounded border-slate-600 bg-slate-800"
-                      />
-                      Allow internal IP (RFC1918)
-                    </label>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={checkingId === m.id}
+                      onClick={() => recheck(m)}
+                    >
+                      {checkingId === m.id ? 'Probing…' : 'Re-check'}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setConfirmDelete(m)}>
+                      Delete
+                    </Button>
                   </div>
-                </div>
-                <div className="flex justify-end">
-                  <Button onClick={create} disabled={creating}>{creating ? 'Adding…' : 'Add'}</Button>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-          {loading ? (
-            <Card className="bg-slate-900/60 border-slate-800/50"><CardContent className="py-12 text-center text-slate-400">Loading…</CardContent></Card>
-          ) : monitors.length === 0 ? (
-            <Card className="bg-slate-900/60 border-slate-800/50"><CardContent className="py-12 text-center text-slate-400">No monitors. Add a URL to track its TLS expiry.</CardContent></Card>
-          ) : (
-            <div className="grid gap-3">
-              {monitors.map((m) => {
-                const d = daysUntil(m.last_expiry_at)
-                return (
-                  <Card key={m.id} className="bg-slate-900/60 border-slate-800/50">
-                    <CardContent className="py-4 flex items-start justify-between gap-3">
-                      <div className="flex-1 min-w-0">
-                        <p className="font-mono text-sm text-white truncate">{m.url}</p>
-                        <div className="flex items-center gap-2 flex-wrap mt-2 text-xs">
-                          {m.last_status && (
-                            <span className={`px-2 py-0.5 rounded border ${statusClass[m.last_status] ?? statusClass.error}`}>{m.last_status}</span>
-                          )}
-                          {d !== null && (
-                            <span className="text-slate-400">
-                              {d > 0 ? `${d} days left` : `expired ${Math.abs(d)} days ago`}
-                            </span>
-                          )}
-                          <span className="text-slate-500">threshold {m.alert_threshold_days}d</span>
-                          {m.internal_allowed && <span className="text-amber-400">internal allowed</span>}
-                        </div>
-                        {m.last_error && <p className="text-xs text-rose-400 mt-1 break-all">{m.last_error}</p>}
-                      </div>
-                      <div className="flex flex-col gap-1 shrink-0">
-                        <Button size="sm" variant="ghost" disabled={checkingId === m.id} onClick={() => recheck(m)}>
-                          {checkingId === m.id ? 'Probing…' : 'Re-check'}
-                        </Button>
-                        <Button size="sm" variant="outline" className="border-red-500/30 text-red-400 hover:bg-red-500/10" onClick={() => remove(m)}>Delete</Button>
-                      </div>
-                    </CardContent>
-                  </Card>
-                )
-              })}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+
+        <Sheet
+          open={showCreate}
+          onClose={() => setShowCreate(false)}
+          title="New certificate monitor"
+          description="vaporRMM probes daily and alerts before expiry."
+          footer={
+            <>
+              <Button variant="ghost" size="sm" onClick={() => setShowCreate(false)}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={create} disabled={creating}>
+                {creating ? 'Adding…' : 'Add monitor'}
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <div>
+              <label className="block text-[11px] uppercase tracking-[0.12em] text-white/40 mb-1.5">URL</label>
+              <input
+                type="text"
+                placeholder="https://example.com or example.com:8443"
+                value={form.url}
+                onChange={(e) => setForm({ ...form, url: e.target.value })}
+                className="w-full bg-white/[0.04] border border-white/[0.08] rounded-md px-3 py-1.5 text-[13px] font-mono text-white placeholder:text-white/30 focus:outline-none focus:border-white/[0.2]"
+              />
             </div>
-          )}
-        </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-[0.12em] text-white/40 mb-1.5">
+                Alert threshold (days)
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={365}
+                value={form.alert_threshold_days}
+                onChange={(e) => setForm({ ...form, alert_threshold_days: parseInt(e.target.value) || 14 })}
+                className="w-full bg-white/[0.04] border border-white/[0.08] rounded-md px-3 py-1.5 text-[13px] text-white focus:outline-none focus:border-white/[0.2]"
+              />
+            </div>
+            <label className="flex items-center gap-2 text-[12.5px] text-white/85 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.internal_allowed}
+                onChange={(e) => setForm({ ...form, internal_allowed: e.target.checked })}
+                className="rounded bg-white/[0.04] border-white/[0.12]"
+              />
+              Allow internal IP (RFC1918)
+            </label>
+          </div>
+        </Sheet>
+
+        <ConfirmDialog
+          open={!!confirmDelete}
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={() => confirmDelete && void remove(confirmDelete)}
+          title="Delete monitor?"
+          description={`This stops probing ${confirmDelete?.url || ''}. The action is reversible — you can re-add it.`}
+          confirmLabel="Delete"
+          tone="danger"
+        />
       </DashboardShell>
     </AuthGuard>
   )

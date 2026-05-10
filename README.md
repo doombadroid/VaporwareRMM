@@ -258,6 +258,8 @@ $env:REGISTRATION_SECRET='vrt_xxxxx'
 
 The agent registers exactly once with the registration secret, persists its bearer token to `/etc/vaporrmm/agent_token` (Linux/macOS) or `%ProgramData%\vaporrmm\` (Windows), then heartbeats every 30 seconds.
 
+> **Agent trust model.** The agent runs as SYSTEM (Windows) / root (Linux, macOS) and the dashboard exposes a shell + script-execute path by design. **Anyone who holds a valid bearer token for a host, or holds the `admin` role in the dashboard tenant that owns the host, has root on that host** — they can install arbitrary packages, modify boot scripts, dump memory, or change passwords. There is no shell-level filter, allowlist, or sandbox at the agent layer; we removed the previous "dangerousPatterns" blocklist because it blocked five strings, was trivially bypassable, and made the next reviewer mistake it for real isolation. Treat dashboard `admin` as root, plan RBAC accordingly. Real defense-in-depth (container isolation, server-side per-command policy, an unprivileged agent variant) is a separate roadmap item.
+
 ---
 
 ## Architecture

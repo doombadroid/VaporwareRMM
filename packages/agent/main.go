@@ -97,34 +97,31 @@ var allowedCommandTypes = map[string]bool{
 // cumulative update can run 5+ minutes. Cap at 30 minutes.
 const patchInstallTimeout = 30 * time.Minute
 
-// dangerousPatterns blocks obvious destructive commands. Not a sandbox — proper
-// isolation requires seccomp/apparmor/containers.
-var dangerousPatterns = []string{
-	"rm -rf /", "rm -rf /*", "mkfs", "dd if=/dev/zero",
-	"> /dev/sda", ":(){ :|:& };:", "chmod 000 /", "mkfs.ext", "mkfs.xfs",
-}
-
-var dangerousRegexps = []*regexp.Regexp{
-	regexp.MustCompile(`curl\s+.*\|\s*sh`),
-	regexp.MustCompile(`curl\s+.*\|\s*bash`),
-	regexp.MustCompile(`wget\s+.*\|\s*sh`),
-	regexp.MustCompile(`wget\s+.*\|\s*bash`),
-}
-
-func isDangerous(cmd string) bool {
-	lower := strings.ToLower(cmd)
-	for _, p := range dangerousPatterns {
-		if strings.Contains(lower, strings.ToLower(p)) {
-			return true
-		}
-	}
-	for _, re := range dangerousRegexps {
-		if re.MatchString(cmd) {
-			return true
-		}
-	}
-	return false
-}
+// TRUST MODEL — read this before adding any "safety" checks here.
+//
+// The agent runs as SYSTEM/root on every managed endpoint and the
+// dashboard exposes a script-execute path by design. Any caller that
+// holds a valid bearer token for this agent already has root on this
+// host: it can install arbitrary packages, modify boot scripts, dump
+// memory, change passwords. There is no shell-level filter that can
+// meaningfully blunt that — every blocklist is one base64 / heredoc /
+// env-var indirection / Powershell-encoded-command away from a bypass.
+//
+// We previously kept a "dangerousPatterns" / "dangerousRegexps" reject
+// list. It blocked ~5 specific strings and produced no real defence,
+// while creating a moral hazard: future security reviews would see it
+// and conclude the agent was sandboxed when it isn't. Removed for
+// honesty.
+//
+// If you want a sandbox, the answer is one of:
+//   - container isolation (seccomp / apparmor / userns)
+//   - per-command policies enforced by an allowlist on the server
+//     side, before the command ever leaves the dashboard
+//   - an entirely different agent that doesn't run as root
+//
+// Don't reintroduce a blocklist. The threat model is "the dashboard's
+// admin role equals root on every endpoint" and that fact belongs in
+// every conversation about RBAC, not in a regexp here.
 
 // NewAgent creates an Agent, generating a random API token if none is provided.
 func NewAgent(serverURL string, port int, apiToken string) (*Agent, error) {
@@ -641,13 +638,6 @@ func (a *Agent) executeCommand(cmd CommandRequest) CommandResult {
 		return result
 	}
 
-	if isDangerous(cmdStr) {
-		slog.Warn("blocked dangerous command", "command", cmdStr)
-		result.Success = false
-		result.Error = "command rejected by safety policy"
-		return result
-	}
-
 	slog.Info("executing command", "id", cmd.ID, "command", cmdStr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -828,31 +818,20 @@ func (a *Agent) handleRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if isDangerous(cmdReq.Command) {
-		slog.Warn("blocked dangerous command via HTTP", "command", cmdReq.Command)
-		result := CommandResult{
-			CommandID: generateCommandID(),
-			Success:   false,
-			Error:     "command rejected by safety policy",
-			Timestamp: time.Now(),
-		}
-		a.addCommandResult(result)
-		writeJSON(w, http.StatusForbidden, result)
-		return
-	}
-
 	slog.Info("executing HTTP command", "command", cmdReq.Command)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
 	// Authenticated admin RCE channel. Trust boundary is authMiddleware
-	// (bearer token from server) + Tailscale firewall on port 47991 +
-	// isDangerous() blocklist above. Shell invocation is the API contract:
-	// the server side sends operator-authored commands (patch installs,
-	// service restarts) that require shell features (pipes, env, quoting).
-	// CodeQL go/command-injection is a true positive on dataflow but a
-	// false positive on intent — same risk profile as ssh.
+	// (bearer token from server) + Tailscale firewall on port 47991.
+	// Shell invocation is the API contract: the server side sends
+	// operator-authored commands (patch installs, service restarts) that
+	// require shell features (pipes, env, quoting). CodeQL
+	// go/command-injection is a true positive on dataflow but a false
+	// positive on intent — same risk profile as ssh.
+	// (See trust-model comment block above the removed dangerousPatterns
+	// list at the top of this file.)
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "cmd.exe", "/C", cmdReq.Command)

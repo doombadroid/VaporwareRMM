@@ -293,7 +293,9 @@ The agent registers exactly once with the registration secret, persists its bear
 - **CLI** (`packages/cli`) — Management CLI.
 - **Models** (`packages/models`) — Shared Go types between server + agent.
 
-DB abstraction (`internal/db`) supports SQLite (dev/single-host) and PostgreSQL (production). The wrapper rewrites `?` placeholders to `$1, $2, ...` for Postgres so handlers stay portable.
+DB abstraction (`internal/db`) supports SQLite (dev / very small fleets only) and PostgreSQL (production). The wrapper rewrites `?` placeholders to `$1, $2, ...` for Postgres so handlers stay portable.
+
+> **SQLite is single-writer.** The server refuses to start on SQLite once `devices` has more than 500 rows — past that point the heartbeat write rate produces "database is locked" failures the operator can't diagnose. Migrate to PostgreSQL by setting `DATABASE_URL=postgres://...` (the gate is operator-tunable via `SQLITE_DEVICE_LIMIT`; set to `0` to disable entirely if you really know your write rate).
 
 ---
 
@@ -333,6 +335,7 @@ make clean-bin       # rm -rf bin/
 | `SECRETS_ENCRYPTION_KEY` | for production | base64 32-byte key (`openssl rand -base64 32`). Encrypts SMTP passwords + TOTP secrets at rest. |
 | `DATABASE_URL` | for Postgres | `postgres://user:pw@host:5432/db?sslmode=disable`. Falls back to SQLite when unset. |
 | `DATABASE_PATH` | for SQLite | Path to SQLite file (default `./data/vapor_rmm.db`). |
+| `SQLITE_DEVICE_LIMIT` | `500` | Refuse to start on SQLite past this many `devices` rows. Set to `0` to disable. |
 | `ADMIN_PASSWORD` | optional | First-run admin password. Random + printed once if unset. |
 | `PUBLIC_URL` | for production | Base URL for password-reset and invite links. |
 | `CORS_ORIGINS` | for prod | Comma-separated allowed origins for the dashboard. |

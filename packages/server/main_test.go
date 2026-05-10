@@ -213,6 +213,88 @@ func TestAgentTokenRegistration(t *testing.T) {
 	}
 }
 
+// TestEnforceSQLiteScaleLimit covers the boot-time gate that refuses to
+// start on SQLite past the device-count threshold. We test all four
+// branches: under limit, at limit, override (raised), override (disabled).
+// The test seeds device rows directly to avoid needing the agent
+// registration handler.
+func TestEnforceSQLiteScaleLimit(t *testing.T) {
+	// Earlier integration tests close db.DB in their defers. Reopen here
+	// so we have a working SQLite handle regardless of test order.
+	os.Setenv("DATABASE_PATH", ":memory:")
+	if db.DB == nil || db.DB.Ping() != nil {
+		if err := db.Init(); err != nil {
+			t.Fatalf("db init: %v", err)
+		}
+	}
+	if db.DB == nil || db.DB.Dialect != "sqlite" {
+		t.Skip("scale gate is SQLite-only")
+	}
+	defer func() {
+		// Clean rows created here so other tests start from a known state.
+		_, _ = db.DB.Exec(`DELETE FROM devices WHERE id LIKE 'scaletest-%'`)
+		_ = os.Unsetenv("SQLITE_DEVICE_LIMIT")
+	}()
+
+	insert := func(n int) {
+		t.Helper()
+		_, _ = db.DB.Exec(`DELETE FROM devices WHERE id LIKE 'scaletest-%'`)
+		for i := 0; i < n; i++ {
+			if _, err := db.DB.Exec(
+				`INSERT INTO devices (id, hostname, status, last_seen, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?)`,
+				"scaletest-"+itoa(i), "host-"+itoa(i), "online", 0, 0, "default",
+			); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+		}
+	}
+
+	// Wipe ALL devices left behind by earlier tests in the suite — they
+	// don't share a clean teardown — so the count we test against is
+	// only what we just inserted.
+	if _, err := db.DB.Exec(`DELETE FROM devices`); err != nil {
+		t.Fatalf("wipe: %v", err)
+	}
+
+	// Under the default limit: pass.
+	os.Unsetenv("SQLITE_DEVICE_LIMIT")
+	insert(10)
+	if err := enforceSQLiteScaleLimit(); err != nil {
+		t.Fatalf("unexpected gate trip under default limit: %v", err)
+	}
+
+	// At the env-overridden limit: trip.
+	os.Setenv("SQLITE_DEVICE_LIMIT", "5")
+	if err := enforceSQLiteScaleLimit(); err == nil {
+		t.Fatal("expected scale gate to trip when count >= limit")
+	}
+
+	// Limit raised above row count: pass.
+	os.Setenv("SQLITE_DEVICE_LIMIT", "1000")
+	if err := enforceSQLiteScaleLimit(); err != nil {
+		t.Fatalf("expected raised limit to pass: %v", err)
+	}
+
+	// Limit disabled (0): always pass, even with rows >> any threshold.
+	os.Setenv("SQLITE_DEVICE_LIMIT", "0")
+	if err := enforceSQLiteScaleLimit(); err != nil {
+		t.Fatalf("expected disabled gate to pass: %v", err)
+	}
+}
+
+// itoa is a stdlib-free int formatter so the test stays cheap to read.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	out := make([]byte, 0, 6)
+	for n > 0 {
+		out = append([]byte{byte('0' + n%10)}, out...)
+		n /= 10
+	}
+	return string(out)
+}
+
 func TestScanDevice(t *testing.T) {
 	// Test the ScanDevice helper function with a mock row
 	// This tests the pointer scan fixes

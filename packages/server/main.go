@@ -114,6 +114,19 @@ func main() {
 
 	db.EnsureDefaultTenant()
 
+	// SQLite is a single-writer database. Past a few hundred agents
+	// heartbeating every 30s, the writer queue starts producing
+	// "database is locked" failures the operator cannot diagnose. Refuse
+	// to boot on SQLite once the device row count crosses the threshold
+	// so the failure mode is loud (refuses startup, tells the operator
+	// to migrate) instead of silent (random write timeouts in
+	// production). Operators who really know what they're doing can
+	// raise / disable the gate via SQLITE_DEVICE_LIMIT.
+	if err := enforceSQLiteScaleLimit(); err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
+	}
+
 	redis.Init()
 	defer redis.Close()
 
@@ -614,4 +627,40 @@ func main() {
 	if err := app.Listen(fmt.Sprintf(":%d", utils.ServerPort)); err != nil {
 		slog.Error("failed to start server", "error", err)
 	}
+}
+
+// defaultSQLiteDeviceLimit is the row-count threshold at which SQLite
+// starts producing "database is locked" failures under the heartbeat
+// write rate (10k agents at 30s interval = ~333 wps; SQLite's single
+// writer can't keep up). 500 leaves the operator a clear migration
+// window before the cliff.
+const defaultSQLiteDeviceLimit = 500
+
+// enforceSQLiteScaleLimit refuses to start the server when the
+// configured database is SQLite and the device count is past the limit.
+// Returns an error suitable for fatal logging. Postgres callers always
+// pass.
+func enforceSQLiteScaleLimit() error {
+	if db.DB == nil || db.DB.Dialect != "sqlite" {
+		return nil
+	}
+	limit := defaultSQLiteDeviceLimit
+	if raw := os.Getenv("SQLITE_DEVICE_LIMIT"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			limit = n
+		}
+	}
+	// Operator escape hatch: SQLITE_DEVICE_LIMIT=0 disables the gate
+	// entirely. Documented as "I know what I'm doing".
+	if limit == 0 {
+		return nil
+	}
+	var count int
+	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM devices`).Scan(&count); err != nil {
+		return fmt.Errorf("sqlite scale check: failed to count devices: %w", err)
+	}
+	if count >= limit {
+		return fmt.Errorf("sqlite scale gate: %d devices registered, limit is %d. SQLite is single-writer and will produce 'database is locked' failures at this scale. Migrate to PostgreSQL by setting DATABASE_URL=postgres://..., or raise the threshold via SQLITE_DEVICE_LIMIT (set to 0 to disable the gate)", count, limit)
+	}
+	return nil
 }

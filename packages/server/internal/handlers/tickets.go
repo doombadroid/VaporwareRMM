@@ -18,6 +18,15 @@ import (
 	"github.com/google/uuid"
 )
 
+// allowedTicketStatuses / allowedTicketPriorities gate user-supplied values
+// before they hit the DB. Without these the dashboard's status-bucket
+// queries (`WHERE status NOT IN (...)`) silently miss rows with junk
+// statuses, and free-text priority breaks badge rendering.
+var (
+	allowedTicketStatuses   = map[string]bool{"open": true, "in_progress": true, "pending": true, "resolved": true, "closed": true}
+	allowedTicketPriorities = map[string]bool{"low": true, "medium": true, "high": true, "critical": true}
+)
+
 func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 	// List tickets
 	api.Get("/tickets", func(c *fiber.Ctx) error {
@@ -28,10 +37,12 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 		}
 		var rows *sql.Rows
 		var err error
+		// Hard cap so a runaway tenant can't OOM the server. Pagination
+		// can land later; for now 1k rows is well past dashboard needs.
 		if auth.IsSuperAdmin(role) {
-			rows, err = db.DB.Query(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets ORDER BY created_at DESC`)
+			rows, err = db.DB.Query(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets ORDER BY created_at DESC LIMIT 1000`)
 		} else {
-			rows, err = db.DB.Query(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets WHERE tenant_id = ? ORDER BY created_at DESC`, tenantID)
+			rows, err = db.DB.Query(`SELECT id, title, description, status, priority, device_id, assigned_to, created_at, updated_at, due_date, category FROM tickets WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 1000`, tenantID)
 		}
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query tickets"})
@@ -77,6 +88,9 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 		}
 		if req.Priority == "" {
 			req.Priority = "medium"
+		}
+		if !allowedTicketPriorities[req.Priority] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid priority"})
 		}
 		if req.Category == "" {
 			req.Category = "general"
@@ -185,6 +199,12 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
+		if req.Status != "" && !allowedTicketStatuses[req.Status] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid status"})
+		}
+		if req.Priority != "" && !allowedTicketPriorities[req.Priority] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid priority"})
+		}
 		now := time.Now().Unix()
 		role, _ := c.Locals("user_role").(string)
 		tenantID, _ := c.Locals("tenant_id").(string)
@@ -245,6 +265,8 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete ticket"})
 		}
+		userID, _ := c.Locals("user_id").(string)
+		events.AuditLogTenant(tenantID, userID, "ticket.delete", "ticket", id, "ticket deleted", c.IP())
 		return c.JSON(fiber.Map{"message": "Ticket deleted"})
 	})
 }

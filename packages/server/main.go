@@ -316,6 +316,12 @@ func main() {
 	// Ticket routes
 	handlers.RegisterTicketRoutes(api, cfg)
 
+	// Fleet-wide patch list (per-device CRUD lives in RegisterDeviceRoutes)
+	handlers.RegisterPatchRoutes(api)
+
+	// Network topology snapshot (Tailscale state per device)
+	handlers.RegisterNetworkRoutes(api)
+
 	// ============================================================
 	// Background goroutines
 	// ============================================================
@@ -335,25 +341,56 @@ func main() {
 			select {
 			case <-ticker.C:
 				threshold := time.Now().Unix() - int64(offlineSec)
-				res, err := db.DB.Exec(`UPDATE devices SET status = 'offline' WHERE last_seen < ? AND status != 'offline'`, threshold)
+				// Capture transition candidates first, then UPDATE only those
+				// IDs (with last_seen + status guards to drop devices that
+				// heartbeated between SELECT and UPDATE). Emit alerts only for
+				// rows the UPDATE actually changed — prior pattern picked N
+				// already-offline rows and re-emitted alerts every tick.
+				type offlineCandidate struct{ id, hostname, ownerID, tid string }
+				selRows, err := db.DB.Query(`SELECT id, hostname, COALESCE(user_id,''), COALESCE(tenant_id,'default') FROM devices WHERE last_seen < ? AND status != 'offline' LIMIT 500`, threshold)
 				if err != nil {
-					slog.Warn("offline detection query failed", "error", err)
+					slog.Warn("offline candidate query failed", "error", err)
 					continue
 				}
-				if n, _ := res.RowsAffected(); n > 0 {
-					slog.Info("marked devices offline", "count", n)
-					rows, _ := db.DB.Query(`SELECT id, hostname, COALESCE(user_id,''), COALESCE(tenant_id,'default') FROM devices WHERE last_seen < ? AND status = 'offline' LIMIT ?`, threshold, n)
-					if rows != nil {
-						for rows.Next() {
-							var did, hostname, ownerID, tid string
-							_ = rows.Scan(&did, &hostname, &ownerID, &tid)
-							ts := time.Now().Unix()
-							events.TriggerWebhooks(tid, "device.offline", map[string]interface{}{"device_id": did, "hostname": hostname, "timestamp": ts})
-							events.WSBroadcastFiltered(tid, ownerID, map[string]interface{}{"type": "device.offline", "device_id": did, "hostname": hostname, "timestamp": ts})
-							handlers.EmitAlert(tid, did, "offline", "warning", fmt.Sprintf("%s went offline", hostname))
-						}
-						rows.Close()
+				var candidates []offlineCandidate
+				for selRows.Next() {
+					var c offlineCandidate
+					if err := selRows.Scan(&c.id, &c.hostname, &c.ownerID, &c.tid); err == nil {
+						candidates = append(candidates, c)
 					}
+				}
+				selRows.Close()
+				if len(candidates) == 0 {
+					continue
+				}
+				ids := make([]interface{}, 0, len(candidates)+1)
+				placeholders := make([]string, 0, len(candidates))
+				for _, c := range candidates {
+					ids = append(ids, c.id)
+					placeholders = append(placeholders, "?")
+				}
+				ids = append(ids, threshold)
+				res, err := db.DB.Exec(`UPDATE devices SET status = 'offline' WHERE id IN (`+strings.Join(placeholders, ",")+`) AND last_seen < ? AND status != 'offline'`, ids...)
+				if err != nil {
+					slog.Warn("offline transition update failed", "error", err)
+					continue
+				}
+				updated, _ := res.RowsAffected()
+				if updated == 0 {
+					continue
+				}
+				slog.Info("marked devices offline", "count", updated)
+				// Verify per-row that the device is still offline before emitting.
+				// Skips candidates that heartbeated between SELECT and UPDATE.
+				for _, c := range candidates {
+					var stillOffline string
+					if err := db.DB.QueryRow(`SELECT status FROM devices WHERE id = ?`, c.id).Scan(&stillOffline); err != nil || stillOffline != "offline" {
+						continue
+					}
+					ts := time.Now().Unix()
+					events.TriggerWebhooks(c.tid, "device.offline", map[string]interface{}{"device_id": c.id, "hostname": c.hostname, "timestamp": ts})
+					events.WSBroadcastFiltered(c.tid, c.ownerID, map[string]interface{}{"type": "device.offline", "device_id": c.id, "hostname": c.hostname, "timestamp": ts})
+					handlers.EmitAlert(c.tid, c.id, "offline", "warning", fmt.Sprintf("%s went offline", c.hostname))
 				}
 			case <-offlineDone:
 				return

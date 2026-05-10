@@ -249,8 +249,9 @@ func RegisterAlertRoutes(api fiber.Router) {
 	})
 
 	// Resolve / acknowledge an open alert. Idempotent — calling twice
-	// keeps the original resolver in place.
-	api.Post("/alerts/:id/resolve", func(c *fiber.Ctx) error {
+	// keeps the original resolver in place. Admin-only to match the
+	// rest of the alert-config surface (alert-rules, alert-settings).
+	api.Post("/alerts/:id/resolve", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		alertID := c.Params("id")
 		tenantID, _ := c.Locals("tenant_id").(string)
 		if tenantID == "" {

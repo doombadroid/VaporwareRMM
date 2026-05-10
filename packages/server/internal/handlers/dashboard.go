@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"log/slog"
 	"time"
 
 	"vaporrmm/server/internal/auth"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 )
+
+// serverStartTime is captured at process boot so /dashboard/overview can
+// report uptime_hours without persistence. Reset on every restart.
+var serverStartTime = time.Now()
 
 func RegisterDashboardRoutes(api fiber.Router, cfg Config) {
 	api.Get("/dashboard/overview", func(c *fiber.Ctx) error {
@@ -51,21 +56,26 @@ func RegisterDashboardRoutes(api fiber.Router, cfg Config) {
 		_ = db.DB.QueryRow(`SELECT COUNT(*) FROM alerts`+alertWhere, scopeArg...).Scan(&alertCount)
 		_ = db.DB.QueryRow(`SELECT COUNT(*) FROM tickets`+ticketWhere, scopeArg...).Scan(&ticketCount)
 
-		// Latest CPU / memory / disk averaged across online devices.
-		// metrics_history is the per-heartbeat snapshot; take the most recent
-		// row per device, then average. SUBSELECT keeps it portable.
+		// Latest CPU / memory / disk averaged across recently-active devices.
+		// Subquery picks the newest metrics_history row per device (rn=1)
+		// then averages those, so a noisy heartbeater doesn't outweigh a
+		// quiet one. ROW_NUMBER works in Postgres and SQLite ≥3.25.
 		var avgCPU, avgMem, avgDisk sql.NullFloat64
 		metricArgs := []interface{}{staleThreshold}
-		metricWhere := " WHERE m.timestamp > ?"
+		metricWhere := " WHERE recorded_at > ?"
 		if scope != "" {
-			metricWhere += " AND d.tenant_id = ?"
+			metricWhere += " AND tenant_id = ?"
 			metricArgs = append(metricArgs, tenantID)
 		}
-		_ = db.DB.QueryRow(`
-			SELECT AVG(m.cpu_usage), AVG(m.memory_usage), AVG(m.disk_usage)
-			  FROM metrics_history m
-			  JOIN devices d ON d.id = m.device_id`+metricWhere, metricArgs...,
-		).Scan(&avgCPU, &avgMem, &avgDisk)
+		if err := db.DB.QueryRow(`
+			SELECT AVG(cpu_usage), AVG(memory_usage), AVG(disk_usage) FROM (
+				SELECT cpu_usage, memory_usage, disk_usage,
+					ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY recorded_at DESC) AS rn
+				FROM metrics_history`+metricWhere+`
+			) latest WHERE rn = 1`, metricArgs...,
+		).Scan(&avgCPU, &avgMem, &avgDisk); err != nil && err != sql.ErrNoRows {
+			slog.Warn("dashboard metrics avg query failed", "error", err)
+		}
 
 		// Active alert + pending ticket previews — small lists for the
 		// dashboard cards. Empty arrays when the tenant has none.
@@ -100,8 +110,42 @@ func RegisterDashboardRoutes(api fiber.Router, cfg Config) {
 			ticketRows.Close()
 		}
 
+		// 24h resource history. Hour-bucketed averages across all metrics_history
+		// rows in the tenant (or fleet for super_admin). Returns up to 24
+		// points; missing buckets are simply absent (chart will gap-fill).
+		resourceHistory := buildResourceHistory(now, scope != "", tenantID)
+
+		// Recent activity feed — top 10 audit_logs for the tenant. Heavily
+		// redacted: action + resource_type + timestamp only. We deliberately
+		// drop user_id, ip_address, free-text details, and resource_id —
+		// resource_id would leak UUIDs of resources the viewer may not
+		// have direct access to (e.g. user.create on an admin user a
+		// regular tenant member cannot enumerate via /admin). Full audit
+		// log stays admin-only at /audit-logs.
+		recentActivity := []map[string]interface{}{}
+		actRows, _ := db.DB.Query(`SELECT action, resource_type, created_at FROM audit_logs`+scope+` ORDER BY created_at DESC LIMIT 10`, scopeArg...)
+		if actRows != nil {
+			for actRows.Next() {
+				var action, rtype string
+				var createdAt int64
+				if err := actRows.Scan(&action, &rtype, &createdAt); err == nil {
+					recentActivity = append(recentActivity, map[string]interface{}{
+						"action": action, "resource_type": rtype, "created_at": createdAt,
+					})
+				}
+			}
+			actRows.Close()
+		}
+
+		// SLA card metrics. Real numbers from the tickets table — no
+		// CSAT / response_time targets configured yet, so fields are scoped
+		// to what we can actually measure.
+		sla := buildSLA(now, scope != "", tenantID, total, online)
+
+		uptimeHours := int(time.Since(serverStartTime).Hours())
+
 		return c.JSON(fiber.Map{
-			"device_stats": fiber.Map{"total": total, "online": online, "offline": offline, "maintenance": 0},
+			"device_stats": fiber.Map{"total": total, "online": online, "offline": offline},
 			"system_health": fiber.Map{
 				"total_devices":   total,
 				"online_devices":  online,
@@ -111,27 +155,139 @@ func RegisterDashboardRoutes(api fiber.Router, cfg Config) {
 				"cpu_usage":       roundPct(avgCPU),
 				"memory_usage":    roundPct(avgMem),
 				"disk_usage":      roundPct(avgDisk),
-				"network_latency": 0,
-				"uptime_hours":    0,
+				"uptime_hours":    uptimeHours,
 			},
 			"active_alerts":    activeAlerts,
 			"pending_tickets":  pendingTickets,
-			"resource_history": []fiber.Map{},
+			"resource_history": resourceHistory,
+			"recent_activity":  recentActivity,
+			"sla":              sla,
 		})
 	})
 }
 
+// buildResourceHistory returns a 24-point hourly average of CPU/mem/disk
+// for the requested scope. Buckets are computed in SQL for efficiency
+// (one query, not 24). Missing hours are simply absent — recharts handles
+// the gaps.
+func buildResourceHistory(now int64, scoped bool, tenantID string) []map[string]interface{} {
+	windowStart := now - 24*3600
+	args := []interface{}{windowStart}
+	where := " WHERE recorded_at > ?"
+	if scoped {
+		where += " AND tenant_id = ?"
+		args = append(args, tenantID)
+	}
+	// Bucket by hour: floor(recorded_at / 3600). AVG is fine even on the
+	// noisy heartbeats — it's a fleet-level smoothed view, not per-device.
+	rows, err := db.DB.Query(`
+		SELECT (recorded_at / 3600) * 3600 AS bucket,
+			AVG(cpu_usage), AVG(memory_usage), AVG(disk_usage)
+		FROM metrics_history`+where+`
+		GROUP BY bucket
+		ORDER BY bucket ASC
+		LIMIT 24`, args...)
+	if err != nil {
+		slog.Warn("resource_history query failed", "error", err)
+		return []map[string]interface{}{}
+	}
+	defer rows.Close()
+	out := []map[string]interface{}{}
+	for rows.Next() {
+		var bucket int64
+		var cpu, mem, disk sql.NullFloat64
+		if err := rows.Scan(&bucket, &cpu, &mem, &disk); err != nil {
+			slog.Warn("resource_history scan failed", "error", err)
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"time":   time.Unix(bucket, 0).UTC().Format("15:04"),
+			"cpu":    roundPct(cpu),
+			"memory": roundPct(mem),
+			"disk":   roundPct(disk),
+		})
+	}
+	return out
+}
+
+// buildSLA computes the four numbers shown on the SLA card from real
+// ticket/device data. All percentages are clamped to [0,100]. resolved_30d
+// counts tickets that hit a terminal status in the last 30 days; the
+// resolution-rate denominator is created tickets in the same window.
+// avg_response_minutes is the mean (updated_at - created_at) for resolved
+// tickets in the window — a rough first-touch proxy until ticket
+// comments / first-update tracking lands.
+func buildSLA(now int64, scoped bool, tenantID string, totalDevices, onlineDevices int) map[string]interface{} {
+	windowStart := now - 30*24*3600
+
+	scopeArg := []interface{}{}
+	scopeAnd := ""
+	if scoped {
+		scopeAnd = " AND tenant_id = ?"
+		scopeArg = []interface{}{tenantID}
+	}
+
+	var createdCount, resolvedCount int
+	createdArgs := append([]interface{}{windowStart}, scopeArg...)
+	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM tickets WHERE created_at > ?`+scopeAnd, createdArgs...).Scan(&createdCount)
+	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM tickets WHERE created_at > ? AND status IN ('resolved','closed')`+scopeAnd, createdArgs...).Scan(&resolvedCount)
+
+	var avgResponseSec sql.NullFloat64
+	_ = db.DB.QueryRow(`SELECT AVG(updated_at - created_at) FROM tickets WHERE created_at > ? AND status IN ('resolved','closed') AND updated_at > created_at`+scopeAnd, createdArgs...).Scan(&avgResponseSec)
+
+	resolutionRate := 0.0
+	if createdCount > 0 {
+		resolutionRate = float64(resolvedCount) / float64(createdCount) * 100.0
+		if resolutionRate > 100 {
+			resolutionRate = 100
+		}
+	}
+	uptimePct := 0.0
+	if totalDevices > 0 {
+		uptimePct = float64(onlineDevices) / float64(totalDevices) * 100.0
+	}
+	avgMinutes := 0.0
+	if avgResponseSec.Valid {
+		avgMinutes = avgResponseSec.Float64 / 60.0
+		if avgMinutes < 0 {
+			avgMinutes = 0
+		}
+	}
+	return map[string]interface{}{
+		"window_days":          30,
+		"online_pct":           clampPct(uptimePct),
+		"resolution_rate_pct":  clampPct(resolutionRate),
+		"resolved_count":       resolvedCount,
+		"created_count":        createdCount,
+		"avg_response_minutes": round1(avgMinutes),
+	}
+}
+
 // roundPct turns a possibly-NULL avg into a 0-100 number with one decimal.
+// Used for CPU / memory / disk percentages.
 func roundPct(v sql.NullFloat64) float64 {
 	if !v.Valid {
 		return 0
 	}
-	r := v.Float64
+	return clampPct(v.Float64)
+}
+
+// clampPct clamps r to [0, 100] and rounds to one decimal.
+func clampPct(r float64) float64 {
 	if r < 0 {
 		r = 0
 	}
 	if r > 100 {
 		r = 100
+	}
+	return round1(r)
+}
+
+// round1 rounds to one decimal without clamping. Use for unbounded values
+// like avg_response_minutes.
+func round1(r float64) float64 {
+	if r < 0 {
+		r = 0
 	}
 	return float64(int(r*10)) / 10
 }

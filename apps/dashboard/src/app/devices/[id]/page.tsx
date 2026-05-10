@@ -95,15 +95,15 @@ export default function DeviceDetailPage() {
               <CardContent className="space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-slate-400">IP Address</span>
-                  <span className="text-sm text-white font-mono">{device.ip_address}</span>
+                  <span className="text-sm text-white font-mono">{device.ip_address || 'N/A'}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-slate-400">MAC Address</span>
-                  <span className="text-sm text-white font-mono">{device.mac_address}</span>
+                  <span className="text-sm text-white font-mono">{device.mac_address || 'N/A'}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-slate-400">Agent Version</span>
-                  <span className="text-sm text-white">{device.agent_version}</span>
+                  <span className="text-sm text-white">{device.agent_version || 'N/A'}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-slate-400">Device ID</span>
@@ -128,7 +128,9 @@ export default function DeviceDetailPage() {
                   <HardDrive className="w-4 h-4 text-purple-400" />
                   <div className="flex-1">
                     <p className="text-sm text-slate-400">Memory</p>
-                    <p className="text-sm text-white">{device.memory ? `${device.memory}%` : 'N/A'}</p>
+                    <p className="text-sm text-white">
+                      {device.memory ? `${(device.memory / 1024 / 1024 / 1024).toFixed(1)} GB` : 'N/A'}
+                    </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -150,21 +152,27 @@ export default function DeviceDetailPage() {
                   <Wifi className="w-4 h-4 text-green-400" />
                   <div className="flex-1">
                     <p className="text-sm text-slate-400">Last Seen</p>
-                    <p className="text-sm text-white">{new Date(device.last_seen * 1000).toLocaleString()}</p>
+                    <p className="text-sm text-white">
+                      {device.last_seen > 0 ? new Date(device.last_seen * 1000).toLocaleString() : 'Never'}
+                    </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <Calendar className="w-4 h-4 text-blue-400" />
                   <div className="flex-1">
-                    <p className="text-sm text-slate-400">Created</p>
+                    <p className="text-sm text-slate-400">Registered</p>
                     <p className="text-sm text-white">{new Date(device.created_at * 1000).toLocaleString()}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <Clock className="w-4 h-4 text-yellow-400" />
                   <div className="flex-1">
-                    <p className="text-sm text-slate-400">Uptime</p>
-                    <p className="text-sm text-white">{Math.floor((Date.now() / 1000 - device.last_seen) / 60)} minutes ago</p>
+                    <p className="text-sm text-slate-400">Last Heartbeat</p>
+                    <p className="text-sm text-white">
+                      {device.last_seen > 0
+                        ? `${Math.max(0, Math.floor((Date.now() / 1000 - device.last_seen) / 60))} min ago`
+                        : 'Never'}
+                    </p>
                   </div>
                 </div>
               </CardContent>

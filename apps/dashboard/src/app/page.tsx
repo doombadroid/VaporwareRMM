@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { Monitor, Ticket, AlertTriangle, Zap, Cpu, Globe } from 'lucide-react'
+import { Monitor, Ticket, AlertTriangle, Zap, Cpu, HardDrive } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   type DashboardOverview,
@@ -131,11 +131,6 @@ export default function DashboardPage() {
           value: overview.system_health.offline_devices,
           color: '#f43f5e',
         },
-        {
-          name: 'Maintenance',
-          value: overview.device_stats.maintenance,
-          color: '#f59e0b',
-        },
       ]
     : []
 
@@ -241,32 +236,18 @@ export default function DashboardPage() {
                     totalDevices > 0 ? (onlineDevices / totalDevices) * 100 : 0
                   }
                   accent="emerald"
-                  trend={{
-                    direction: 'up',
-                    percentage: Math.round(
-                      (onlineDevices / totalDevices) * 100
-                    ),
-                  }}
                 />
                 <StatCard
                   title="Pending Tickets"
                   value={overview.pending_tickets?.length || 0}
                   icon={Ticket}
                   accent="cyan"
-                  trend={{
-                    direction: 'down',
-                    percentage:
-                      overview.pending_tickets?.filter(
-                        (t) => t.priority === 'critical'
-                      ).length || 0,
-                  }}
                 />
                 <StatCard
                   title="Active Alerts"
                   value={overview.active_alerts?.length || 0}
                   icon={AlertTriangle}
-                  accent="amber"
-                  trend={{ direction: 'up', percentage: critAlerts }}
+                  accent={critAlerts > 0 ? 'rose' : 'amber'}
                 />
                 <StatCard
                   title="CPU Usage"
@@ -283,10 +264,11 @@ export default function DashboardPage() {
                   progress={memUsage}
                 />
                 <StatCard
-                  title="Network Latency"
-                  value={overview.system_health.network_latency}
-                  icon={Globe}
+                  title="Disk Usage"
+                  value={overview.system_health.disk_usage}
+                  icon={HardDrive}
                   accent="emerald"
+                  progress={overview.system_health.disk_usage}
                 />
               </div>
             </div>
@@ -330,11 +312,11 @@ export default function DashboardPage() {
                   onClientLinks={handleLoadInstallLinks}
                   onSetupWizard={() => setSetupWizard(true)}
                 />
-                <RecentActivityPanel />
+                <RecentActivityPanel activity={overview.recent_activity} />
               </div>
             </div>
 
-            <SlaCard />
+            <SlaCard sla={overview.sla} />
           </div>
         )}
 

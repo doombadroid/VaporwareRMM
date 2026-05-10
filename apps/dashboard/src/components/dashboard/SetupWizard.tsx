@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   X,
@@ -28,11 +28,20 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
   const [localBranding, setLocalBranding] = useState<BrandingConfig>(branding)
   const [saving, setSaving] = useState(false)
   const [copied, setCopied] = useState(false)
+  // Origin set in effect so SSR doesn't bake a stale build-time API URL into
+  // the install command. window.location.origin is whatever the operator's
+  // dashboard is actually reachable at — that's what the curl command needs.
+  const [origin, setOrigin] = useState('')
+
+  useEffect(() => {
+    setOrigin(window.location.origin)
+  }, [])
 
   if (!open) return null
 
-  const apiBase = typeof window !== 'undefined' ? (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api').replace('/api', '') : ''
-  const installCmd = `curl -fsSL ${apiBase}/api/branding/agent-install?format=script | sudo bash -s -- --server ${apiBase}`
+  const installCmd = origin
+    ? `curl -fsSL ${origin}/api/branding/agent-install?format=script | sudo bash -s -- --server ${origin}`
+    : ''
 
   const steps = [
     { title: 'Welcome', icon: Sparkles },
@@ -42,20 +51,25 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
     { title: 'Complete', icon: CheckCircle },
   ]
 
-  const handleSaveBranding = async () => {
+  // Returns true on success so callers (next()) don't advance the step on a
+  // save failure (e.g. non-admin user without branding write permission).
+  const handleSaveBranding = async (): Promise<boolean> => {
     setSaving(true)
     try {
       await brandingApi.update(localBranding)
       setBranding(localBranding)
       toast.success('Branding saved')
+      return true
     } catch {
-      toast.error('Failed to save branding')
+      toast.error('Failed to save branding (admin only?)')
+      return false
     } finally {
       setSaving(false)
     }
   }
 
   const copyInstallCmd = () => {
+    if (!installCmd) return
     navigator.clipboard.writeText(installCmd)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
@@ -67,12 +81,12 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
     onClose()
   }
 
-  const next = () => {
+  const next = async () => {
     if (step === 1) {
-      handleSaveBranding().then(() => setStep((s) => Math.min(s + 1, steps.length - 1)))
-    } else {
-      setStep((s) => Math.min(s + 1, steps.length - 1))
+      const ok = await handleSaveBranding()
+      if (!ok) return
     }
+    setStep((s) => Math.min(s + 1, steps.length - 1))
   }
 
   const prev = () => setStep((s) => Math.max(s - 1, 0))
@@ -217,15 +231,15 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
 
               <div className="bg-black/40 rounded-xl border border-white/[0.08] p-4 space-y-3">
                 <code className="block text-xs font-mono text-white/60 break-all leading-relaxed">
-                  {installCmd}
+                  {installCmd || '…'}
                 </code>
                 <div className="flex gap-2">
-                  <Button size="sm" variant="outline" className="text-xs" onClick={copyInstallCmd}>
+                  <Button size="sm" variant="outline" className="text-xs" onClick={copyInstallCmd} disabled={!installCmd}>
                     {copied ? <CheckCircle className="w-3.5 h-3.5 mr-1 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 mr-1" />}
                     {copied ? 'Copied' : 'Copy'}
                   </Button>
-                  <Button size="sm" variant="outline" className="text-xs" asChild>
-                    <a href={`${apiBase}/api/branding/agent-install?format=script`} download>
+                  <Button size="sm" variant="outline" className="text-xs" asChild disabled={!origin}>
+                    <a href={origin ? `${origin}/api/branding/agent-install?format=script` : '#'} download>
                       <ExternalLink className="w-3.5 h-3.5 mr-1" />
                       Download Script
                     </a>

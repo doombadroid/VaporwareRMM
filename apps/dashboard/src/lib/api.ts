@@ -154,7 +154,6 @@ export interface DeviceStats {
   total: number;
   online: number;
   offline: number;
-  maintenance: number;
 }
 
 export interface Ticket {
@@ -188,7 +187,6 @@ export interface SystemHealth {
   cpu_usage: number;
   memory_usage: number;
   disk_usage: number;
-  network_latency: number;
   uptime_hours: number;
   total_devices: number;
   online_devices: number;
@@ -197,12 +195,29 @@ export interface SystemHealth {
   ticket_count: number;
 }
 
+export interface RecentActivityEntry {
+  action: string;
+  resource_type: string;
+  created_at: number;
+}
+
+export interface SLAMetrics {
+  window_days: number;
+  online_pct: number;
+  resolution_rate_pct: number;
+  resolved_count: number;
+  created_count: number;
+  avg_response_minutes: number;
+}
+
 export interface DashboardOverview {
   device_stats: DeviceStats;
   pending_tickets: Ticket[];
   active_alerts: Alert[];
   system_health: SystemHealth;
   resource_history: Array<{ time: string; cpu: number; memory: number; disk: number }>;
+  recent_activity?: RecentActivityEntry[];
+  sla?: SLAMetrics;
 }
 
 // API Functions
@@ -399,11 +414,12 @@ export const branding = {
 export const dashboard = {
   getOverview: () =>
     api.get<DashboardOverview>('/dashboard/overview').then((res) => res.data || {
-      device_stats: { total: 0, online: 0, offline: 0, maintenance: 0 },
-      system_health: { total_devices: 0, online_devices: 0, offline_devices: 0, alert_count: 0, ticket_count: 0, cpu_usage: 0, memory_usage: 0, disk_usage: 0, network_latency: 0, uptime_hours: 0 },
+      device_stats: { total: 0, online: 0, offline: 0 },
+      system_health: { total_devices: 0, online_devices: 0, offline_devices: 0, alert_count: 0, ticket_count: 0, cpu_usage: 0, memory_usage: 0, disk_usage: 0, uptime_hours: 0 },
       active_alerts: [],
       pending_tickets: [],
       resource_history: [],
+      recent_activity: [],
     }),
 };
 
@@ -425,6 +441,57 @@ export const alertsApi = {
     api.get<{ alerts: Alert[] }>(`/alerts${includeResolved ? '?include_resolved=1' : ''}`).then((r) => r.data?.alerts ?? []),
   resolve: (id: string) =>
     api.post(`/alerts/${id}/resolve`).then((r) => r.data),
+};
+
+// ── Patches (Stage 2) ────────────────────────────────────────────────
+
+export interface Patch {
+  id: string;
+  device_id: string;
+  device_name?: string;
+  title: string;
+  description: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  status: 'pending' | 'installed' | 'failed';
+  installed_at?: number;
+  created_at: number;
+}
+
+export type PatchStatusFilter = 'pending' | 'installed' | 'failed' | 'all';
+
+export const patchesApi = {
+  list: (status: PatchStatusFilter = 'pending') =>
+    api.get<{ patches: Patch[] }>(`/patches?status=${encodeURIComponent(status)}`).then((r) => r.data?.patches ?? []),
+  updateStatus: (id: string, status: 'installed' | 'failed' | 'pending') =>
+    api.put(`/patches/${id}`, { status }).then((r) => r.data),
+};
+
+// ── Network topology (Stage 2) ───────────────────────────────────────
+
+export interface NetworkNode {
+  id: string;
+  hostname: string;
+  ip_address: string;
+  status: string;
+  last_seen: number;
+  tailscale_installed: boolean;
+  tailscale_connected: boolean;
+  tailscale_ip?: string;
+  tailscale_hostname?: string;
+  tailscale_peers: number;
+  tailscale_backend_state?: string;
+}
+
+export interface NetworkTopology {
+  nodes: NetworkNode[];
+  total: number;
+  tailscale_installed: number;
+  tailscale_connected: number;
+}
+
+export const networkApi = {
+  getTopology: () =>
+    api.get<NetworkTopology>('/network/topology').then((r) => r.data),
 };
 
 // ── AI ───────────────────────────────────────────────────────────────────

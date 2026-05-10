@@ -628,6 +628,30 @@ func RunMigrations(dialect string) error {
 			ALTER TABLE users ADD COLUMN routing_weight INTEGER DEFAULT 100;
 			ALTER TABLE tickets ADD COLUMN ai_route TEXT;`,
 		},
+		{
+			Version: "034",
+			Name:    "add_alerts_table",
+			// Persistent incident log surfaced on the dashboard /alerts page.
+			// Distinct from alert_rules (config) and audit_logs (every admin
+			// action). Rows here are user-acknowledgeable events: a device
+			// went offline, CPU pinned for N minutes, AI cluster opened.
+			// resolved_at is nullable; the index keeps the open-incidents
+			// query (the common dashboard hit) cheap.
+			SQL: `CREATE TABLE IF NOT EXISTS alerts (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				device_id TEXT,
+				type TEXT NOT NULL,
+				severity TEXT NOT NULL DEFAULT 'warning',
+				message TEXT NOT NULL,
+				resolved INTEGER NOT NULL DEFAULT 0,
+				resolved_at INTEGER,
+				resolved_by TEXT,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_alerts_tenant_open ON alerts(tenant_id, resolved, created_at DESC);
+			CREATE INDEX IF NOT EXISTS idx_alerts_device ON alerts(device_id);`,
+		},
 	}
 
 	for _, m := range migrations {

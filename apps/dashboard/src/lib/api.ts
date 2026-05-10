@@ -407,6 +407,26 @@ export const dashboard = {
     }),
 };
 
+export const ticketsApi = {
+  list: () =>
+    api.get<{ tickets: Ticket[] }>('/tickets').then((r) => r.data?.tickets ?? []),
+  get: (id: string) =>
+    api.get<{ ticket: Ticket }>(`/tickets/${id}`).then((r) => r.data?.ticket),
+  create: (data: { title: string; description?: string; priority?: string; device_id?: string; category?: string }) =>
+    api.post<{ id: string }>('/tickets', data).then((r) => r.data),
+  update: (id: string, data: Partial<Pick<Ticket, 'title' | 'description' | 'status' | 'priority' | 'assigned_to'>>) =>
+    api.put(`/tickets/${id}`, data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/tickets/${id}`).then((r) => r.data),
+};
+
+export const alertsApi = {
+  list: (includeResolved = false) =>
+    api.get<{ alerts: Alert[] }>(`/alerts${includeResolved ? '?include_resolved=1' : ''}`).then((r) => r.data?.alerts ?? []),
+  resolve: (id: string) =>
+    api.post(`/alerts/${id}/resolve`).then((r) => r.data),
+};
+
 // ── AI ───────────────────────────────────────────────────────────────────
 
 export interface AITenantSettings {

@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"vaporrmm/server/internal/auth"
@@ -13,6 +15,34 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
+
+// EmitAlert persists an incident row that the dashboard /alerts page renders.
+// Fire-and-forget: we don't surface insert errors to the caller because the
+// alert path is supplementary (webhook + email already fired in parallel via
+// events.TriggerWebhooks). De-duplication is the caller's responsibility —
+// repeated identical (tenant, device, type) pairs become repeated rows.
+func EmitAlert(tenantID, deviceID, alertType, severity, message string) {
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	if severity == "" {
+		severity = "warning"
+	}
+	id := uuid.New().String()
+	if _, err := db.DB.Exec(
+		`INSERT INTO alerts (id, tenant_id, device_id, type, severity, message, resolved, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
+		id, tenantID, sqlNullable(deviceID), alertType, severity, message, time.Now().Unix(),
+	); err != nil {
+		slog.Warn("alert insert failed", "tenant", tenantID, "type", alertType, "error", err)
+	}
+}
+
+func sqlNullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
 
 func RegisterAlertRoutes(api fiber.Router) {
 	api.Get("/alert-settings", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
@@ -161,6 +191,90 @@ func RegisterAlertRoutes(api fiber.Router) {
 		userID, _ := c.Locals("user_id").(string)
 		events.AuditLogTenant(tenantID, userID, "alert_rule.create", "alert_rule", ruleID, fmt.Sprintf("created alert rule %s", req.Name), c.IP())
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": ruleID, "message": "Alert rule created successfully"})
+	})
+
+	// ── Active alert log ────────────────────────────────────────────────
+	// Surfaces the persistent incident list shown on /alerts. Open
+	// alerts only by default; ?include_resolved=1 returns everything.
+	// Tenant-scoped except for super_admin.
+	api.Get("/alerts", func(c *fiber.Ctx) error {
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		role, _ := c.Locals("user_role").(string)
+		includeResolved := c.Query("include_resolved") == "1"
+
+		where := []string{}
+		args := []interface{}{}
+		if !auth.IsSuperAdmin(role) {
+			where = append(where, "tenant_id = ?")
+			args = append(args, tenantID)
+		}
+		if !includeResolved {
+			where = append(where, "resolved = 0")
+		}
+		clause := ""
+		if len(where) > 0 {
+			clause = " WHERE " + strings.Join(where, " AND ")
+		}
+		rows, err := db.DB.Query(`SELECT id, COALESCE(device_id,''), type, severity, message, resolved, COALESCE(resolved_at,0), COALESCE(resolved_by,''), created_at FROM alerts`+clause+` ORDER BY created_at DESC LIMIT 500`, args...)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query alerts"})
+		}
+		defer rows.Close()
+		type alert struct {
+			ID         string `json:"id"`
+			DeviceID   string `json:"device_id,omitempty"`
+			Type       string `json:"type"`
+			Severity   string `json:"severity"`
+			Message    string `json:"message"`
+			Resolved   bool   `json:"resolved"`
+			ResolvedAt int64  `json:"resolved_at,omitempty"`
+			ResolvedBy string `json:"resolved_by,omitempty"`
+			CreatedAt  int64  `json:"created_at"`
+		}
+		out := []alert{}
+		for rows.Next() {
+			var a alert
+			var resolved int
+			if err := rows.Scan(&a.ID, &a.DeviceID, &a.Type, &a.Severity, &a.Message, &resolved, &a.ResolvedAt, &a.ResolvedBy, &a.CreatedAt); err != nil {
+				slog.Warn("rows scan failed", "error", err)
+				continue
+			}
+			a.Resolved = resolved == 1
+			out = append(out, a)
+		}
+		return c.JSON(fiber.Map{"alerts": out})
+	})
+
+	// Resolve / acknowledge an open alert. Idempotent — calling twice
+	// keeps the original resolver in place.
+	api.Post("/alerts/:id/resolve", func(c *fiber.Ctx) error {
+		alertID := c.Params("id")
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		userID, _ := c.Locals("user_id").(string)
+		role, _ := c.Locals("user_role").(string)
+		now := time.Now().Unix()
+		var res sql.Result
+		var err error
+		if auth.IsSuperAdmin(role) {
+			res, err = db.DB.Exec(`UPDATE alerts SET resolved = 1, resolved_at = ?, resolved_by = ? WHERE id = ? AND resolved = 0`, now, userID, alertID)
+		} else {
+			res, err = db.DB.Exec(`UPDATE alerts SET resolved = 1, resolved_at = ?, resolved_by = ? WHERE id = ? AND tenant_id = ? AND resolved = 0`, now, userID, alertID, tenantID)
+		}
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to resolve alert"})
+		}
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Alert not found or already resolved"})
+		}
+		events.AuditLogTenant(tenantID, userID, "alert.resolve", "alert", alertID, "alert resolved", c.IP())
+		return c.JSON(fiber.Map{"message": "Resolved"})
 	})
 
 	api.Delete("/alert-rules/:id", auth.AdminMiddleware(), func(c *fiber.Ctx) error {

@@ -350,6 +350,7 @@ func main() {
 							ts := time.Now().Unix()
 							events.TriggerWebhooks(tid, "device.offline", map[string]interface{}{"device_id": did, "hostname": hostname, "timestamp": ts})
 							events.WSBroadcastFiltered(tid, ownerID, map[string]interface{}{"type": "device.offline", "device_id": did, "hostname": hostname, "timestamp": ts})
+							handlers.EmitAlert(tid, did, "offline", "warning", fmt.Sprintf("%s went offline", hostname))
 						}
 						rows.Close()
 					}

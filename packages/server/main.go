@@ -127,6 +127,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Populate audit_logs.signature for any pre-tamper-evidence rows so
+	// the chain is contiguous from epoch 0 forward. Idempotent — rows
+	// that already have a signature aren't rewritten (rewriting them
+	// would mask tampering on older rows). Operators who suspect their
+	// pre-migration audit log is compromised should purge it manually
+	// and let the chain restart fresh.
+	if err := events.BackfillAuditChain(); err != nil {
+		slog.Error("audit chain backfill failed at startup", "error", err)
+		os.Exit(1)
+	}
+
 	redis.Init()
 	defer redis.Close()
 

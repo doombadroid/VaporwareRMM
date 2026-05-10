@@ -979,6 +979,29 @@ func RunMigrations(dialect string) error {
 			// 999999ms doesn't poison the dashboard average.
 			SQL: `ALTER TABLE devices ADD COLUMN network_latency_ms INTEGER DEFAULT 0;`,
 		},
+		{
+			Version: "042",
+			Name:    "audit_log_tamper_evidence",
+			// Tamper-evident hash chain over audit_logs. Each row's
+			// signature is HMAC-SHA256 over the previous row's signature
+			// concatenated with a canonical encoding of this row.
+			// Rewriting any field, deleting a row, or inserting a row
+			// out of order breaks the chain at the tampered point and
+			// every row downstream of it. The verifier endpoint walks
+			// the chain and reports the first break.
+			//
+			// Existing rows (pre-migration) get the signature backfilled
+			// in chain order so the chain is contiguous from epoch 0
+			// onward. Operators who don't trust the integrity of pre-
+			// migration data can purge audit_logs and restart the
+			// chain — the migration leaves that decision to them.
+			//
+			// SQLite ALTER TABLE ADD COLUMN does not allow NOT NULL
+			// without a default, so the column lands with DEFAULT '' and
+			// is populated by a backfill pass below. New writes from
+			// AuditLogTenant always set a non-empty value.
+			SQL: `ALTER TABLE audit_logs ADD COLUMN signature TEXT NOT NULL DEFAULT '';`,
+		},
 	}
 
 	for _, m := range migrations {

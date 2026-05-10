@@ -7,6 +7,7 @@ import (
 
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+	"vaporrmm/server/internal/events"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -60,5 +61,23 @@ func RegisterAuditRoutes(api fiber.Router, cfg Config) {
 			slog.Warn("rows iteration error", "error", err)
 		}
 		return c.JSON(fiber.Map{"logs": logs})
+	})
+
+	// Tamper-evidence verifier. Walks the audit_log hash chain and
+	// reports the first row whose stored signature doesn't recompute,
+	// or whose signature is missing. Super_admin only — there is no
+	// per-tenant scope because the chain is fleet-wide; a tenant_admin
+	// who could verify only their own slice could be lied to about
+	// rows that were deleted or rewritten in a different tenant slot.
+	api.Get("/audit-logs/verify", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
+		role, _ := c.Locals("user_role").(string)
+		if !auth.IsSuperAdmin(role) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "super_admin only"})
+		}
+		res, err := events.VerifyAuditChain()
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(res)
 	})
 }

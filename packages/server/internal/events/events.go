@@ -124,21 +124,63 @@ func AuditLog(userID, action, resourceType, resourceID, details, ipAddress strin
 	AuditLogTenant("default", userID, action, resourceType, resourceID, details, ipAddress)
 }
 
-// AuditLogTenant records an admin action scoped to a tenant.
+// AuditLogTenant records an admin action scoped to a tenant. Fires the
+// chained insert from a background goroutine so handler latency
+// doesn't depend on the chain lock; the goroutine itself is
+// synchronous-on-the-mutex (auditChainMu) so concurrent callers see a
+// well-defined chain.
 func AuditLogTenant(tenantID, userID, action, resourceType, resourceID, details, ipAddress string) {
+	go AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, details, ipAddress)
+}
+
+// AuditLogTenantSync is the synchronous variant. Tests use it directly
+// so they can rely on the row being committed when the call returns.
+// Production handlers should keep using AuditLogTenant; calling this
+// from a request handler will serialise that handler with every other
+// audit write in flight.
+func AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, details, ipAddress string) {
 	if tenantID == "" {
 		tenantID = "default"
 	}
-	go func() {
-		_, err := db.DB.Exec(
-			`INSERT INTO audit_logs (id, user_id, action, resource_type, resource_id, details, ip_address, created_at, tenant_id)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			uuid.New().String(), userID, action, resourceType, resourceID, details, ipAddress, time.Now().Unix(), tenantID,
-		)
-		if err != nil {
-			slog.Warn("failed to write audit log", "error", err)
-		}
-	}()
+	auditChainMu.Lock()
+	defer auditChainMu.Unlock()
+
+	prevSig, err := loadLastAuditSignature()
+	if err != nil {
+		slog.Warn("audit log: failed to load chain head; row will write but chain may be discontinuous", "error", err)
+	}
+
+	// uuid v7 is time-ordered: alphabetical id order matches insertion
+	// order (modulo a 12-bit per-millisecond entropy that we don't
+	// generate two of in the same write thanks to auditChainMu). This
+	// is the property the chain-head lookup relies on — we sort by
+	// (created_at, id) and need that ordering to match the order rows
+	// were written. v4 (random) IDs broke the chain whenever two rows
+	// landed in the same Unix-second.
+	v7, err := uuid.NewV7()
+	if err != nil {
+		// Fall back to v4 — chain may break on same-second collisions
+		// but a working insert beats a panic in pathological clock
+		// conditions. Loud log so the operator notices.
+		slog.Error("audit log: NewV7 failed; falling back to NewRandom (chain may break on same-second writes)", "error", err)
+		v7 = uuid.New()
+	}
+	id := v7.String()
+	ts := auditNow()
+	sig := auditSignature(prevSig, canonicalAuditPayload(id, tenantID, userID, action, resourceType, resourceID, details, ipAddress, ts))
+
+	if _, err := db.DB.Exec(
+		`INSERT INTO audit_logs (id, user_id, action, resource_type, resource_id, details, ip_address, created_at, tenant_id, signature)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, userID, action, resourceType, resourceID, details, ipAddress, ts, tenantID, sig,
+	); err != nil {
+		// A write failure on a privileged action is the kind of silent
+		// gap the audit log exists to prevent. Log loudly — observ-
+		// ability is the only mitigation we have here short of
+		// refusing the originating action, which is too far downstream
+		// to abort cleanly.
+		slog.Error("audit log write failed", "error", err, "action", action, "user", userID, "tenant", tenantID)
+	}
 }
 
 // TriggerWebhooks fires webhooks subscribed in the given tenant for the named event.

@@ -102,15 +102,15 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		agentVersion, _ := regInfo["agent_version"].(string)
 		osClass := sysfeatures.ClassifyOS(osName)
 
-		// Re-registration check: if a row already exists for
-		// (tenant_id, hostname, mac_address) — installed by the
-		// idx_devices_dedup unique index — refresh that row and reuse
-		// the existing device_id instead of creating a duplicate. The
-		// agent's heartbeat-retry-exhaustion loop used to mint a new
-		// device_id on every re-register, which produced ghost rows
-		// and unbounded agent_token entries. The dedup pass at startup
-		// collapsed the historical duplicates; this UPSERT prevents
-		// future ones.
+		// Re-registration check + INSERT runs under db.DedupMu so a
+		// concurrent dedup pass can't race with this critical section.
+		// Without the lock, the dedup migration could be midway
+		// through collapsing a duplicate set when a fresh register
+		// lands inside the set, leaving a new duplicate that the
+		// CREATE UNIQUE INDEX at the end of dedup would reject.
+		// SQLite serialises writes natively; the mutex matters on
+		// Postgres.
+		db.DedupMu.Lock()
 		var existingID string
 		err := db.DB.QueryRow(
 			`SELECT id FROM devices WHERE tenant_id = ? AND hostname = ? AND COALESCE(mac_address, '') = ?`,
@@ -125,6 +125,7 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 				`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
 				localIP, osName, osVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
 			); err != nil {
+				db.DedupMu.Unlock()
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
 			}
 		default:
@@ -134,10 +135,12 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, agentVersion, "online", now, now, cpuModel, localIP, tenantID, osClass,
 			); err != nil {
+				db.DedupMu.Unlock()
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register device", "message": err.Error()})
 			}
 			registered = true
 		}
+		db.DedupMu.Unlock()
 
 		auth.RegisterAgentToken(token, deviceID, hostname, tenantID)
 		if registered {

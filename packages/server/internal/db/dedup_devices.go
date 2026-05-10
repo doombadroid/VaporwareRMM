@@ -5,7 +5,20 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 )
+
+// DedupMu serialises the device dedup pass with the agent register
+// handler. Holding it for the duration of the pass guarantees no new
+// row can land inside a duplicate set we're collapsing. The register
+// handler takes it briefly around its existence-check+INSERT critical
+// section so duplicate creation never races with deletion.
+//
+// SQLite already serialises writes at the database level, so the
+// mutex is structurally redundant there but cheap. On Postgres
+// multiple goroutines hold connections concurrently and the race is
+// real.
+var DedupMu sync.Mutex
 
 // fkTablesReferencingDeviceID is the explicit list of tables whose
 // device_id column points back at devices.id. It MUST be kept in sync
@@ -55,6 +68,12 @@ func DeduplicateDevicesAndCreateIndex() (int, error) {
 	if DB == nil {
 		return 0, fmt.Errorf("dedup: db not initialised")
 	}
+	// Hold the dedup mutex for the full pass. Register handler waits
+	// here while we're running so it can't introduce new duplicates
+	// inside a set we're collapsing. Mutex is fair across waiters per
+	// the Go runtime; a register burst won't starve indefinitely.
+	DedupMu.Lock()
+	defer DedupMu.Unlock()
 
 	// 1. Find duplicate sets keyed by (tenant_id, hostname, mac_address).
 	//    Empty mac_address is bucketed under "" so two records with no

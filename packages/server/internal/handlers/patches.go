@@ -10,14 +10,23 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// allowedPatchStatuses gates the ?status= filter so a junk value can't
-// shape the query. Per-row status comes from the DB so untrusted writes
-// would have to slip past the existing PUT validation first.
+// allowedPatchStatuses gates the ?status= filter on GET. Includes the
+// pseudo-value "all" which means "no status WHERE clause".
 var allowedPatchStatuses = map[string]bool{
 	"pending":   true,
 	"installed": true,
 	"failed":    true,
 	"all":       true,
+}
+
+// writeablePatchStatuses gates PUT /patches/:id payloads so untrusted
+// callers can't write a junk status that would later be invisible to the
+// status-filtered GET (and break dashboards that bucket on status).
+// Excludes "all".
+var writeablePatchStatuses = map[string]bool{
+	"pending":   true,
+	"installed": true,
+	"failed":    true,
 }
 
 func RegisterPatchRoutes(api fiber.Router) {

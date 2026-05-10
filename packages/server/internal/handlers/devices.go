@@ -1016,6 +1016,9 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		if err := c.BodyParser(&req); err != nil || req.Status == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Status is required"})
 		}
+		if !writeablePatchStatuses[req.Status] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid status"})
+		}
 		var installedAt interface{}
 		if req.Status == "installed" {
 			installedAt = time.Now().Unix()

@@ -1447,6 +1447,25 @@ func main() {
 	// Trim trailing slash for consistency
 	serverURL = strings.TrimSuffix(serverURL, "/")
 
+	// Refuse to send the bearer token in plaintext when the server URL
+	// points at a non-loopback host. Operators who explicitly want HTTP
+	// (e.g. a private Tailnet that already provides confidentiality) can
+	// set VAPOR_ALLOW_PLAINTEXT=1.
+	if strings.HasPrefix(serverURL, "http://") {
+		host := strings.TrimPrefix(serverURL, "http://")
+		if i := strings.Index(host, "/"); i >= 0 {
+			host = host[:i]
+		}
+		if i := strings.Index(host, ":"); i >= 0 {
+			host = host[:i]
+		}
+		isLoopback := host == "localhost" || host == "127.0.0.1" || host == "::1"
+		if !isLoopback && os.Getenv("VAPOR_ALLOW_PLAINTEXT") != "1" {
+			slog.Error("VAPOR_SERVER_URL is plaintext http://; refusing to send bearer token over the network. Use https:// or set VAPOR_ALLOW_PLAINTEXT=1 if the transport already provides confidentiality (e.g. Tailscale tailnet).", "url", serverURL)
+			os.Exit(2)
+		}
+	}
+
 	port := DefaultAgentPort
 	if p, ok := os.LookupEnv("VAPOR_AGENT_PORT"); ok {
 		if parsedPort, err := strconv.Atoi(p); err == nil {

@@ -196,35 +196,11 @@ func RegisterScriptRoutes(api fiber.Router, cfg Config) {
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create command"})
 		}
-		agentPort := cfg.DefaultAgentWSPort
-		if d.AgentPort != nil {
-			agentPort = *d.AgentPort
-		}
-		agentIP := ""
-		if d.AgentIP != nil {
-			agentIP = *d.AgentIP
-		}
-		auth.TokenMu.RLock()
-		var deviceToken string
-		for t, at := range auth.RegisteredTokens {
-			if at.DeviceID == deviceID {
-				deviceToken = t
-				break
-			}
-		}
-		auth.TokenMu.RUnlock()
-		go func() {
-			if sendErr := utils.SendCommandToDevice(agentIP, agentPort, deviceToken, payloadJSON); sendErr != nil {
-				slog.Error("failed to send script", "command_id", cmdID, "device_id", deviceID, "error", sendErr)
-				if _, err := db.DB.Exec(`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ?`, "failed", sendErr.Error(), time.Now().Unix(), cmdID); err != nil {
-					slog.Warn("db exec failed", "error", err)
-				}
-			} else {
-				if _, err := db.DB.Exec(`UPDATE device_commands SET status = ?, finished_at = ? WHERE id = ?`, "completed", time.Now().Unix(), cmdID); err != nil {
-					slog.Warn("db exec failed", "error", err)
-				}
-			}
-		}()
+		// Pull-only delivery: agent's commandPollLoop fetches pending
+		// rows every 15s. Push was structurally broken — see the
+		// /devices/:id/command handler for the full explanation.
+		_ = d
+		_ = cfg.DefaultAgentWSPort
 		userID, _ := c.Locals("user_id").(string)
 		events.AuditLogTenant(tenantID, userID, "script.execute", "device", deviceID, fmt.Sprintf("executed script %s", scriptName), c.IP())
 		return c.JSON(fiber.Map{"message": "Script execution started", "command_id": cmdID, "script": scriptName})

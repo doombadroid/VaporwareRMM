@@ -263,41 +263,21 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create command"})
 		}
 
-		agentPort := cfg.DefaultAgentWSPort
-		if d.AgentPort != nil {
-			agentPort = *d.AgentPort
-		}
-		agentIP := ""
-		if d.AgentIP != nil {
-			agentIP = *d.AgentIP
-		}
-
-		auth.TokenMu.RLock()
-		var deviceToken string
-		for t, at := range auth.RegisteredTokens {
-			if at.DeviceID == id {
-				deviceToken = t
-				break
-			}
-		}
-		auth.TokenMu.RUnlock()
-
-		go func() {
-			if sendErr := utils.SendCommandToDevice(agentIP, agentPort, deviceToken, payloadJSON); sendErr != nil {
-				slog.Error("failed to send command", "command_id", cmdID, "device_id", id, "error", sendErr)
-				if _, err := db.DB.Exec(`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ?`, "failed", sendErr.Error(), time.Now().Unix(), cmdID); err != nil {
-					slog.Warn("db exec failed", "error", err)
-				}
-			} else {
-				if _, err := db.DB.Exec(`UPDATE device_commands SET status = ?, finished_at = ? WHERE id = ?`, "completed", time.Now().Unix(), cmdID); err != nil {
-					slog.Warn("db exec failed", "error", err)
-				}
-			}
-		}()
+		// Delivery model: the agent polls /agent/<hostname>/commands every
+		// 15 seconds (see packages/agent/main.go commandPollLoop) and
+		// fetches all rows where status='pending' for its device. Pull is
+		// the only working path. Server→agent push was structurally
+		// broken — the server only ever holds the SHA-256 hash of the
+		// agent's bearer, so any Bearer header it could send would be
+		// rejected by the agent's plaintext-comparison middleware. Push
+		// was therefore always failing and silently flipping commands to
+		// 'failed' before the poll loop ever saw them.
+		_ = d
+		_ = cfg.DefaultAgentWSPort
 
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLogTenant(callerTenantID(c), userID, "device.command", "device", id, fmt.Sprintf("sent %s command", cmdReq.Type), c.IP())
-		return c.JSON(fiber.Map{"message": "Command sent", "command_id": cmdID})
+		events.AuditLogTenant(callerTenantID(c), userID, "device.command", "device", id, fmt.Sprintf("queued %s command", cmdReq.Type), c.IP())
+		return c.JSON(fiber.Map{"message": "Command queued", "command_id": cmdID})
 	})
 
 	// Sunshine endpoints
@@ -357,41 +337,13 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create command"})
 		}
 
-		agentPort := cfg.DefaultAgentWSPort
-		if d.AgentPort != nil {
-			agentPort = *d.AgentPort
-		}
-		agentIP := ""
-		if d.AgentIP != nil {
-			agentIP = *d.AgentIP
-		}
-
-		auth.TokenMu.RLock()
-		var deviceToken string
-		for t, at := range auth.RegisteredTokens {
-			if at.DeviceID == id {
-				deviceToken = t
-				break
-			}
-		}
-		auth.TokenMu.RUnlock()
-
-		go func() {
-			if sendErr := utils.SendCommandToDevice(agentIP, agentPort, deviceToken, payloadJSON); sendErr != nil {
-				slog.Error("failed to send sunshine install command", "command_id", cmdID, "device_id", id, "error", sendErr)
-				if _, err := db.DB.Exec(`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ?`, "failed", sendErr.Error(), time.Now().Unix(), cmdID); err != nil {
-					slog.Warn("db exec failed", "error", err)
-				}
-			} else {
-				if _, err := db.DB.Exec(`UPDATE device_commands SET status = ?, finished_at = ? WHERE id = ?`, "completed", time.Now().Unix(), cmdID); err != nil {
-					slog.Warn("db exec failed", "error", err)
-				}
-			}
-		}()
+		// Pull-only delivery (see /command handler comment above).
+		_ = d
+		_ = cfg.DefaultAgentWSPort
 
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLogTenant(callerTenantID(c), userID, "device.sunshine.install", "device", id, "sent sunshine install command", c.IP())
-		return c.JSON(fiber.Map{"message": "Sunshine install command sent", "command_id": cmdID})
+		events.AuditLogTenant(callerTenantID(c), userID, "device.sunshine.install", "device", id, "queued sunshine install command", c.IP())
+		return c.JSON(fiber.Map{"message": "Sunshine install command queued", "command_id": cmdID})
 	})
 
 	// Fetch Sunshine pairing PIN from device
@@ -536,40 +488,12 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create command"})
 		}
 
-		agentPort := cfg.DefaultAgentWSPort
-		if d.AgentPort != nil {
-			agentPort = *d.AgentPort
-		}
-		agentIP := ""
-		if d.AgentIP != nil {
-			agentIP = *d.AgentIP
-		}
-
-		auth.TokenMu.RLock()
-		var deviceToken string
-		for t, at := range auth.RegisteredTokens {
-			if at.DeviceID == id {
-				deviceToken = t
-				break
-			}
-		}
-		auth.TokenMu.RUnlock()
-
-		go func() {
-			if sendErr := utils.SendCommandToDevice(agentIP, agentPort, deviceToken, payloadJSON); sendErr != nil {
-				slog.Error("failed to send tailscale install command", "command_id", cmdID, "device_id", id, "error", sendErr)
-				if _, err := db.DB.Exec(`UPDATE device_commands SET status = ?, output = ?, finished_at = ? WHERE id = ?`, "failed", sendErr.Error(), time.Now().Unix(), cmdID); err != nil {
-					slog.Warn("db exec failed", "error", err)
-				}
-			} else {
-				if _, err := db.DB.Exec(`UPDATE device_commands SET status = ?, finished_at = ? WHERE id = ?`, "completed", time.Now().Unix(), cmdID); err != nil {
-					slog.Warn("db exec failed", "error", err)
-				}
-			}
-		}()
+		// Pull-only delivery (see /command handler comment above).
+		_ = d
+		_ = cfg.DefaultAgentWSPort
 
 		userID, _ := c.Locals("user_id").(string)
-		events.AuditLogTenant(callerTenantID(c), userID, "device.tailscale.install", "device", id, "sent tailscale install command", c.IP())
+		events.AuditLogTenant(callerTenantID(c), userID, "device.tailscale.install", "device", id, "queued tailscale install command", c.IP())
 		return c.JSON(fiber.Map{"message": "Tailscale install command sent", "command_id": cmdID})
 	})
 

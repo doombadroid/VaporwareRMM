@@ -13,8 +13,13 @@ const securityHeaders = [
       // Next.js requires unsafe-inline for styles and inline scripts during hydration
       "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "style-src 'self' 'unsafe-inline'",
-      // WebSocket connection back to the API server
-      "connect-src 'self' ws: wss:",
+      // connect-src controls fetch/XHR/WebSocket. 'self' covers the
+      // single-origin Caddy production path; the extra http(s)://localhost
+      // and ws(s)://localhost entries unblock the docker-compose.local.yml
+      // path where dashboard (:3000) and server (:8080) sit on different
+      // origins. Without these the browser silently rejects the cross-origin
+      // POST and the login form shows a generic 'Invalid email or password'.
+      "connect-src 'self' http://localhost:8080 ws://localhost:8080 ws: wss:",
       "img-src 'self' data: blob:",
       "font-src 'self'",
       "object-src 'none'",

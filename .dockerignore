@@ -1,0 +1,40 @@
+# Anything we don't want sent to the docker build context.
+# node_modules is the big one — it ships in builder stages via
+# `pnpm install --frozen-lockfile`, so the host copy must not overwrite
+# what the container set up via symlink (causes:
+# 'cannot copy to non-directory: ...@radix-ui/react-slot').
+
+**/node_modules
+**/.next
+**/dist
+**/build
+**/coverage
+**/.turbo
+**/.cache
+**/test-results
+**/playwright-report
+**/*.tsbuildinfo
+
+# Local-only artefacts
+.env
+.env.local
+.env.*.local
+secrets/
+data/
+bin/
+
+# IDE / VCS noise
+.git
+.github
+.idea
+.vscode
+.opencode
+.claude
+.agents
+
+# Docs / examples (Dockerfiles only need the apps + packages)
+docs/
+*.md
+!packages/server/README.md
+LICENSE
+CHANGELOG.md

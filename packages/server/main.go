@@ -243,13 +243,21 @@ func main() {
 	// must remain accessible without CSRF / auth middleware.
 	app.Use(func(c *fiber.Ctx) error {
 		path := c.Path()
-		if strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/api/v1/") &&
-			path != "/api/version" && path != "/api/openapi.json" &&
-			!strings.HasPrefix(path, "/api/auth/") &&
-			!strings.HasPrefix(path, "/api/branding/") {
-			return c.Redirect("/api/v1"+strings.TrimPrefix(path, "/api"), fiber.StatusPermanentRedirect)
+		if !strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/api/v1/") {
+			return c.Next()
 		}
-		return c.Next()
+		if path == "/api/version" || path == "/api/openapi.json" ||
+			strings.HasPrefix(path, "/api/auth/") {
+			return c.Next()
+		}
+		// /api/branding/* has a public GET (host-tenant-resolved) AND a
+		// /api/v1/branding/ authenticated PUT. Only the GET should bypass
+		// the redirect; otherwise PUT/PATCH/DELETE 405 against the
+		// public read-only handler.
+		if strings.HasPrefix(path, "/api/branding/") && c.Method() == fiber.MethodGet {
+			return c.Next()
+		}
+		return c.Redirect("/api/v1"+strings.TrimPrefix(path, "/api"), fiber.StatusPermanentRedirect)
 	})
 
 	// Auth routes

@@ -620,12 +620,22 @@ func aiListCapabilities(c *fiber.Ctx) error {
 			scope = cap.DefaultScope
 		}
 		unmet, _ := ai.CheckDependencies(cap.Name)
+		// Empty []string marshals to JSON null for nil slices, which the
+		// dashboard then crashes on with `Cannot read properties of null`.
+		// Coerce both lists to non-nil before serialising.
+		dependsOn := cap.DependsOn
+		if dependsOn == nil {
+			dependsOn = []string{}
+		}
+		if unmet == nil {
+			unmet = []string{}
+		}
 		out = append(out, fiber.Map{
 			"name":                        cap.Name,
 			"category":                    string(cap.Category),
 			"description":                 cap.Description,
 			"stage":                       cap.Stage,
-			"depends_on":                  cap.DependsOn,
+			"depends_on":                  dependsOn,
 			"unmet_dependencies":          unmet,
 			"required_caps":               cap.RequiredCaps,
 			"preferred_task_type":         string(cap.PreferredTaskType),

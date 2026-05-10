@@ -1,0 +1,33 @@
+# Local-test overlay. Skips Caddy (requires real DNS + cert) and exposes
+# server + dashboard directly to the host so you can hit them at:
+#
+#   http://localhost:8080  — Go API + WebSocket
+#   http://localhost:3000  — Next dashboard
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml \
+#                  up --build -d postgres redis server dashboard
+#
+# DO NOT use this overlay in production. There is no TLS in front of the
+# Go server here; cookies are sent over plaintext and anyone on the LAN
+# can sniff your auth_token. For real deployments use the Caddy path
+# from docker-compose.yml with a real DOMAIN.
+
+services:
+  server:
+    ports:
+      - "8080:8080"
+    environment:
+      # Same-origin from the dashboard's perspective at http://localhost:3000
+      CORS_ORIGINS: http://localhost:3000
+
+  dashboard:
+    build:
+      args:
+        # Bake the absolute API URL into the Next bundle so the browser
+        # hits the Go server directly. The default in apps/dashboard/Dockerfile
+        # is /api which assumes Caddy fronts both — that's wrong for the
+        # local-test path. Server CORS allows http://localhost:3000.
+        NEXT_PUBLIC_API_URL: http://localhost:8080/api
+    ports:
+      - "3000:3000"

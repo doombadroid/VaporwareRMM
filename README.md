@@ -84,33 +84,63 @@ Self-hosted Remote Monitoring & Management for MSPs and small ops teams. Multi-t
 
 ### Dashboard
 
-Super-admin's global view (the "All tenants" indicator + amber rule across the top mark cross-tenant context):
+Operator overview: fleet pulse (online / offline / open tickets / active alerts), 24h resource utilisation, recent activity, alert + ticket queues, and a 10-row device table with quick remote/Tailscale handles.
 
 ![Dashboard](docs/screenshots/02-dashboard.png)
 
+### Devices
+
+Filterable fleet table — toggle `Online`, `Offline`, `Warning`, plus inline hostname / IP / OS search. Each row links to the device detail surface (overview, command history, files, software inventory).
+
+![Devices](docs/screenshots/03-devices.png)
+
+### Tickets
+
+Open / All tabs. Severity pill, status pill, inline status switcher per row. New ticket opens a right-side sheet, never a modal.
+
+![Tickets](docs/screenshots/04-tickets.png)
+
+### Alerts
+
+Active / Resolved / All views. Severity-coloured pills go through a single tone helper so every status indicator looks identical across pages.
+
+![Alerts](docs/screenshots/05-alerts.png)
+
+### Patches
+
+OS + third-party updates discovered by agents. Severity, install status, KB / source, and CVE rendered inline; one-click install or mark-installed per row.
+
+![Patches](docs/screenshots/06-patches.png)
+
+### Network map
+
+Tailscale tailnet + device connectivity. Switch between graph and list view. Vital-signs row shows total devices, Tailscale installed, Tailscale connected.
+
+![Network map](docs/screenshots/07-network.png)
+
+### Command palette (⌘K)
+
+Global jump nav across pages, devices, and tickets. Fuzzy match with word-boundary boost; ↑↓ to navigate, ↵ to open.
+
+![Command palette](docs/screenshots/08-command-palette.png)
+
+### Settings · Security
+
+Per-user TOTP enrollment with QR code + 8 single-use backup codes shown once. Tabbed sidebar layout: General, Branding, Agents, Sessions, Security.
+
+![Settings · Security](docs/screenshots/09-settings-security.png)
+
+### Audit log
+
+Compact dense table. Every admin action is logged: action, resource, details, IP, with action / resource filters and configurable row limits.
+
+![Audit log](docs/screenshots/10-audit.png)
+
 ### Tenants admin
 
-Cross-tenant view, super-admin only. Each row: tenant name + slug, plan, device + user counts, age. Actions per row: rotate registration secret, impersonate, suspend, delete.
+Cross-tenant view, super-admin only. Tenant name + slug, plan, device + user counts, age. Per-row actions: rotate registration secret, impersonate, suspend, delete.
 
-![Tenants](docs/screenshots/03-tenants.png)
-
-### Two-factor auth
-
-Per-user TOTP enrollment with QR code + 8 single-use backup codes shown once.
-
-![Settings · Security](docs/screenshots/04-settings-security.png)
-
-### AI agent — operator surface
-
-The full AI control plane on one page: kill switches, providers (OpenAI / Anthropic / Google / Ollama / any OpenAI-compatible), per-task routing rules, the capability ladder (shadow → suggest → act_low → act_policy → autonomous), and the write-once audit ledger of every model call. Postgres + pgvector required; the tab is hidden on SQLite deployments.
-
-![AI agent](docs/screenshots/05-ai-admin.png)
-
-### AI assistance — natural-language fleet search + script generator
-
-Stage 2 capabilities surface here. NL search runs a tool-calling loop against `list_devices` / `list_tickets` / `list_active_clusters` and returns a tabular answer plus a per-step tool log. The script generator emits bash or PowerShell behind a danger-pattern validator; output is shown to the tech for review and never auto-executed.
-
-![AI assistance](docs/screenshots/06-ai-assistance.png)
+![Tenants](docs/screenshots/11-tenants.png)
 
 ### AI capability ladder + guardrails
 

@@ -74,8 +74,8 @@ func RegisterNetworkRoutes(api fiber.Router) {
 			slog.Warn("network topology iteration error", "error", err)
 		}
 		return c.JSON(fiber.Map{
-			"nodes":              nodes,
-			"total":              len(nodes),
+			"nodes":               nodes,
+			"total":               len(nodes),
 			"tailscale_installed": installedCount,
 			"tailscale_connected": connectedCount,
 		})

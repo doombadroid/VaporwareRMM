@@ -74,7 +74,7 @@ func RegisterNeighborRoutes(app *fiber.App, api fiber.Router) {
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "tx begin failed"})
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		if _, err := tx.Exec(db.DB.Q(`DELETE FROM neighbor_observations WHERE device_id = ?`), boundDeviceID); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "clear failed"})
 		}

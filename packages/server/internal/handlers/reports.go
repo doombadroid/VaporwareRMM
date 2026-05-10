@@ -20,11 +20,11 @@ import (
 )
 
 var allowedReportTypes = map[string]bool{
-	"fleet_status":      true,
-	"sla_monthly":       true,
-	"patch_compliance":  true,
-	"ticket_volume":     true,
-	"billing_hours":     true,
+	"fleet_status":     true,
+	"sla_monthly":      true,
+	"patch_compliance": true,
+	"ticket_volume":    true,
+	"billing_hours":    true,
 }
 
 const maxReportRecipients = 20

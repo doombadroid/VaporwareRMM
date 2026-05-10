@@ -27,15 +27,15 @@ var allowedSNMPPrivProtocols = map[string]bool{
 }
 
 const (
-	maxSNMPName       = 128
-	maxSNMPHost       = 253
-	maxSNMPUsername   = 64
-	maxSNMPOIDs       = 32
-	maxSNMPOIDLen     = 256
-	minSNMPPoll       = 30      // seconds
-	maxSNMPPoll       = 86_400  // seconds (1 day)
-	maxSNMPSecretLen  = 256
-	maxSNMPListLimit  = 500
+	maxSNMPName      = 128
+	maxSNMPHost      = 253
+	maxSNMPUsername  = 64
+	maxSNMPOIDs      = 32
+	maxSNMPOIDLen    = 256
+	minSNMPPoll      = 30     // seconds
+	maxSNMPPoll      = 86_400 // seconds (1 day)
+	maxSNMPSecretLen = 256
+	maxSNMPListLimit = 500
 )
 
 // validHostOrIP accepts a hostname or literal IP. Both internal IPs

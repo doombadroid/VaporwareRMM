@@ -253,7 +253,10 @@ func CertMonitorWorkerOnce() {
 		return
 	}
 	defer rows.Close()
-	type job struct{ id, tenantID, url string; internal bool }
+	type job struct {
+		id, tenantID, url string
+		internal          bool
+	}
 	var jobs []job
 	for rows.Next() {
 		var j job

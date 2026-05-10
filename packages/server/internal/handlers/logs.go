@@ -121,7 +121,9 @@ type teeHandler struct {
 	tap     *logBuffer
 }
 
-func (t *teeHandler) Enabled(ctx context.Context, l slog.Level) bool { return t.primary.Enabled(ctx, l) }
+func (t *teeHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	return t.primary.Enabled(ctx, l)
+}
 func (t *teeHandler) Handle(ctx context.Context, r slog.Record) error {
 	// Render record to a textual line. Don't try to mirror the primary
 	// handler's format byte-for-byte; just give the SSE consumer

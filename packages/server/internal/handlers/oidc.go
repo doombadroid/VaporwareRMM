@@ -34,11 +34,11 @@ func httpForwardedHostFromEnv() string {
 }
 
 const (
-	oidcStateTTL    = 10 * time.Minute
-	oidcStateBytes  = 32
-	maxOIDCIssuer   = 512
-	maxOIDCClient   = 256
-	maxOIDCSecret   = 1024
+	oidcStateTTL   = 10 * time.Minute
+	oidcStateBytes = 32
+	maxOIDCIssuer  = 512
+	maxOIDCClient  = 256
+	maxOIDCSecret  = 1024
 )
 
 // randomURLSafeString returns a base64url-encoded n-byte random string.

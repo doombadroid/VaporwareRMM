@@ -114,7 +114,7 @@ func RegisterInventoryRoutes(app *fiber.App, api fiber.Router) {
 			slog.Warn("inventory tx begin failed", "error", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to begin tx"})
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 
 		// tx.Exec doesn't pass through Wrapper.q — must rewrite placeholders
 		// via db.DB.Q for Postgres. SQLite is a no-op.

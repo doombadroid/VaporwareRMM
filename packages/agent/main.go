@@ -40,6 +40,12 @@ const (
 	MaxCommandHistory      = 100 // Maximum number of command results to keep
 	MaxHeartbeatRetries    = 5
 	HeartbeatBackoffBase   = 5 * time.Second
+	// InventoryInterval is much longer than heartbeat — installed software
+	// rarely changes hour-to-hour and the table replace is heavier.
+	InventoryInterval      = 6 * time.Hour
+	// MaxSoftwareEntries mirrors the server-side cap (handlers/inventory.go).
+	// We truncate locally to keep the JSON body small on slow links.
+	MaxSoftwareEntries     = 5000
 )
 
 // Agent holds the agent's runtime state.
@@ -387,6 +393,9 @@ func (a *Agent) Start() error {
 
 	// Poll server for pending commands.
 	go a.commandPollLoop()
+
+	// Periodic software/hardware inventory snapshot.
+	go a.inventoryLoop()
 
 	return nil
 }

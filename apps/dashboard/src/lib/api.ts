@@ -423,17 +423,106 @@ export const dashboard = {
     }),
 };
 
+export interface TicketComment {
+  id: string;
+  user_id: string;
+  body: string;
+  internal: boolean;
+  created_at: number;
+}
+
 export const ticketsApi = {
   list: () =>
     api.get<{ tickets: Ticket[] }>('/tickets').then((r) => r.data?.tickets ?? []),
   get: (id: string) =>
-    api.get<{ ticket: Ticket }>(`/tickets/${id}`).then((r) => r.data?.ticket),
+    api.get<Ticket>(`/tickets/${id}`).then((r) => r.data),
   create: (data: { title: string; description?: string; priority?: string; device_id?: string; category?: string }) =>
     api.post<{ id: string }>('/tickets', data).then((r) => r.data),
   update: (id: string, data: Partial<Pick<Ticket, 'title' | 'description' | 'status' | 'priority' | 'assigned_to'>>) =>
     api.put(`/tickets/${id}`, data).then((r) => r.data),
   remove: (id: string) =>
     api.delete(`/tickets/${id}`).then((r) => r.data),
+  listComments: (id: string) =>
+    api.get<{ comments: TicketComment[] }>(`/tickets/${id}/comments`).then((r) => r.data?.comments ?? []),
+  addComment: (id: string, body: string, internal: boolean) =>
+    api.post<{ id: string }>(`/tickets/${id}/comments`, { body, internal }).then((r) => r.data),
+};
+
+export interface TenantUser {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  created_at: number;
+  last_login?: number;
+}
+
+export const tenantUsersApi = {
+  list: () =>
+    api.get<{ users: TenantUser[] }>('/users').then((r) => r.data?.users ?? []),
+};
+
+// ── Inventory + groups (Stage 10) ────────────────────────────────────
+
+export interface SoftwareEntry {
+  name: string;
+  version?: string;
+  vendor?: string;
+  install_date?: number;
+  updated_at: number;
+}
+
+export interface FleetSoftwareRow {
+  name: string;
+  device_count: number;
+}
+
+export interface HardwareInfo {
+  cpu_model?: string;
+  cpu_cores?: number;
+  ram_bytes?: number;
+  disk_total_bytes?: number;
+  platform?: string;
+  platform_version?: string;
+  kernel_version?: string;
+}
+
+export interface DeviceGroup {
+  id: string;
+  name: string;
+  description: string;
+  created_at: number;
+}
+
+export interface DeviceGroupMember {
+  id: string;
+  hostname: string;
+  status: string;
+  last_seen: number;
+}
+
+export const inventoryApi = {
+  deviceSoftware: (id: string) =>
+    api.get<{ software: SoftwareEntry[] }>(`/devices/${id}/software`).then((r) => r.data?.software ?? []),
+  deviceHardware: (id: string) =>
+    api.get<{ hardware: HardwareInfo | null; updated_at?: number }>(`/devices/${id}/hardware`).then((r) => r.data),
+  fleetSoftware: (nameFilter?: string) =>
+    api.get<{ software: FleetSoftwareRow[] }>(`/software${nameFilter ? `?name=${encodeURIComponent(nameFilter)}` : ''}`).then((r) => r.data?.software ?? []),
+};
+
+export const deviceGroupsApi = {
+  list: () =>
+    api.get<{ groups: DeviceGroup[] }>('/device-groups').then((r) => r.data?.groups ?? []),
+  create: (data: { name: string; description?: string }) =>
+    api.post<{ id: string }>('/device-groups', data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/device-groups/${id}`).then((r) => r.data),
+  members: (id: string) =>
+    api.get<{ members: DeviceGroupMember[] }>(`/device-groups/${id}/members`).then((r) => r.data?.members ?? []),
+  addMembers: (id: string, deviceIds: string[]) =>
+    api.post<{ added: number }>(`/device-groups/${id}/members`, { device_ids: deviceIds }).then((r) => r.data),
+  removeMember: (id: string, deviceId: string) =>
+    api.delete(`/device-groups/${id}/members/${deviceId}`).then((r) => r.data),
 };
 
 export const alertsApi = {
@@ -492,6 +581,118 @@ export interface NetworkTopology {
 export const networkApi = {
   getTopology: () =>
     api.get<NetworkTopology>('/network/topology').then((r) => r.data),
+};
+
+// ── Audit log (Stage 8) ──────────────────────────────────────────────
+
+export interface AuditLogEntry {
+  id: string;
+  user_id: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  details: string;
+  ip_address: string;
+  created_at: number;
+}
+
+export const auditApi = {
+  list: (limit = 100) =>
+    api.get<{ logs: AuditLogEntry[] }>(`/audit-logs?limit=${limit}`).then((r) => r.data?.logs ?? []),
+};
+
+// ── Webhooks (Stage 8) ───────────────────────────────────────────────
+
+export interface Webhook {
+  id: string;
+  url: string;
+  secret?: string;
+  events: string;
+  enabled: boolean;
+  created_at: number;
+}
+
+export const webhooksApi = {
+  list: () =>
+    api.get<{ webhooks: Webhook[] }>('/webhooks').then((r) => r.data?.webhooks ?? []),
+  create: (data: { url: string; secret?: string; events: string; enabled: boolean }) =>
+    api.post<{ id: string }>('/webhooks', data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/webhooks/${id}`).then((r) => r.data),
+};
+
+// ── Alert rules (Stage 8) ────────────────────────────────────────────
+
+export interface AlertRule {
+  id: string;
+  name: string;
+  event_type: string;
+  severity: string;
+  enabled: boolean;
+  email_recipients?: string;
+  webhook_url?: string;
+  created_at: number;
+}
+
+export const alertRulesApi = {
+  list: () =>
+    api.get<{ rules: AlertRule[] }>('/alert-rules').then((r) => r.data?.rules ?? []),
+  create: (data: { name: string; event_type: string; severity?: string; email_recipients?: string; webhook_url?: string }) =>
+    api.post<{ id: string }>('/alert-rules', data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/alert-rules/${id}`).then((r) => r.data),
+};
+
+// ── Compliance (Stage 8) ─────────────────────────────────────────────
+
+export interface ComplianceResult {
+  device_id: string;
+  hostname: string;
+  check: string;
+  status: 'pass' | 'fail' | 'warn';
+  details: string;
+  severity?: string;
+}
+
+export const complianceApi = {
+  scan: () =>
+    api.get<{ results: ComplianceResult[]; issues: number }>('/compliance/scan').then((r) => r.data),
+  results: () =>
+    api.get<{ results: ComplianceResult[] }>('/compliance/results').then((r) => r.data?.results ?? []),
+};
+
+// ── Per-device commands + files (Stage 8) ────────────────────────────
+
+export interface DeviceCommand {
+  id: string;
+  type: string;
+  payload: string;
+  status: string;
+  output?: string;
+  created_at: number;
+  finished_at?: number;
+}
+
+export interface FileTransfer {
+  id: string;
+  device_id: string;
+  type: string;
+  file_name: string;
+  file_path: string;
+  status: string;
+  progress: number;
+  created_at: number;
+  completed_at?: number;
+}
+
+export const deviceCommandsApi = {
+  list: (deviceId: string, limit = 50) =>
+    api.get<{ commands: DeviceCommand[] }>(`/devices/${deviceId}/commands?limit=${limit}`).then((r) => r.data?.commands ?? []),
+};
+
+export const deviceFilesApi = {
+  list: (deviceId: string) =>
+    api.get<{ file_transfers: FileTransfer[] }>(`/devices/${deviceId}/file-transfers`).then((r) => r.data?.file_transfers ?? []),
 };
 
 // ── AI ───────────────────────────────────────────────────────────────────

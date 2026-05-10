@@ -269,4 +269,115 @@ func RegisterTicketRoutes(api fiber.Router, cfg Config) {
 		events.AuditLogTenant(tenantID, userID, "ticket.delete", "ticket", id, "ticket deleted", c.IP())
 		return c.JSON(fiber.Map{"message": "Ticket deleted"})
 	})
+
+	// ── Ticket comments (Stage 9) ──────────────────────────────────────
+	// Comment body is hard-capped to keep one bad client from filling the
+	// table. internal=true is admin-only on POST; on GET, customer scope
+	// (Stage 12) will filter internal=true rows out — the column drives
+	// that future filter.
+	const maxCommentBytes = 32 * 1024
+
+	api.Get("/tickets/:id/comments", func(c *fiber.Ctx) error {
+		ticketID := c.Params("id")
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		// Verify ticket belongs to tenant before returning comments.
+		var owner string
+		if auth.IsSuperAdmin(role) {
+			err := db.DB.QueryRow(`SELECT COALESCE(tenant_id,'default') FROM tickets WHERE id = ?`, ticketID).Scan(&owner)
+			if err != nil {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Ticket not found"})
+			}
+		} else {
+			err := db.DB.QueryRow(`SELECT COALESCE(tenant_id,'default') FROM tickets WHERE id = ? AND tenant_id = ?`, ticketID, tenantID).Scan(&owner)
+			if err != nil {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Ticket not found"})
+			}
+		}
+		rows, err := db.DB.Query(`SELECT id, user_id, body, internal, created_at FROM ticket_comments WHERE ticket_id = ? AND tenant_id = ? ORDER BY created_at ASC LIMIT 1000`, ticketID, owner)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to query comments"})
+		}
+		defer rows.Close()
+		type comment struct {
+			ID        string `json:"id"`
+			UserID    string `json:"user_id"`
+			Body      string `json:"body"`
+			Internal  bool   `json:"internal"`
+			CreatedAt int64  `json:"created_at"`
+		}
+		comments := []comment{}
+		for rows.Next() {
+			var cm comment
+			var internal int
+			if err := rows.Scan(&cm.ID, &cm.UserID, &cm.Body, &internal, &cm.CreatedAt); err != nil {
+				slog.Warn("comment scan failed", "error", err)
+				continue
+			}
+			cm.Internal = internal == 1
+			comments = append(comments, cm)
+		}
+		return c.JSON(fiber.Map{"comments": comments})
+	})
+
+	api.Post("/tickets/:id/comments", func(c *fiber.Ctx) error {
+		ticketID := c.Params("id")
+		var req struct {
+			Body     string `json:"body"`
+			Internal bool   `json:"internal"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
+		}
+		if len(req.Body) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Body is required"})
+		}
+		if len(req.Body) > maxCommentBytes {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Comment too long"})
+		}
+		role, _ := c.Locals("user_role").(string)
+		tenantID, _ := c.Locals("tenant_id").(string)
+		if tenantID == "" {
+			tenantID = "default"
+		}
+		// Only admin / super_admin can post internal comments. Regular
+		// users posting "internal" silently downgrade — server flips the
+		// flag rather than reject so the UI never has to care about role.
+		isAdmin := role == "admin" || auth.IsSuperAdmin(role)
+		if req.Internal && !isAdmin {
+			req.Internal = false
+		}
+		// Tenant ownership check on the ticket.
+		var ticketTenant string
+		if auth.IsSuperAdmin(role) {
+			err := db.DB.QueryRow(`SELECT COALESCE(tenant_id,'default') FROM tickets WHERE id = ?`, ticketID).Scan(&ticketTenant)
+			if err != nil {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Ticket not found"})
+			}
+		} else {
+			err := db.DB.QueryRow(`SELECT COALESCE(tenant_id,'default') FROM tickets WHERE id = ? AND tenant_id = ?`, ticketID, tenantID).Scan(&ticketTenant)
+			if err != nil {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Ticket not found"})
+			}
+		}
+		userID, _ := c.Locals("user_id").(string)
+		commentID := uuid.New().String()
+		internal := 0
+		if req.Internal {
+			internal = 1
+		}
+		_, err := db.DB.Exec(`INSERT INTO ticket_comments (id, ticket_id, tenant_id, user_id, body, internal, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			commentID, ticketID, ticketTenant, userID, req.Body, internal, time.Now().Unix())
+		if err != nil {
+			slog.Error("comment insert failed", "error", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to add comment"})
+		}
+		// Bump ticket updated_at so the dashboard ordering reflects activity.
+		_, _ = db.DB.Exec(`UPDATE tickets SET updated_at = ? WHERE id = ? AND tenant_id = ?`, time.Now().Unix(), ticketID, ticketTenant)
+		events.AuditLogTenant(ticketTenant, userID, "ticket.comment", "ticket", ticketID, fmt.Sprintf("comment added (internal=%t)", req.Internal), c.IP())
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"id": commentID, "message": "Comment added"})
+	})
 }

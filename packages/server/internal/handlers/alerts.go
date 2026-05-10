@@ -16,6 +16,13 @@ import (
 	"github.com/google/uuid"
 )
 
+// allowedAlertSeverities gates the severity enum on alert-rules + alerts
+// writes. Mirrors the ticket / patch enum-validation pattern.
+var allowedAlertSeverities = map[string]bool{
+	"low": true, "medium": true, "high": true, "critical": true,
+	"info": true, "warning": true,
+}
+
 // EmitAlert persists an incident row that the dashboard /alerts page renders.
 // Fire-and-forget: we don't surface insert errors to the caller because the
 // alert path is supplementary (webhook + email already fired in parallel via
@@ -176,6 +183,9 @@ func RegisterAlertRoutes(api fiber.Router) {
 		}
 		if req.Severity == "" {
 			req.Severity = "medium"
+		}
+		if !allowedAlertSeverities[req.Severity] {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid severity"})
 		}
 		ruleID := uuid.New().String()
 		now := time.Now().Unix()

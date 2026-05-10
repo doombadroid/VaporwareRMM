@@ -652,6 +652,74 @@ func RunMigrations(dialect string) error {
 			CREATE INDEX IF NOT EXISTS idx_alerts_tenant_open ON alerts(tenant_id, resolved, created_at DESC);
 			CREATE INDEX IF NOT EXISTS idx_alerts_device ON alerts(device_id);`,
 		},
+		{
+			Version: "035",
+			Name:    "add_ticket_comments_table",
+			// Comment thread per ticket. internal=1 means the comment is
+			// staff-only and never surfaces to a customer (Stage 12 portal).
+			// SLA first-response (handlers/dashboard.go) uses the earliest
+			// internal=0 comment timestamp; the index covers that lookup.
+			SQL: `CREATE TABLE IF NOT EXISTS ticket_comments (
+				id TEXT PRIMARY KEY,
+				ticket_id TEXT NOT NULL,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				user_id TEXT NOT NULL,
+				body TEXT NOT NULL,
+				internal INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_ticket_comments_ticket ON ticket_comments(ticket_id, created_at);
+			CREATE INDEX IF NOT EXISTS idx_ticket_comments_first_response ON ticket_comments(ticket_id, internal, created_at);`,
+		},
+		{
+			Version: "036",
+			Name:    "add_inventory_and_groups",
+			// device_software is rebuilt-from-scratch on each agent inventory
+			// post (see handlers/inventory.go); we don't keep history. Index
+			// on (tenant_id, name) supports fleet-wide "who has X" queries.
+			// device_groups is flat (no nesting) per Stage 10 plan.
+			SQL: `CREATE TABLE IF NOT EXISTS device_software (
+				id TEXT PRIMARY KEY,
+				device_id TEXT NOT NULL,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				name TEXT NOT NULL,
+				version TEXT,
+				vendor TEXT,
+				install_date INTEGER,
+				updated_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_software_device ON device_software(device_id);
+			CREATE INDEX IF NOT EXISTS idx_software_tenant_name ON device_software(tenant_id, name);
+
+			CREATE TABLE IF NOT EXISTS device_hardware (
+				device_id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				cpu_model TEXT,
+				cpu_cores INTEGER,
+				ram_bytes INTEGER,
+				disk_total_bytes INTEGER,
+				platform TEXT,
+				platform_version TEXT,
+				kernel_version TEXT,
+				updated_at INTEGER NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS device_groups (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				name TEXT NOT NULL,
+				description TEXT,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_groups_tenant ON device_groups(tenant_id);
+
+			CREATE TABLE IF NOT EXISTS device_group_members (
+				group_id TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				PRIMARY KEY (group_id, device_id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_group_members_device ON device_group_members(device_id);`,
+		},
 	}
 
 	for _, m := range migrations {

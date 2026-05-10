@@ -18,6 +18,12 @@ import {
   LogOut,
   Building2,
   Sparkles,
+  ScrollText,
+  Webhook,
+  BellRing,
+  ShieldCheck,
+  Boxes,
+  Users,
 } from 'lucide-react'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { useBranding } from '@/components/BrandingProvider'
@@ -29,6 +35,7 @@ type NavItem = {
   href: string
   icon: typeof BarChart3
   superAdminOnly?: boolean
+  adminOnly?: boolean
 }
 
 const navItems: NavItem[] = [
@@ -38,8 +45,14 @@ const navItems: NavItem[] = [
   { label: 'Alerts', href: '/alerts', icon: AlertTriangle },
   { label: 'Network Map', href: '/network', icon: Globe },
   { label: 'Patches', href: '/patches', icon: Package },
-  { label: 'Settings', href: '/settings', icon: Settings },
+  { label: 'Software', href: '/admin/software', icon: Boxes, adminOnly: true },
+  { label: 'Groups', href: '/admin/groups', icon: Users, adminOnly: true },
+  { label: 'Alert Rules', href: '/admin/alert-rules', icon: BellRing, adminOnly: true },
+  { label: 'Webhooks', href: '/admin/webhooks', icon: Webhook, adminOnly: true },
+  { label: 'Compliance', href: '/admin/compliance', icon: ShieldCheck, adminOnly: true },
+  { label: 'Audit Log', href: '/admin/audit', icon: ScrollText, adminOnly: true },
   { label: 'AI', href: '/admin/ai', icon: Sparkles },
+  { label: 'Settings', href: '/settings', icon: Settings },
   { label: 'Tenants', href: '/admin/tenants', icon: Building2, superAdminOnly: true },
 ]
 
@@ -156,7 +169,11 @@ export default function DashboardShell({
 
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-          {navItems.filter((item) => !item.superAdminOnly || isSuperAdmin).map((item) => {
+          {navItems.filter((item) => {
+            if (item.superAdminOnly && !isSuperAdmin) return false
+            if (item.adminOnly && user?.role !== 'admin' && !isSuperAdmin) return false
+            return true
+          }).map((item) => {
             const active =
               pathname === item.href || pathname.startsWith(item.href + '/')
             return (
@@ -237,7 +254,11 @@ export default function DashboardShell({
           </button>
         </div>
         <nav className="p-3 space-y-1">
-          {navItems.filter((item) => !item.superAdminOnly || isSuperAdmin).map((item) => {
+          {navItems.filter((item) => {
+            if (item.superAdminOnly && !isSuperAdmin) return false
+            if (item.adminOnly && user?.role !== 'admin' && !isSuperAdmin) return false
+            return true
+          }).map((item) => {
             const active =
               pathname === item.href || pathname.startsWith(item.href + '/')
             return (

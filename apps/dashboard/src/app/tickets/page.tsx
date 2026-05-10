@@ -109,8 +109,10 @@ export default function TicketsPage() {
               {visible.map((t) => (
                 <Card key={t.id} className="bg-slate-900/60 border-slate-800/50">
                   <CardHeader className="pb-2 flex flex-row items-start justify-between gap-3">
-                    <div className="flex flex-col">
-                      <CardTitle className="text-base">{t.title}</CardTitle>
+                    <div className="flex flex-col min-w-0">
+                      <Link href={`/tickets/${t.id}`} className="hover:text-blue-400">
+                        <CardTitle className="text-base truncate">{t.title}</CardTitle>
+                      </Link>
                       <div className="flex items-center gap-2 mt-1 text-xs">
                         <span className={`px-2 py-0.5 rounded border ${priorityClass[t.priority] ?? priorityClass.medium}`}>
                           {t.priority}

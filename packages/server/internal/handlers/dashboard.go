@@ -232,8 +232,26 @@ func buildSLA(now int64, scoped bool, tenantID string, totalDevices, onlineDevic
 	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM tickets WHERE created_at > ?`+scopeAnd, createdArgs...).Scan(&createdCount)
 	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM tickets WHERE created_at > ? AND status IN ('resolved','closed')`+scopeAnd, createdArgs...).Scan(&resolvedCount)
 
+	// First-response = (earliest non-internal ticket_comment) - tickets.created_at.
+	// Coalesce with the legacy proxy (updated_at - created_at) when the
+	// ticket was resolved without a customer-visible comment, so older
+	// tickets predating the comments table still contribute to the average.
+	tenantClause := ""
+	if scoped {
+		tenantClause = " AND t.tenant_id = ?"
+	}
 	var avgResponseSec sql.NullFloat64
-	_ = db.DB.QueryRow(`SELECT AVG(updated_at - created_at) FROM tickets WHERE created_at > ? AND status IN ('resolved','closed') AND updated_at > created_at`+scopeAnd, createdArgs...).Scan(&avgResponseSec)
+	_ = db.DB.QueryRow(`
+		SELECT AVG(response_seconds) FROM (
+			SELECT t.id,
+				COALESCE(
+					(SELECT MIN(c.created_at) FROM ticket_comments c
+						WHERE c.ticket_id = t.id AND c.internal = 0 AND c.created_at > t.created_at),
+					t.updated_at
+				) - t.created_at AS response_seconds
+			FROM tickets t
+			WHERE t.created_at > ? AND t.status IN ('resolved','closed') AND t.updated_at > t.created_at`+tenantClause+`
+		) firstResponse WHERE response_seconds > 0`, createdArgs...).Scan(&avgResponseSec)
 
 	resolutionRate := 0.0
 	if createdCount > 0 {

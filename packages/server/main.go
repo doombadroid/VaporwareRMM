@@ -322,6 +322,9 @@ func main() {
 	// Network topology snapshot (Tailscale state per device)
 	handlers.RegisterNetworkRoutes(api)
 
+	// Inventory (software / hardware) + device groups (Stage 10)
+	handlers.RegisterInventoryRoutes(app, api)
+
 	// ============================================================
 	// Background goroutines
 	// ============================================================

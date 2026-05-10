@@ -7,11 +7,15 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import AuthGuard from '@/components/AuthGuard'
 import { ThemeToggle } from '@/components/ThemeToggle'
+import TopologyGraph from '@/components/dashboard/TopologyGraph'
 import { networkApi, type NetworkTopology } from '@/lib/api'
+
+type NetworkView = 'graph' | 'list'
 
 export default function NetworkPage() {
   const [topology, setTopology] = useState<NetworkTopology | null>(null)
   const [loading, setLoading] = useState(true)
+  const [view, setView] = useState<NetworkView>('graph')
 
   useEffect(() => {
     networkApi.getTopology()
@@ -43,7 +47,22 @@ export default function NetworkPage() {
           </div>
         </header>
         <main className="container mx-auto px-6 py-8">
-          <h1 className="text-2xl font-bold mb-6">Network Map</h1>
+          <div className="flex items-center justify-between mb-6">
+            <h1 className="text-2xl font-bold">Network Map</h1>
+            <div className="flex gap-1 bg-slate-800 border border-slate-700 rounded-md p-1">
+              {(['graph', 'list'] as const).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  className={`px-3 py-1 text-xs rounded ${
+                    view === v ? 'bg-blue-500/20 text-blue-300' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+          </div>
 
           <div className="grid grid-cols-3 gap-3 mb-6">
             <Card className="bg-slate-900/60 border-slate-800/50">
@@ -75,6 +94,22 @@ export default function NetworkPage() {
               <CardContent className="py-12 text-center text-slate-400">
                 <p>No devices yet.</p>
                 <p className="text-sm mt-2">Install agents to populate the network map.</p>
+              </CardContent>
+            </Card>
+          ) : view === 'graph' ? (
+            <Card className="bg-slate-900/60 border-slate-800/50">
+              <CardHeader>
+                <CardTitle className="text-base">Topology</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <TopologyGraph nodes={topology.nodes} />
+                <div className="flex items-center justify-center gap-4 text-xs text-slate-400 mt-4 pt-4 border-t border-slate-800/50 flex-wrap">
+                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-500" /> online</span>
+                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-rose-500" /> offline</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-emerald-500/60" /> tailscale connected</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-amber-500/60" /> tailscale disconnected</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-slate-500/40" /> no tailscale</span>
+                </div>
               </CardContent>
             </Card>
           ) : (

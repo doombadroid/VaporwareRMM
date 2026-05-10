@@ -36,6 +36,25 @@ func oidcSafeContext(parent context.Context) context.Context {
 	return context.WithValue(ctx, oauth2.HTTPClient, c)
 }
 
+// createOIDCSession persists a stateful session row matching the JWT
+// the caller is about to set as a cookie. Extracted from the callback
+// handler so a regression test can pin the schema requirements (the
+// pre-fix INSERT omitted id + last_seen and silently broke SSO on
+// Postgres). Any future change to the user_sessions schema must
+// update both this function and TestOIDCCreateSessionPopulatesAllNotNull.
+func createOIDCSession(jwt, userID, ip, userAgent string) error {
+	sessionID := uuid.New().String()
+	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(jwt)))
+	nowSec := time.Now().Unix()
+	if _, err := db.DB.Exec(
+		`INSERT INTO user_sessions (id, user_id, token_hash, ip_address, user_agent, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, userID, tokenHash, ip, userAgent, nowSec, nowSec,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
 // httpForwardedHostFromEnv lets operators override the redirect-URI
 // host via FORWARDED_HOST when running behind a reverse proxy that
 // terminates TLS. We deliberately do NOT honor X-Forwarded-Host header
@@ -357,17 +376,7 @@ func RegisterOIDCRoutes(app *fiber.App, publicAPI fiber.Router, api fiber.Router
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).SendString("token issue failed")
 		}
-		// Stateful session row so AuthMiddleware accepts the token.
-		// Schema requires id (PK) + last_seen (NOT NULL) — the previous
-		// shorter INSERT silently failed on Postgres and made the next
-		// request fail the stateful session check, breaking SSO entirely.
-		sessionID := uuid.New().String()
-		tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(jwt)))
-		nowSec := time.Now().Unix()
-		if _, err := db.DB.Exec(
-			`INSERT INTO user_sessions (id, user_id, token_hash, ip_address, user_agent, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			sessionID, userID, tokenHash, c.IP(), c.Get("User-Agent"), nowSec, nowSec,
-		); err != nil {
+		if err := createOIDCSession(jwt, userID, c.IP(), c.Get("User-Agent")); err != nil {
 			slog.Warn("oidc session insert failed", "error", err)
 			return c.Status(fiber.StatusInternalServerError).SendString("session create failed")
 		}

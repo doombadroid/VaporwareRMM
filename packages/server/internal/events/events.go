@@ -25,11 +25,25 @@ import (
 	"github.com/google/uuid"
 )
 
-// WSClientInfo holds metadata for a connected WebSocket client.
+// wsClientSendBuf is the per-connection outbound queue depth. A slow
+// reader fills the buffer, after which we drop messages with a log
+// rather than block every other client. 64 is large enough that a
+// burst of dashboard activity (a fleet-wide patch run, a bulk command)
+// doesn't drop on a healthy client; small enough that one stuck
+// connection only loses ~1MB of messages before we cut its losses.
+const wsClientSendBuf = 64
+
+// WSClientInfo holds metadata for a connected WebSocket client plus a
+// bounded outbound queue. Each client has a goroutine (started by the
+// /ws upgrade handler) that drains Send and writes to the conn. The
+// broadcast path pushes to Send non-blocking; if the buffer is full,
+// the message is dropped with a log so one slow reader can't stall
+// every other dashboard.
 type WSClientInfo struct {
 	UserID   string
 	TenantID string
 	Role     string
+	Send     chan []byte
 }
 
 var (
@@ -81,17 +95,34 @@ func WSBroadcastFiltered(tenantID, ownerID string, msg map[string]interface{}) {
 func wsFilteredLocal(tenantID, ownerID string, data []byte) {
 	WSMu.RLock()
 	defer WSMu.RUnlock()
-	for conn, info := range WSClients {
+	for _, info := range WSClients {
 		if info.Role == "super_admin" {
-			_ = conn.WriteMessage(websocket.TextMessage, data)
+			pushOrDrop(info, data)
 			continue
 		}
 		if info.TenantID != tenantID {
 			continue
 		}
 		if info.Role == "admin" || (ownerID != "" && info.UserID == ownerID) {
-			_ = conn.WriteMessage(websocket.TextMessage, data)
+			pushOrDrop(info, data)
 		}
+	}
+}
+
+// pushOrDrop tries to enqueue a message on the client's bounded send
+// channel. If the channel is full (slow reader) the message is dropped
+// with a log; we explicitly do NOT block the broadcast loop on one
+// client. The channel == nil branch covers the legacy code path during
+// the rollout window where a connection might exist without a Send
+// chan — once every caller is converted that branch can go.
+func pushOrDrop(info *WSClientInfo, data []byte) {
+	if info == nil || info.Send == nil {
+		return
+	}
+	select {
+	case info.Send <- data:
+	default:
+		slog.Warn("ws backpressure: dropping message for slow reader", "user", info.UserID, "tenant", info.TenantID, "buffer", cap(info.Send))
 	}
 }
 

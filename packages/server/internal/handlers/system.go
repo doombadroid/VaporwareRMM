@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
@@ -160,14 +161,40 @@ func RegisterSystemRoutes(app *fiber.App, cfg Config, openAPISpec []byte) {
 		if tenantID == "" {
 			tenantID = "default"
 		}
-		info := &events.WSClientInfo{UserID: userID, TenantID: tenantID, Role: role}
+		// Per-client bounded send channel. A slow reader fills this
+		// buffer, after which broadcasts drop on the floor (logged) so
+		// one stuck dashboard doesn't backpressure every other client.
+		// See pushOrDrop in internal/events/events.go.
+		info := &events.WSClientInfo{UserID: userID, TenantID: tenantID, Role: role, Send: make(chan []byte, 64)}
 		events.WSMu.Lock()
 		events.WSClients[c] = info
 		events.WSMu.Unlock()
+
+		// Sender goroutine drains the channel onto the websocket. A
+		// write error closes the channel and lets the read loop notice
+		// + clean up. We don't block on WriteMessage here either —
+		// gorilla/websocket's default write deadline is governed by
+		// SetWriteDeadline; not setting one means a half-broken peer
+		// could still hang us. We set a short per-write deadline so
+		// the sender goroutine can't be permanently parked on a dead
+		// peer.
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			for data := range info.Send {
+				_ = c.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
+					return
+				}
+			}
+		}()
+
 		defer func() {
 			events.WSMu.Lock()
 			delete(events.WSClients, c)
 			events.WSMu.Unlock()
+			close(info.Send)
+			<-writerDone
 			c.Close()
 		}()
 		_ = c.WriteJSON(map[string]interface{}{"type": "connected", "message": "WebSocket connected"})

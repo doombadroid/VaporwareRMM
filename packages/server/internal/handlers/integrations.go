@@ -47,6 +47,15 @@ func safeProbeClient(timeout time.Duration) *http.Client {
 			DialContext:     dialer.DialContext,
 			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 		},
+		// Refuse to follow redirects: a public host can otherwise return
+		// 307 Location: http://169.254.169.254/... and bypass the dial
+		// check entirely (the redirected request goes through the same
+		// Control function but the original URL was already validated).
+		// Surfacing the redirect as the client response is the safe
+		// behaviour — the caller can decide whether to chase it.
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 }
 

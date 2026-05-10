@@ -84,6 +84,14 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 
 		clientIP := c.IP()
 		bypassLimits := os.Getenv("DISABLE_RATE_LIMIT") == "1"
+		// Per-account lockout key combines email and IP. Locking purely on
+		// email lets an unauthenticated attacker DoS any user out of the
+		// dashboard with five wrong-password POSTs; combining with IP keeps
+		// the password-spray defence (each (account, attacker-IP) pair is
+		// rate-limited) without a free DoS primitive against legit users
+		// connecting from a different IP. The IP-only bucket below still
+		// caps burst from any one source.
+		acctKey := strings.ToLower(req.Email) + "|" + clientIP
 		loginMu.Lock()
 		ipAttempt, ipExists := ipAttempts[clientIP]
 		now := time.Now()
@@ -99,7 +107,7 @@ func RegisterAuthRoutes(publicAPI, api fiber.Router, cfg Config) {
 			ipAttempts[clientIP] = &loginAttempt{}
 		}
 
-		attempt, exists := loginAttempts[req.Email]
+		attempt, exists := loginAttempts[acctKey]
 		if exists {
 			if now.Sub(attempt.lastTime) > windowDuration {
 				attempt.count = 0

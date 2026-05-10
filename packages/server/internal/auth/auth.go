@@ -405,8 +405,17 @@ func CSRFMiddleware() fiber.Handler {
 }
 
 // AuthMiddleware validates Bearer token or httpOnly cookie authentication.
+//
+// Fiber Group middleware is registered as `app.use(prefix, ...)` and matches
+// by path prefix — meaning a Group at /api/v1 fires its middleware on
+// /api/v1/portal/* too, even when those routes belong to a separate Group
+// that has its own auth chain. Without this guard, portal endpoints would
+// 401 here before PortalAuthMiddleware ever ran.
 func AuthMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		if strings.HasPrefix(c.Path(), "/api/v1/portal") {
+			return c.Next()
+		}
 		var token string
 
 		cookieToken := c.Cookies("auth_token")

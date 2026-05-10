@@ -263,6 +263,14 @@ func main() {
 			strings.HasPrefix(path, "/api/auth/") {
 			return c.Next()
 		}
+		// Customer portal login / logout live on the publicAPI group at
+		// /api/portal/* on purpose — they predate this redirect block and
+		// must stay outside the admin /api/v1 prefix so the AuthMiddleware
+		// bypass (see internal/auth/auth.go) and the dashboard's portal
+		// SPA both keep working.
+		if strings.HasPrefix(path, "/api/portal/") {
+			return c.Next()
+		}
 		// /api/branding/* has a public GET (host-tenant-resolved) AND a
 		// /api/v1/branding/ authenticated PUT. Only the GET should bypass
 		// the redirect; otherwise PUT/PATCH/DELETE 405 against the

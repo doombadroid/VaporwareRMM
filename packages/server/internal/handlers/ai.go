@@ -44,15 +44,24 @@ func validateProviderBaseURL(baseURL, trust string) error {
 	if u.Host == "" {
 		return fmt.Errorf("base_url missing host")
 	}
-	if trust == "external" {
-		host := u.Hostname()
-		ips, _ := net.LookupIP(host)
-		// If we can resolve, every IP must be public. If we can't resolve, we
-		// allow it — DNS may be down or the operator may be staging a host.
-		for _, ip := range ips {
-			if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
-				return fmt.Errorf("external-trust provider may not point at a non-public address (%s → %s); change model_trust_level to 'local' or 'self_hosted'", host, ip)
-			}
+	host := u.Hostname()
+	ips, _ := net.LookupIP(host)
+	for _, ip := range ips {
+		// Loopback and unspecified are always rejected, even for
+		// self_hosted/local trust: pointing the provider at 127.0.0.1
+		// or 0.0.0.0 lets a tenant admin probe services on the server
+		// host itself (Postgres, Redis, agent listener) through AI
+		// completion calls. Self-hosted Ollama legitimately on a LAN
+		// IP is still allowed.
+		if ip.IsLoopback() || ip.IsUnspecified() {
+			return fmt.Errorf("base_url may not point at loopback / unspecified address (%s → %s)", host, ip)
+		}
+		// Cloud-metadata link-local always rejected.
+		if ip.IsLinkLocalUnicast() {
+			return fmt.Errorf("base_url may not point at link-local address (%s → %s)", host, ip)
+		}
+		if trust == "external" && ip.IsPrivate() {
+			return fmt.Errorf("external-trust provider may not point at a non-public address (%s → %s); change model_trust_level to 'local' or 'self_hosted'", host, ip)
 		}
 	}
 	return nil

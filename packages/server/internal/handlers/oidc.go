@@ -18,12 +18,23 @@ import (
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+	httputilv "vaporrmm/server/internal/httputil"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 )
+
+// oidcSafeContext returns a context that pins go-oidc + golang.org/x/oauth2
+// to the SSRF-safe HTTP client. Without this, the OIDC discovery + JWKS +
+// token-exchange calls run on http.DefaultClient and can be redirected to
+// cloud-metadata or LAN addresses.
+func oidcSafeContext(parent context.Context) context.Context {
+	c := httputilv.SafeOutboundClient(15 * time.Second)
+	ctx := oidc.ClientContext(parent, c)
+	return context.WithValue(ctx, oauth2.HTTPClient, c)
+}
 
 // httpForwardedHostFromEnv lets operators override the redirect-URI
 // host via FORWARDED_HOST when running behind a reverse proxy that
@@ -58,7 +69,11 @@ func pkceChallenge(verifier string) string {
 }
 
 // validIssuerURL parses + sanity-checks an OIDC issuer URL. We require
-// https in non-dev to avoid an MITM grabbing tokens.
+// https in non-dev to avoid an MITM grabbing tokens, and reject URLs whose
+// initial DNS resolution lands on a private / loopback / link-local address
+// (the dial-time check in SafeOutboundClient is the actual SSRF defense, but
+// rejecting at write-time gives the operator a clear 400 instead of letting
+// the request silently fail at probe time).
 func validIssuerURL(raw string) error {
 	if len(raw) > maxOIDCIssuer {
 		return errors.New("issuer too long")
@@ -72,6 +87,9 @@ func validIssuerURL(raw string) error {
 	}
 	if u.Host == "" {
 		return errors.New("issuer missing host")
+	}
+	if err := httputilv.RejectPrivateHost(raw); err != nil {
+		return err
 	}
 	return nil
 }
@@ -139,11 +157,18 @@ func RegisterOIDCRoutes(app *fiber.App, publicAPI fiber.Router, api fiber.Router
 			req.DefaultRole = "user"
 		}
 		// Probe the issuer once at write time so the admin sees a
-		// failure synchronously. go-oidc fetches /.well-known config.
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// failure synchronously. go-oidc fetches /.well-known config; we
+		// pin the HTTP client to SafeOutboundClient so the probe (and the
+		// secondary jwks_uri fetch chained from the discovery JSON) can't
+		// reach RFC1918 / loopback / cloud-metadata addresses, even via a
+		// 307 redirect.
+		ctx, cancel := context.WithTimeout(oidcSafeContext(context.Background()), 10*time.Second)
 		defer cancel()
 		if _, err := oidc.NewProvider(ctx, req.IssuerURL); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "issuer probe failed: " + err.Error()})
+			// Don't echo err.Error() to the client — for an attacker
+			// probing internal services it is a partial response oracle.
+			slog.Warn("oidc probe failed", "tenant", callerTenantID(c), "error", err)
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "issuer probe failed"})
 		}
 		enc, err := crypto.Encrypt(req.ClientSecret)
 		if err != nil {
@@ -190,7 +215,7 @@ func RegisterOIDCRoutes(app *fiber.App, publicAPI fiber.Router, api fiber.Router
 		if err != nil || !enabled {
 			return c.Status(fiber.StatusNotFound).SendString("OIDC not configured for this tenant")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(oidcSafeContext(context.Background()), 10*time.Second)
 		defer cancel()
 		provider, err := oidc.NewProvider(ctx, issuer)
 		if err != nil {
@@ -262,7 +287,7 @@ func RegisterOIDCRoutes(app *fiber.App, publicAPI fiber.Router, api fiber.Router
 		if err != nil || !enabled {
 			return c.Status(fiber.StatusForbidden).SendString("OIDC not configured")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(oidcSafeContext(context.Background()), 15*time.Second)
 		defer cancel()
 		provider, err := oidc.NewProvider(ctx, issuer)
 		if err != nil {
@@ -333,9 +358,19 @@ func RegisterOIDCRoutes(app *fiber.App, publicAPI fiber.Router, api fiber.Router
 			return c.Status(fiber.StatusInternalServerError).SendString("token issue failed")
 		}
 		// Stateful session row so AuthMiddleware accepts the token.
+		// Schema requires id (PK) + last_seen (NOT NULL) — the previous
+		// shorter INSERT silently failed on Postgres and made the next
+		// request fail the stateful session check, breaking SSO entirely.
+		sessionID := uuid.New().String()
 		tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(jwt)))
-		_, _ = db.DB.Exec(`INSERT INTO user_sessions (token_hash, user_id, ip_address, user_agent, created_at) VALUES (?, ?, ?, ?, ?)`,
-			tokenHash, userID, c.IP(), c.Get("User-Agent"), time.Now().Unix())
+		nowSec := time.Now().Unix()
+		if _, err := db.DB.Exec(
+			`INSERT INTO user_sessions (id, user_id, token_hash, ip_address, user_agent, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			sessionID, userID, tokenHash, c.IP(), c.Get("User-Agent"), nowSec, nowSec,
+		); err != nil {
+			slog.Warn("oidc session insert failed", "error", err)
+			return c.Status(fiber.StatusInternalServerError).SendString("session create failed")
+		}
 
 		// Dual cookies: auth_token (httpOnly) + csrf_token (JS-readable).
 		csrfToken, _ := randomURLSafeString(24)

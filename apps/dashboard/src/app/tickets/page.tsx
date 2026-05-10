@@ -11,12 +11,15 @@ import { FilterBar, FilterChip } from '@/components/ui/data-table'
 import { Button } from '@/components/ui/button'
 import { Plus } from 'lucide-react'
 import CreateTicketModal from '@/components/dashboard/CreateTicketModal'
+import { useCurrentUser } from '@/components/CurrentUserProvider'
 import { ticketsApi, type Ticket } from '@/lib/api'
 
-type View = 'open' | 'all' | 'mine'
+type View = 'open' | 'all'
 const STATUS_OPTIONS: Ticket['status'][] = ['open', 'in_progress', 'pending', 'resolved', 'closed']
 
 export default function TicketsPage() {
+  const { user } = useCurrentUser()
+  const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
@@ -110,18 +113,20 @@ export default function TicketsPage() {
                     {new Date(t.created_at * 1000).toLocaleString()}
                   </p>
                 </div>
-                <select
-                  value={t.status}
-                  onChange={(e) => void updateStatus(t.id, e.target.value as Ticket['status'])}
-                  onClick={(e) => e.stopPropagation()}
-                  className="bg-white/[0.04] border border-white/[0.08] rounded-md px-2 py-1 text-[11.5px] text-white/85 focus:outline-none focus:border-white/[0.2] shrink-0"
-                >
-                  {STATUS_OPTIONS.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
+                {isAdmin && (
+                  <select
+                    value={t.status}
+                    onChange={(e) => void updateStatus(t.id, e.target.value as Ticket['status'])}
+                    onClick={(e) => e.stopPropagation()}
+                    className="bg-white/[0.04] border border-white/[0.08] rounded-md px-2 py-1 text-[11.5px] text-white/85 focus:outline-none focus:border-white/[0.2] shrink-0"
+                  >
+                    {STATUS_OPTIONS.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </li>
             ))}
           </ul>

@@ -12,6 +12,7 @@ import (
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+	httputilv "vaporrmm/server/internal/httputil"
 	"vaporrmm/server/internal/redis"
 
 	"github.com/gofiber/fiber/v2"
@@ -240,6 +241,16 @@ func RegisterAlertRoutes(api fiber.Router) {
 		}
 		if !allowedAlertSeverities[req.Severity] {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid severity"})
+		}
+		// Pre-validate webhook URL to match the standalone /webhooks
+		// endpoint. The delivery code path isn't wired up yet but the
+		// stored value will be used the moment it is — better to reject
+		// loopback / RFC1918 / metadata URLs at write time than discover
+		// later that the rule was a latent SSRF.
+		if strings.TrimSpace(req.WebhookURL) != "" {
+			if err := httputilv.RejectPrivateHost(req.WebhookURL); err != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "webhook_url: " + err.Error()})
+			}
 		}
 		ruleID := uuid.New().String()
 		now := time.Now().Unix()

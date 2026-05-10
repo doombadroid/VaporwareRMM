@@ -40,33 +40,16 @@ var (
 // wsEnvelope wraps a broadcast so subscribers on other nodes can re-apply
 // the filter against THEIR local connections. We can't filter at publish time
 // because the publisher doesn't know which clients are connected on other nodes.
+//
+// "all" used to be a valid Kind for unfiltered cross-tenant broadcast. It was
+// removed because it made cross-tenant leaks one missing argument away — a
+// future "system notification" feature should be a new function with tenant
+// scoping built in, not a revival of WSBroadcastMessage.
 type wsEnvelope struct {
-	Kind     string          `json:"k"`           // "all" | "filtered"
-	TenantID string          `json:"t,omitempty"` // for "filtered"
-	OwnerID  string          `json:"o,omitempty"` // for "filtered"
-	Payload  json.RawMessage `json:"p"`           // the original message
-}
-
-// WSBroadcastMessage sends msg to all connected clients (system-level events).
-// When Redis is enabled, we publish only and let our own subscriber fan out
-// locally (otherwise local clients would receive duplicates: once direct, once
-// via the Redis loopback). When Redis is disabled, we fan out directly.
-func WSBroadcastMessage(msg map[string]interface{}) {
-	payload, err := json.Marshal(msg)
-	if err != nil {
-		return
-	}
-	if redis.IsEnabled() {
-		env, err := json.Marshal(wsEnvelope{Kind: "all", Payload: payload})
-		if err == nil {
-			if err := redis.PublishWSMessage(env); err == nil {
-				return
-			} else {
-				slog.Warn("redis publish failed, falling back to local-only broadcast", "error", err)
-			}
-		}
-	}
-	wsBroadcastLocal(payload)
+	Kind     string          `json:"k"`           // "filtered"
+	TenantID string          `json:"t,omitempty"`
+	OwnerID  string          `json:"o,omitempty"`
+	Payload  json.RawMessage `json:"p"`
 }
 
 // WSBroadcastFiltered sends msg to:
@@ -74,7 +57,9 @@ func WSBroadcastMessage(msg map[string]interface{}) {
 //   - admins of the same tenant
 //   - the device owner (matching userID)
 //
-// Skips clients in other tenants. Same Redis-vs-local dispatch as WSBroadcastMessage.
+// Skips clients in other tenants. Redis-backed when enabled (publish only;
+// the subscriber fans out locally on every node) so a multi-node deployment
+// stays consistent. Local-only fallback when Redis is off.
 func WSBroadcastFiltered(tenantID, ownerID string, msg map[string]interface{}) {
 	payload, err := json.Marshal(msg)
 	if err != nil {
@@ -110,16 +95,12 @@ func wsFilteredLocal(tenantID, ownerID string, data []byte) {
 	}
 }
 
-func wsBroadcastLocal(data []byte) {
-	WSMu.RLock()
-	defer WSMu.RUnlock()
-	for conn := range WSClients {
-		_ = conn.WriteMessage(websocket.TextMessage, data)
-	}
-}
-
 // StartWSRedisSubscriber starts a background goroutine that subscribes to Redis WS
-// broadcasts and forwards them to local WebSocket clients.
+// broadcasts and forwards them to local WebSocket clients. Only "filtered"
+// envelopes are honoured; anything that doesn't decode as a tenant-scoped
+// envelope is dropped on the floor with a warning. The previous behaviour
+// (fall back to unfiltered cross-tenant broadcast) was a tenant-isolation
+// footgun and a forward-compat shim with no live publishers anyway.
 func StartWSRedisSubscriber() {
 	if !redis.IsEnabled() {
 		return
@@ -127,20 +108,12 @@ func StartWSRedisSubscriber() {
 	go func() {
 		slog.Info("starting redis websocket broadcast subscriber")
 		redis.SubscribeWSBroadcast(func(data []byte) {
-			// Try to decode as an envelope. Fall back to raw payload for
-			// backward compatibility with publishers that haven't been
-			// upgraded yet (e.g. during a rolling deploy).
 			var env wsEnvelope
-			if err := json.Unmarshal(data, &env); err != nil || env.Kind == "" {
-				wsBroadcastLocal(data)
+			if err := json.Unmarshal(data, &env); err != nil || env.Kind != "filtered" {
+				slog.Warn("ws redis subscriber: dropping unrecognised envelope (only kind='filtered' is honoured)", "err", err, "kind", env.Kind)
 				return
 			}
-			switch env.Kind {
-			case "filtered":
-				wsFilteredLocal(env.TenantID, env.OwnerID, env.Payload)
-			default:
-				wsBroadcastLocal(env.Payload)
-			}
+			wsFilteredLocal(env.TenantID, env.OwnerID, env.Payload)
 		})
 	}()
 }

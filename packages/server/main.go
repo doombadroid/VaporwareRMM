@@ -351,7 +351,13 @@ func main() {
 	handlers.RegisterPolicyRoutes(api)
 
 	// Observability (Stage 15): AI cost dashboard, scheduled reports, log SSE.
-	handlers.InstallLogTap()
+	// Tap is opt-in (ENABLE_LOG_SSE=1) — wrapping slog.Default has produced
+	// flaky behavior in some environments (no further log output after
+	// SetDefault on certain Go runtimes); operator opts in when they want
+	// the SSE log surface.
+	if os.Getenv("ENABLE_LOG_SSE") == "1" {
+		handlers.InstallLogTap()
+	}
 	handlers.RegisterAICostRoutes(api)
 	handlers.RegisterReportRoutes(api)
 	handlers.RegisterLogRoutes(api)

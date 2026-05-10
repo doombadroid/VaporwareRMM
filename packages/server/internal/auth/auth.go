@@ -602,7 +602,10 @@ func PortalAuthMiddleware() fiber.Handler {
 		}
 		TokenMu.RUnlock()
 
-		customerID, tenantID, deviceID, err := ValidatePortalJWT(token)
+		// JWT-side device id is intentionally discarded; the DB row's
+		// device_id is the source of truth (see below) so an admin
+		// revoking the link applies immediately without forcing logout.
+		customerID, tenantID, _, err := ValidatePortalJWT(token)
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error":   "Invalid portal token",
@@ -625,10 +628,9 @@ func PortalAuthMiddleware() fiber.Handler {
 		// Trust the DB value over the JWT for device scope so an
 		// admin's revoke of the device link applies immediately
 		// (without forcing the customer to re-login).
+		var deviceID string
 		if dbDeviceID.Valid {
 			deviceID = dbDeviceID.String
-		} else {
-			deviceID = ""
 		}
 
 		if !TenantAllowed(tenantID) {

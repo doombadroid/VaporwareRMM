@@ -38,6 +38,8 @@ export default function RemoteControlModal({
   const [pin, setPin] = useState<string | null>(null)
   const [pinLoading, setPinLoading] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [pairPIN, setPairPIN] = useState('')
+  const [pairing, setPairing] = useState(false)
 
   useEffect(() => {
     if (isOpen && device) {
@@ -89,6 +91,27 @@ export default function RemoteControlModal({
       toast.error('Failed to fetch PIN. Ensure Sunshine is running and paired at least once.')
     } finally {
       setPinLoading(false)
+    }
+  }
+
+  const handleSubmitPIN = async () => {
+    if (!device) return
+    if (pairPIN.length < 4 || pairPIN.length > 8) {
+      toast.error('PIN must be 4-8 digits')
+      return
+    }
+    setPairing(true)
+    try {
+      await devicesApi.pairSunshine(device.id, pairPIN)
+      toast.success('Paired with Moonlight')
+      setPairPIN('')
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.message
+        || (e as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.error
+        || 'Pair failed'
+      toast.error(msg)
+    } finally {
+      setPairing(false)
     }
   }
 
@@ -229,7 +252,34 @@ export default function RemoteControlModal({
 
               {sunshineStatus.sunshine?.running ? (
                 <div className="space-y-3">
-                  {/* PIN Section */}
+                  {/* Submit Moonlight PIN */}
+                  <div className="p-4 bg-cyan-500/5 border border-cyan-500/20 rounded-xl space-y-2">
+                    <p className="text-sm text-cyan-300 font-medium">Pair Moonlight</p>
+                    <p className="text-xs text-white/50">
+                      Open Moonlight, click this device, copy the 4-digit PIN it shows, paste here.
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]{4,8}"
+                        maxLength={8}
+                        value={pairPIN}
+                        onChange={(e) => setPairPIN(e.target.value.replace(/\D/g, ''))}
+                        placeholder="1234"
+                        className="flex-1 bg-slate-900 border border-white/[0.08] rounded-md px-3 py-2 text-sm font-mono text-center tracking-widest"
+                      />
+                      <Button
+                        size="sm"
+                        onClick={handleSubmitPIN}
+                        disabled={pairing || pairPIN.length < 4}
+                        className="bg-cyan-600 hover:bg-cyan-500"
+                      >
+                        {pairing ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Pair'}
+                      </Button>
+                    </div>
+                  </div>
+                  {/* Legacy "fetch PIN from logs" — kept for backwards compat */}
                   <div className="space-y-2">
                     {!pin ? (
                       <Button
@@ -243,7 +293,7 @@ export default function RemoteControlModal({
                         ) : (
                           <KeyRound className="w-4 h-4 mr-2" />
                         )}
-                        {pinLoading ? 'Fetching PIN...' : 'Get Pairing PIN'}
+                        {pinLoading ? 'Fetching PIN...' : 'Read PIN from logs (legacy)'}
                       </Button>
                     ) : (
                       <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl space-y-3">

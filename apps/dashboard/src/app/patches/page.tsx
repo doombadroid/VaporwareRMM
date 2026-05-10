@@ -18,11 +18,12 @@ const severityClass: Record<string, string> = {
 
 const statusClass: Record<string, string> = {
   pending: 'bg-blue-500/15 border-blue-500/40 text-blue-300',
+  installing: 'bg-amber-500/15 border-amber-500/40 text-amber-300',
   installed: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300',
   failed: 'bg-red-500/15 border-red-500/40 text-red-300',
 }
 
-const FILTERS: PatchStatusFilter[] = ['pending', 'installed', 'failed', 'all']
+const FILTERS: PatchStatusFilter[] = ['pending', 'installing', 'installed', 'failed', 'all']
 
 export default function PatchesPage() {
   const [patches, setPatches] = useState<Patch[]>([])
@@ -43,14 +44,22 @@ export default function PatchesPage() {
 
   useEffect(() => { void load(filter) }, [filter])
 
-  const markInstalled = async (id: string) => {
-    setActingId(id)
+  const install = async (p: Patch) => {
+    setActingId(p.id)
     try {
-      await patchesApi.updateStatus(id, 'installed')
-      toast.success('Marked installed')
+      if (p.source && p.kb_id) {
+        // Patch was discovered by agent — push real install command.
+        await patchesApi.install(p.id)
+        toast.success('Install queued on device')
+      } else {
+        // Manually-created patch with no source/kb_id — fall back to
+        // "mark installed" for parity with prior behavior.
+        await patchesApi.updateStatus(p.id, 'installed')
+        toast.success('Marked installed')
+      }
       await load(filter)
     } catch {
-      toast.error('Update failed (admin only?)')
+      toast.error('Action failed (admin only?)')
     } finally {
       setActingId('')
     }
@@ -104,8 +113,8 @@ export default function PatchesPage() {
               {patches.map((p) => (
                 <Card key={p.id} className="bg-slate-900/60 border-slate-800/50">
                   <CardHeader className="pb-2 flex flex-row items-start justify-between gap-3">
-                    <div className="flex flex-col">
-                      <CardTitle className="text-base">{p.title}</CardTitle>
+                    <div className="flex flex-col min-w-0">
+                      <CardTitle className="text-base truncate">{p.title}</CardTitle>
                       <div className="flex items-center gap-2 mt-1 text-xs flex-wrap">
                         <span className={`px-2 py-0.5 rounded border ${severityClass[p.severity] ?? severityClass.medium}`}>
                           {p.severity}
@@ -113,12 +122,18 @@ export default function PatchesPage() {
                         <span className={`px-2 py-0.5 rounded border ${statusClass[p.status] ?? statusClass.pending}`}>
                           {p.status}
                         </span>
+                        {p.source && (
+                          <span className="text-slate-500 font-mono">{p.source}{p.kb_id ? ' · ' + p.kb_id : ''}</span>
+                        )}
                         <span className="text-slate-500">
                           {p.device_name || p.device_id.slice(0, 8)}
                         </span>
                         <span className="text-slate-500">
                           {new Date(p.created_at * 1000).toLocaleString()}
                         </span>
+                        {p.cve && (
+                          <span className="text-rose-400 font-mono">{p.cve}</span>
+                        )}
                       </div>
                     </div>
                     {p.status === 'pending' && (
@@ -126,9 +141,13 @@ export default function PatchesPage() {
                         size="sm"
                         variant="outline"
                         disabled={actingId === p.id}
-                        onClick={() => markInstalled(p.id)}
+                        onClick={() => install(p)}
                       >
-                        {actingId === p.id ? 'Saving…' : 'Mark installed'}
+                        {actingId === p.id
+                          ? 'Queuing…'
+                          : p.source && p.kb_id
+                          ? 'Install'
+                          : 'Mark installed'}
                       </Button>
                     )}
                   </CardHeader>

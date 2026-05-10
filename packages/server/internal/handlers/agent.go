@@ -169,6 +169,23 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		cpuUsage = clampPercent(cpuUsage)
 		memUsage = clampPercent(memUsage)
 		diskUsage = clampPercent(diskUsage)
+
+		// Round-trip latency measured by the agent on its prior heartbeat.
+		// Clamp at 5000ms so a misconfigured or malicious agent can't
+		// poison the fleet average with absurd values. Stored on the
+		// device row; dashboard /overview averages it across online devices.
+		if rttRaw, ok := heartbeatData["network_latency_ms"].(float64); ok {
+			rtt := int(rttRaw)
+			if rtt < 0 {
+				rtt = 0
+			}
+			if rtt > 5000 {
+				rtt = 5000
+			}
+			if _, err := db.DB.Exec(`UPDATE devices SET network_latency_ms = ? WHERE id = ?`, rtt, deviceID); err != nil {
+				slog.Warn("network_latency update failed", "error", err)
+			}
+		}
 		if cpuUsage > 0 || memUsage > 0 || diskUsage > 0 {
 			agentTenant, _ := c.Locals("tenant_id").(string)
 			if agentTenant == "" {

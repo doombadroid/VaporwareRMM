@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/crypto"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+	"vaporrmm/server/internal/redis"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -23,17 +25,69 @@ var allowedAlertSeverities = map[string]bool{
 	"info": true, "warning": true,
 }
 
+// alertDedupWindow caps how often the same (tenant, device, type) tuple
+// can land in the alerts table. A flapping device that goes
+// online/offline/online/offline within the window only fires one row.
+const alertDedupWindow = 5 * time.Minute
+
+var (
+	alertDedupMu    sync.Mutex
+	alertDedupStore = map[string]time.Time{}
+)
+
+// alertDedupKey is the bucket key for in-memory + Redis dedup. Same
+// shape so a write that crosses fallback boundaries is still
+// dedup-equivalent.
+func alertDedupKey(tenantID, deviceID, alertType string) string {
+	return "alert_dedup:" + tenantID + "|" + deviceID + "|" + alertType
+}
+
+// shouldEmitAlert returns true if this (tenant, device, type) tuple
+// hasn't been emitted in the last alertDedupWindow. Redis-backed when
+// available so multi-instance deploys share the dedup window;
+// per-instance fallback when Redis is absent or returns an error.
+func shouldEmitAlert(tenantID, deviceID, alertType string) bool {
+	key := alertDedupKey(tenantID, deviceID, alertType)
+	if redis.IsEnabled() {
+		// SET NX EX — only succeed if key absent. If we set it, this is
+		// the first emit in the window and we own it.
+		ok, err := redis.Client.SetNX(redis.Ctx, key, "1", alertDedupWindow).Result()
+		if err == nil {
+			return ok
+		}
+		// Redis hiccup — fall through to in-memory.
+	}
+	now := time.Now()
+	alertDedupMu.Lock()
+	defer alertDedupMu.Unlock()
+	if last, ok := alertDedupStore[key]; ok && now.Sub(last) < alertDedupWindow {
+		return false
+	}
+	// Best-effort GC: prune entries older than the window so the map
+	// doesn't grow unbounded on a busy fleet.
+	for k, t := range alertDedupStore {
+		if now.Sub(t) >= alertDedupWindow {
+			delete(alertDedupStore, k)
+		}
+	}
+	alertDedupStore[key] = now
+	return true
+}
+
 // EmitAlert persists an incident row that the dashboard /alerts page renders.
 // Fire-and-forget: we don't surface insert errors to the caller because the
 // alert path is supplementary (webhook + email already fired in parallel via
-// events.TriggerWebhooks). De-duplication is the caller's responsibility —
-// repeated identical (tenant, device, type) pairs become repeated rows.
+// events.TriggerWebhooks). De-duplicated by (tenant, device, type) over
+// alertDedupWindow — a flapping device only logs one row per window.
 func EmitAlert(tenantID, deviceID, alertType, severity, message string) {
 	if tenantID == "" {
 		tenantID = "default"
 	}
 	if severity == "" {
 		severity = "warning"
+	}
+	if !shouldEmitAlert(tenantID, deviceID, alertType) {
+		return
 	}
 	id := uuid.New().String()
 	if _, err := db.DB.Exec(

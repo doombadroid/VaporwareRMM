@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -326,6 +327,45 @@ func FetchSunshinePIN(agentIP string, agentPort int, apiToken string) (string, e
 	}
 
 	return result.PIN, nil
+}
+
+// SubmitSunshinePIN forwards a Moonlight pairing PIN to the agent's
+// /agent/sunshine/pair endpoint. The agent posts to local Sunshine at
+// 127.0.0.1:47990 (see packages/agent/sunshine_pair.go).
+func SubmitSunshinePIN(agentIP string, agentPort int, apiToken, pin, name string) error {
+	if agentIP == "" {
+		agentIP = "localhost"
+	}
+	if agentPort == 0 {
+		agentPort = 47991
+	}
+	if err := validateAgentIP(agentIP); err != nil {
+		return err
+	}
+
+	scheme := "http"
+	if os.Getenv("AGENT_CA_CERT") != "" {
+		scheme = "https"
+	}
+	url := fmt.Sprintf("%s://%s:%d/agent/sunshine/pair", scheme, agentIP, agentPort)
+	bodyJSON, _ := json.Marshal(map[string]string{"pin": pin, "name": name})
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(bodyJSON))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiToken)
+
+	resp, err := agentHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to forward PIN: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 // GenerateSecureKey creates a random base64-encoded 32-byte key

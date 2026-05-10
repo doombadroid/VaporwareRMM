@@ -13,10 +13,11 @@ import (
 // allowedPatchStatuses gates the ?status= filter on GET. Includes the
 // pseudo-value "all" which means "no status WHERE clause".
 var allowedPatchStatuses = map[string]bool{
-	"pending":   true,
-	"installed": true,
-	"failed":    true,
-	"all":       true,
+	"pending":    true,
+	"installing": true,
+	"installed":  true,
+	"failed":     true,
+	"all":        true,
 }
 
 // writeablePatchStatuses gates PUT /patches/:id payloads so untrusted
@@ -24,9 +25,10 @@ var allowedPatchStatuses = map[string]bool{
 // status-filtered GET (and break dashboards that bucket on status).
 // Excludes "all".
 var writeablePatchStatuses = map[string]bool{
-	"pending":   true,
-	"installed": true,
-	"failed":    true,
+	"pending":    true,
+	"installing": true,
+	"installed":  true,
+	"failed":     true,
 }
 
 func RegisterPatchRoutes(api fiber.Router) {
@@ -61,7 +63,8 @@ func RegisterPatchRoutes(api fiber.Router) {
 		// tenant's hostname. POST /devices/:id/patches already validates the
 		// parent device tenant, so this is defense-in-depth.
 		rows, err := db.DB.Query(`
-			SELECT p.id, p.device_id, COALESCE(d.hostname,''), p.title, COALESCE(p.description,''), p.severity, p.status, p.installed_at, p.created_at
+			SELECT p.id, p.device_id, COALESCE(d.hostname,''), p.title, COALESCE(p.description,''), p.severity, p.status, p.installed_at, p.created_at,
+				COALESCE(p.kb_id,''), COALESCE(p.source,''), COALESCE(p.cve,'')
 			  FROM patches p
 			  LEFT JOIN devices d ON d.id = p.device_id AND d.tenant_id = p.tenant_id`+clause+`
 			  ORDER BY p.created_at DESC LIMIT 1000`, args...)
@@ -81,12 +84,15 @@ func RegisterPatchRoutes(api fiber.Router) {
 			Status      string `json:"status"`
 			InstalledAt *int64 `json:"installed_at,omitempty"`
 			CreatedAt   int64  `json:"created_at"`
+			KBID        string `json:"kb_id,omitempty"`
+			Source      string `json:"source,omitempty"`
+			CVE         string `json:"cve,omitempty"`
 		}
 		patches := []patch{}
 		for rows.Next() {
 			var p patch
 			var installedAt sql.NullInt64
-			if err := rows.Scan(&p.ID, &p.DeviceID, &p.DeviceName, &p.Title, &p.Description, &p.Severity, &p.Status, &installedAt, &p.CreatedAt); err != nil {
+			if err := rows.Scan(&p.ID, &p.DeviceID, &p.DeviceName, &p.Title, &p.Description, &p.Severity, &p.Status, &installedAt, &p.CreatedAt, &p.KBID, &p.Source, &p.CVE); err != nil {
 				slog.Warn("patches scan failed", "error", err)
 				continue
 			}

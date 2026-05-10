@@ -152,7 +152,12 @@ func GenerateTOTPChallenge(userID, tenantID string) (string, error) {
 	return token.SignedString([]byte(JWTSecret))
 }
 
-// ValidateJWT validates a JWT token signed with HMAC-SHA256 using golang-jwt/jwt/v5.
+// ValidateJWT validates an admin-side JWT. Hard-rejects tokens issued
+// for the customer portal (iss="vaporrmm-portal") so a portal cookie
+// can never be used to reach admin endpoints — the auth middleware
+// chain assumes any caller past this point has admin/user/super_admin
+// role semantics.
+//
 // Returns (userID, tenantID, role, error).
 func ValidateJWT(tokenString string) (string, string, string, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
@@ -170,6 +175,15 @@ func ValidateJWT(tokenString string) (string, string, string, error) {
 		return "", "", "", fmt.Errorf("invalid token claims")
 	}
 
+	// Hard-reject portal tokens here. A misconfigured cookie path or
+	// a forged Authorization header would otherwise let a portal user
+	// hit admin endpoints; the issuer check is the one source of truth
+	// for "this token belongs to the admin scope".
+	iss, _ := claims["iss"].(string)
+	if iss == "vaporrmm-portal" {
+		return "", "", "", fmt.Errorf("portal token rejected on admin endpoint")
+	}
+
 	userID, _ := claims["sub"].(string)
 	tenantID, _ := claims["tid"].(string)
 	if tenantID == "" {
@@ -179,8 +193,71 @@ func ValidateJWT(tokenString string) (string, string, string, error) {
 	if role == "" {
 		role = "admin"
 	}
+	// Portal-style "customer" role MUST never appear on admin tokens.
+	// Defense-in-depth: even if someone crafts a token with
+	// iss=vaporrmm but role=customer, refuse it.
+	if role == "customer" {
+		return "", "", "", fmt.Errorf("customer role not valid on admin endpoint")
+	}
 
 	return userID, tenantID, role, nil
+}
+
+// GeneratePortalJWT issues a customer-portal session token. Issuer is
+// distinct so admin-side ValidateJWT rejects it. Role is always
+// "customer". device_id is optional (NULL device_id = full-tenant
+// portal user; set device_id = single-machine portal user).
+func GeneratePortalJWT(customerID, tenantID, deviceID string, expiryHours int) (string, error) {
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"sub":  customerID,
+		"tid":  tenantID,
+		"role": "customer",
+		"exp":  now.Add(time.Duration(expiryHours) * time.Hour).Unix(),
+		"iat":  now.Unix(),
+		"iss":  "vaporrmm-portal",
+		"jti":  uuid.New().String(),
+	}
+	if deviceID != "" {
+		claims["did"] = deviceID
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(JWTSecret))
+}
+
+// ValidatePortalJWT validates a portal-issued token. Symmetric refusal
+// of admin tokens — only iss="vaporrmm-portal" passes. Returns
+// (customerID, tenantID, deviceID, error). deviceID is "" when the
+// customer has full-tenant scope.
+func ValidatePortalJWT(tokenString string) (string, string, string, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(JWTSecret), nil
+	})
+	if err != nil {
+		return "", "", "", fmt.Errorf("invalid portal token: %w", err)
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || !token.Valid {
+		return "", "", "", fmt.Errorf("invalid portal token claims")
+	}
+	iss, _ := claims["iss"].(string)
+	if iss != "vaporrmm-portal" {
+		return "", "", "", fmt.Errorf("not a portal token")
+	}
+	role, _ := claims["role"].(string)
+	if role != "customer" {
+		return "", "", "", fmt.Errorf("portal token role mismatch")
+	}
+	customerID, _ := claims["sub"].(string)
+	tenantID, _ := claims["tid"].(string)
+	deviceID, _ := claims["did"].(string)
+	if tenantID == "" {
+		return "", "", "", fmt.Errorf("portal token missing tenant")
+	}
+	return customerID, tenantID, deviceID, nil
 }
 
 // IsSuperAdmin reports whether the role grants cross-tenant access.
@@ -302,14 +379,16 @@ func CookieSecure(c *fiber.Ctx) bool {
 }
 
 // CSRFMiddleware validates X-CSRF-Token header against csrf_token cookie.
+// Enforced for both admin (auth_type="user") and portal (auth_type="portal")
+// scopes. Agent / public endpoints fall through.
 func CSRFMiddleware() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		method := c.Method()
 		if method == "GET" || method == "HEAD" || method == "OPTIONS" {
 			return c.Next()
 		}
-		authType := c.Locals("auth_type")
-		if authType != "user" {
+		authType, _ := c.Locals("auth_type").(string)
+		if authType != "user" && authType != "portal" {
 			return c.Next()
 		}
 		cookieCSRF := c.Cookies("csrf_token")
@@ -463,6 +542,103 @@ func AdminMiddleware() fiber.Handler {
 				"code":    403,
 			})
 		}
+		return c.Next()
+	}
+}
+
+// PortalAuthMiddleware validates a customer-portal session token from
+// the `portal_token` cookie (or Bearer header for non-browser clients).
+// Hard-rejects admin tokens — only ValidatePortalJWT-passing tokens
+// reach the handler. Stateful session check via portal_sessions table
+// keeps revoke semantics symmetric with the admin AuthMiddleware.
+//
+// Sets locals:
+//
+//	auth_type        = "portal"
+//	customer_id      = customer_users.id
+//	tenant_id        = customer's tenant
+//	customer_device_id = optional device-scope filter (empty for full-tenant
+//	                    portal users)
+//
+// Note: deliberately does NOT set user_id / user_role so a downstream
+// handler that forgot to use portal-specific helpers won't accidentally
+// see this caller as an admin/user.
+func PortalAuthMiddleware() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var token string
+		cookieToken := c.Cookies("portal_token")
+		if cookieToken != "" {
+			token = cookieToken
+		} else {
+			authHeader := c.Get("Authorization")
+			if authHeader == "" {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+					"error":   "Missing portal authorization",
+					"message": "Portal session cookie or Bearer token required",
+					"code":    401,
+				})
+			}
+			if !strings.HasPrefix(authHeader, "Bearer ") {
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+					"error":   "Invalid authorization header",
+					"message": "Expected Bearer token",
+					"code":    401,
+				})
+			}
+			token = strings.TrimPrefix(authHeader, "Bearer ")
+		}
+
+		// Reject agent tokens up front — same defense pattern as
+		// AuthMiddleware. Without this an agent token would be tried as
+		// a portal JWT, fail signature validation harmlessly, but waste
+		// CPU on every request.
+		TokenMu.RLock()
+		if _, exists := RegisteredTokens[HashToken(token)]; exists {
+			TokenMu.RUnlock()
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "agent tokens cannot access portal",
+				"code":  401,
+			})
+		}
+		TokenMu.RUnlock()
+
+		customerID, tenantID, deviceID, err := ValidatePortalJWT(token)
+		if err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error":   "Invalid portal token",
+				"message": err.Error(),
+				"code":    401,
+			})
+		}
+
+		// Stateful check via the customer_users.disabled flag; cheap
+		// because we already need to know the row's still active.
+		var disabled int
+		var dbDeviceID sql.NullString
+		err = db.DB.QueryRow(`SELECT disabled, device_id FROM customer_users WHERE id = ? AND tenant_id = ?`, customerID, tenantID).Scan(&disabled, &dbDeviceID)
+		if err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "portal account not found"})
+		}
+		if disabled == 1 {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "portal account disabled"})
+		}
+		// Trust the DB value over the JWT for device scope so an
+		// admin's revoke of the device link applies immediately
+		// (without forcing the customer to re-login).
+		if dbDeviceID.Valid {
+			deviceID = dbDeviceID.String
+		} else {
+			deviceID = ""
+		}
+
+		if !TenantAllowed(tenantID) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant inactive"})
+		}
+
+		c.Locals("auth_type", "portal")
+		c.Locals("customer_id", customerID)
+		c.Locals("tenant_id", tenantID)
+		c.Locals("customer_device_id", deviceID)
 		return c.Next()
 	}
 }

@@ -237,6 +237,13 @@ func main() {
 	// API v1 routes
 	api := app.Group("/api/v1", auth.AuthMiddleware(), auth.CSRFMiddleware())
 
+	// Customer portal routes — completely separate auth chain. Hard
+	// scope split: portal_token cookie + iss="vaporrmm-portal" only.
+	// CSRFMiddleware shares the global double-submit cookie pattern with
+	// the admin chain — defense-in-depth alongside the cookie's
+	// SameSite=Lax scoping. Stage 12.
+	portalAPI := app.Group("/api/v1", auth.PortalAuthMiddleware(), auth.CSRFMiddleware())
+
 	// Backward compatibility: redirect legacy /api/* paths to /api/v1/*
 	// Uses 308 (Permanent Redirect) to preserve HTTP method (POST, PUT, etc.)
 	// Public endpoints (/api/auth/*, /api/branding/*) are excluded because they
@@ -324,6 +331,37 @@ func main() {
 
 	// Inventory (software / hardware) + device groups (Stage 10)
 	handlers.RegisterInventoryRoutes(app, api)
+
+	// Patches v2 — agent sync + admin-triggered install (Stage 11)
+	handlers.RegisterPatchV2Routes(app, api)
+
+	// Maintenance windows CRUD + worker (Stage 11)
+	handlers.RegisterMaintenanceRoutes(api)
+
+	// Bulk command + CSV device import (Stage 11)
+	handlers.RegisterBulkRoutes(api)
+
+	// Network discovery (agent-reported neighbors) + cert monitor + SNMP (Stage 13)
+	handlers.RegisterNeighborRoutes(app, api)
+	handlers.RegisterCertMonitorRoutes(api)
+	handlers.RegisterSNMPRoutes(api)
+
+	// OIDC SSO + per-tenant policies (Stage 14)
+	handlers.RegisterOIDCRoutes(app, publicAPI, api)
+	handlers.RegisterPolicyRoutes(api)
+
+	// Observability (Stage 15): AI cost dashboard, scheduled reports, log SSE.
+	handlers.InstallLogTap()
+	handlers.RegisterAICostRoutes(api)
+	handlers.RegisterReportRoutes(api)
+	handlers.RegisterLogRoutes(api)
+
+	// Customer portal endpoints (Stage 12)
+	handlers.RegisterPortalRoutes(app, publicAPI, portalAPI)
+	// Admin-side customer CRUD lives on the admin chain.
+	handlers.RegisterCustomerAdminAPI(api)
+	// Admin-side ticket time tracking + monthly billing CSV.
+	handlers.RegisterTimeEntryRoutes(api)
 
 	// ============================================================
 	// Background goroutines
@@ -458,6 +496,77 @@ func main() {
 				_ = db.DB.QueryRow(`SELECT COUNT(*) FROM tenants WHERE status = 'suspended'`).Scan(&suspended)
 				metrics.TenantsActive.Set(active)
 				metrics.TenantsSuspended.Set(suspended)
+			case <-offlineDone:
+				return
+			}
+		}
+	}()
+
+	// Maintenance window worker — evaluates schedule + queues installs.
+	// Tick every minute since the smallest window resolution is 1 min.
+	go func() {
+		// Settle before first run so migrations/state finish.
+		time.Sleep(30 * time.Second)
+		handlers.MaintenanceWorkerOnce()
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				handlers.MaintenanceWorkerOnce()
+			case <-offlineDone:
+				return
+			}
+		}
+	}()
+
+	// Cert monitor worker — TLS probes every 10 minutes; the per-monitor
+	// `last_checked_at < cutoff` filter inside means each cert is hit
+	// roughly once an hour regardless of tick frequency.
+	go func() {
+		time.Sleep(45 * time.Second)
+		handlers.CertMonitorWorkerOnce()
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				handlers.CertMonitorWorkerOnce()
+			case <-offlineDone:
+				return
+			}
+		}
+	}()
+
+	// Retention pruner — daily sweep over per-tenant audit / metrics /
+	// optional comment + time-entry retention. Heavy DELETE; runs once
+	// per day to keep IO predictable.
+	go func() {
+		time.Sleep(120 * time.Second)
+		handlers.RetentionPruneOnce()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				handlers.RetentionPruneOnce()
+			case <-offlineDone:
+				return
+			}
+		}
+	}()
+
+	// Scheduled report worker — same cadence/check pattern as the
+	// maintenance window worker (60s tick + idempotent last_run guard).
+	go func() {
+		time.Sleep(90 * time.Second)
+		handlers.ReportWorkerOnce()
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				handlers.ReportWorkerOnce()
 			case <-offlineDone:
 				return
 			}

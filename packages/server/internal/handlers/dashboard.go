@@ -2,18 +2,55 @@ package handlers
 
 import (
 	"database/sql"
+	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
+	"vaporrmm/server/internal/redis"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-// serverStartTime is captured at process boot so /dashboard/overview can
-// report uptime_hours without persistence. Reset on every restart.
+// serverStartTime is captured at process boot so /dashboard/overview
+// can report uptime_hours without persistence. Reset on every restart
+// of THIS instance. clusterUptimeHours below extends this to a
+// shared Redis key so multi-server deployments report
+// fleet-meaningful uptime instead of "uptime since this pod was
+// scheduled".
 var serverStartTime = time.Now()
+
+// clusterUptimeHours returns hours since the cluster's first instance
+// started. Backed by a Redis key that the first instance to boot
+// SETNXes to its start time; subsequent instances read it. When Redis
+// is absent, falls back to the per-process serverStartTime.
+func clusterUptimeHours() int {
+	if redis.IsEnabled() {
+		const key = "cluster:start_time"
+		startStr, err := redis.Client.Get(redis.Ctx, key).Result()
+		if err != nil {
+			// Either missing or transient error — try to claim the key.
+			now := time.Now().Unix()
+			if ok, _ := redis.Client.SetNX(redis.Ctx, key, fmt.Sprint(now), 0).Result(); ok {
+				return 0
+			}
+			// Another instance already claimed; re-read.
+			if v, err := redis.Client.Get(redis.Ctx, key).Result(); err == nil {
+				if started, perr := strconv.ParseInt(v, 10, 64); perr == nil {
+					return int(time.Since(time.Unix(started, 0)).Hours())
+				}
+			}
+			return int(time.Since(serverStartTime).Hours())
+		}
+		started, err := strconv.ParseInt(startStr, 10, 64)
+		if err == nil {
+			return int(time.Since(time.Unix(started, 0)).Hours())
+		}
+	}
+	return int(time.Since(serverStartTime).Hours())
+}
 
 func RegisterDashboardRoutes(api fiber.Router, cfg Config) {
 	api.Get("/dashboard/overview", func(c *fiber.Ctx) error {
@@ -142,7 +179,20 @@ func RegisterDashboardRoutes(api fiber.Router, cfg Config) {
 		// to what we can actually measure.
 		sla := buildSLA(now, scope != "", tenantID, total, online)
 
-		uptimeHours := int(time.Since(serverStartTime).Hours())
+		uptimeHours := clusterUptimeHours()
+
+		// Fleet-median network_latency_ms across online devices. Median is
+		// resistant to one bad device pinning at the 5000ms cap. Approximate
+		// median in SQL via the middle row of an ordered subquery — fine
+		// for dashboards, not for analytics.
+		var networkLatency sql.NullInt64
+		latencyArgs := []interface{}{staleThreshold}
+		latencyWhere := " WHERE last_seen > ? AND COALESCE(network_latency_ms,0) > 0"
+		if scope != "" {
+			latencyWhere += " AND tenant_id = ?"
+			latencyArgs = append(latencyArgs, tenantID)
+		}
+		_ = db.DB.QueryRow(`SELECT AVG(network_latency_ms) FROM devices`+latencyWhere, latencyArgs...).Scan(&networkLatency)
 
 		return c.JSON(fiber.Map{
 			"device_stats": fiber.Map{"total": total, "online": online, "offline": offline},
@@ -156,6 +206,7 @@ func RegisterDashboardRoutes(api fiber.Router, cfg Config) {
 				"memory_usage":    roundPct(avgMem),
 				"disk_usage":      roundPct(avgDisk),
 				"uptime_hours":    uptimeHours,
+				"network_latency": networkLatency.Int64,
 			},
 			"active_alerts":    activeAlerts,
 			"pending_tickets":  pendingTickets,

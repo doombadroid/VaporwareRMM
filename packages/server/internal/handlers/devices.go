@@ -431,6 +431,68 @@ func RegisterDeviceRoutes(api, devices fiber.Router, cfg Config) {
 		return c.JSON(fiber.Map{"pin": pin, "device_id": id})
 	})
 
+	// Submit a Moonlight-shown PIN to the device's local Sunshine API.
+	// This is the correct pairing model — Moonlight (client) generates
+	// the PIN, user enters it here, agent forwards to Sunshine. Replaces
+	// the old "fetch PIN from logs" flow which depended on the user
+	// already typing the PIN into Sunshine's own UI.
+	devices.Post("/:id/sunshine/pair", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
+		id := c.Params("id")
+		var req struct {
+			PIN  string `json:"pin"`
+			Name string `json:"name,omitempty"`
+		}
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid body"})
+		}
+		// Format check at the edge so we don't make a useless agent
+		// round trip when the input is obviously bad.
+		req.PIN = strings.TrimSpace(req.PIN)
+		if len(req.PIN) < 4 || len(req.PIN) > 8 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "PIN must be 4-8 digits"})
+		}
+		for _, r := range req.PIN {
+			if r < '0' || r > '9' {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "PIN must be digits only"})
+			}
+		}
+		if len(req.Name) > 64 {
+			req.Name = req.Name[:64]
+		}
+
+		tf, tArgs := tenantFilter(c)
+		row := db.DB.QueryRow(`SELECT id, hostname, agent_ip, agent_port FROM devices WHERE id = ?`+tf, append([]interface{}{id}, tArgs...)...)
+		d, err := utils.ScanDevice(row)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Device not found"})
+		}
+		agentPort := cfg.DefaultAgentWSPort
+		if d.AgentPort != nil {
+			agentPort = *d.AgentPort
+		}
+		agentIP := ""
+		if d.AgentIP != nil {
+			agentIP = *d.AgentIP
+		}
+
+		auth.TokenMu.RLock()
+		var deviceToken string
+		for t, at := range auth.RegisteredTokens {
+			if at.DeviceID == id {
+				deviceToken = t
+				break
+			}
+		}
+		auth.TokenMu.RUnlock()
+
+		if err := utils.SubmitSunshinePIN(agentIP, agentPort, deviceToken, req.PIN, req.Name); err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "agent rejected pair", "message": err.Error()})
+		}
+		userID, _ := c.Locals("user_id").(string)
+		events.AuditLogTenant(callerTenantID(c), userID, "sunshine.pair", "device", id, "submitted Moonlight PIN", c.IP())
+		return c.JSON(fiber.Map{"message": "paired"})
+	})
+
 	// Install Tailscale on device
 	devices.Post("/:id/tailscale/install", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		id := c.Params("id")

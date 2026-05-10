@@ -355,6 +355,11 @@ export const devices = {
   getSunshinePIN: (id: string) =>
     api.get<{ pin: string; device_id: string }>(`/devices/${id}/sunshine/pin`).then((res) => res.data),
 
+  // Submit a Moonlight pairing PIN. The agent forwards to local
+  // Sunshine /api/pin. Replaces the older "fetch PIN from logs" flow.
+  pairSunshine: (id: string, pin: string, name = '') =>
+    api.post<{ message: string }>(`/devices/${id}/sunshine/pair`, { pin, name }).then((res) => res.data),
+
   getSunshineProxyUrl: (id: string) =>
     `${API_BASE_URL}/devices/${id}/sunshine/proxy`,
 
@@ -541,18 +546,268 @@ export interface Patch {
   title: string;
   description: string;
   severity: 'low' | 'medium' | 'high' | 'critical';
-  status: 'pending' | 'installed' | 'failed';
+  status: 'pending' | 'installing' | 'installed' | 'failed';
   installed_at?: number;
   created_at: number;
+  kb_id?: string;
+  source?: string;
+  cve?: string;
 }
 
-export type PatchStatusFilter = 'pending' | 'installed' | 'failed' | 'all';
+export type PatchStatusFilter = 'pending' | 'installing' | 'installed' | 'failed' | 'all';
 
 export const patchesApi = {
   list: (status: PatchStatusFilter = 'pending') =>
     api.get<{ patches: Patch[] }>(`/patches?status=${encodeURIComponent(status)}`).then((r) => r.data?.patches ?? []),
   updateStatus: (id: string, status: 'installed' | 'failed' | 'pending') =>
     api.put(`/patches/${id}`, { status }).then((r) => r.data),
+  install: (id: string) =>
+    api.post<{ command_id: string }>(`/patches/${id}/install`).then((r) => r.data),
+};
+
+// ── Maintenance windows (Stage 11) ───────────────────────────────────
+
+export interface MaintenanceWindow {
+  id: string;
+  name: string;
+  group_id?: string;
+  weekly_cron: string;
+  duration_minutes: number;
+  timezone: string;
+  enabled: boolean;
+  last_run_at?: number;
+  created_at: number;
+}
+
+export const maintenanceApi = {
+  list: () =>
+    api.get<{ windows: MaintenanceWindow[] }>('/maintenance-windows').then((r) => r.data?.windows ?? []),
+  create: (data: { name: string; group_id?: string; weekly_cron: string; duration_minutes: number; timezone: string }) =>
+    api.post<{ id: string }>('/maintenance-windows', data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/maintenance-windows/${id}`).then((r) => r.data),
+};
+
+// ── Bulk command + CSV import (Stage 11) ─────────────────────────────
+
+export const bulkApi = {
+  command: (data: { type: 'shell' | 'script' | 'patch_install'; payload: Record<string, unknown>; group_id?: string; device_ids?: string[] }) =>
+    api.post<{ queued: number; targets: number }>('/commands/bulk', data).then((r) => r.data),
+  importDevices: (csvText: string) =>
+    api.post<{ imported: number; rows_read: number }>('/devices/import', csvText, {
+      headers: { 'Content-Type': 'text/csv' },
+    }).then((r) => r.data),
+};
+
+// ── Time entries (Stage 12, admin-side) ──────────────────────────────
+
+export interface TimeEntry {
+  id: string;
+  user_id: string;
+  minutes: number;
+  billable: boolean;
+  note?: string;
+  started_at: number;
+  created_at: number;
+}
+
+export const timeEntriesApi = {
+  list: (ticketId: string) =>
+    api.get<{ entries: TimeEntry[] }>(`/tickets/${ticketId}/time-entries`).then((r) => r.data?.entries ?? []),
+  create: (ticketId: string, data: { minutes: number; billable?: boolean; note?: string; started_at?: number }) =>
+    api.post<{ id: string }>(`/tickets/${ticketId}/time-entries`, data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/time-entries/${id}`).then((r) => r.data),
+  exportMonth: (year: number, month: number) =>
+    api.get(`/billing/export?year=${year}&month=${month}`, { responseType: 'blob' }).then((r) => r.data),
+};
+
+// ── Customers admin (Stage 12) ───────────────────────────────────────
+
+export interface CustomerUser {
+  id: string;
+  tenant_id: string;
+  email: string;
+  name: string;
+  device_id?: string;
+  disabled: boolean;
+  last_login?: number;
+  created_at: number;
+}
+
+export const customersApi = {
+  list: () =>
+    api.get<{ customers: CustomerUser[] }>('/admin/customers').then((r) => r.data?.customers ?? []),
+  create: (data: { email: string; name: string; password: string; device_id?: string }) =>
+    api.post<{ id: string }>('/admin/customers', data).then((r) => r.data),
+  update: (id: string, data: { name?: string; disabled?: boolean; password?: string }) =>
+    api.put(`/admin/customers/${id}`, data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/admin/customers/${id}`).then((r) => r.data),
+};
+
+// ── Network: neighbors / cert monitor / SNMP (Stage 13) ──────────────
+
+export interface UnmanagedNeighbor {
+  ip: string;
+  mac?: string;
+  hostname?: string;
+  observers: number;
+  last_seen_at: number;
+}
+
+export interface CertMonitor {
+  id: string;
+  url: string;
+  alert_threshold_days: number;
+  internal_allowed: boolean;
+  last_checked_at?: number;
+  last_expiry_at?: number;
+  last_status?: string;
+  last_error?: string;
+  created_at: number;
+}
+
+export interface SNMPTarget {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  v3_username: string;
+  v3_auth_protocol: string;
+  v3_priv_protocol: string;
+  oids: string;
+  poll_interval_seconds: number;
+  enabled: boolean;
+  last_polled_at?: number;
+  last_error?: string;
+  created_at: number;
+}
+
+export const neighborsApi = {
+  list: () =>
+    api.get<{ neighbors: UnmanagedNeighbor[] }>('/network/neighbors').then((r) => r.data?.neighbors ?? []),
+};
+
+export const certMonitorsApi = {
+  list: () =>
+    api.get<{ monitors: CertMonitor[] }>('/cert-monitors').then((r) => r.data?.monitors ?? []),
+  create: (data: { url: string; alert_threshold_days?: number; internal_allowed?: boolean }) =>
+    api.post<{ id: string }>('/cert-monitors', data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/cert-monitors/${id}`).then((r) => r.data),
+  check: (id: string) =>
+    api.post(`/cert-monitors/${id}/check`).then((r) => r.data),
+};
+
+// ── Auth: OIDC SSO + tenant policies (Stage 14) ──────────────────────
+
+export interface OIDCConfig {
+  configured: boolean;
+  issuer_url?: string;
+  client_id?: string;
+  default_role?: string;
+  enabled?: boolean;
+}
+
+export const oidcApi = {
+  get: () => api.get<OIDCConfig>('/admin/oidc').then((r) => r.data),
+  save: (data: { issuer_url: string; client_id: string; client_secret: string; default_role: string; enabled: boolean }) =>
+    api.put('/admin/oidc', data).then((r) => r.data),
+  remove: () => api.delete('/admin/oidc').then((r) => r.data),
+};
+
+export interface TenantPolicy {
+  audit_retention_days: number;
+  metrics_retention_days: number;
+  ticket_comment_retention_days: number;
+  time_entry_retention_days: number;
+  failed_login_threshold: number;
+  lockout_minutes: number;
+}
+
+export const policiesApi = {
+  get: () => api.get<TenantPolicy>('/admin/policies').then((r) => r.data),
+  save: (data: TenantPolicy) => api.put<TenantPolicy>('/admin/policies', data).then((r) => r.data),
+};
+
+// ── Observability (Stage 15) ─────────────────────────────────────────
+
+export interface AICostDaily {
+  day: number;
+  cost_usd_micros: number;
+  tokens: number;
+  calls: number;
+}
+
+export interface AICostByCapability {
+  capability: string;
+  cost_usd_micros: number;
+  tokens: number;
+  calls: number;
+}
+
+export interface AICostResponse {
+  window_days: number;
+  total_usd_micros: number;
+  total_tokens: number;
+  total_calls: number;
+  daily: AICostDaily[];
+  by_capability: AICostByCapability[];
+}
+
+export const aiCostApi = {
+  get: (days = 30) =>
+    api.get<AICostResponse>(`/admin/ai/cost?days=${days}`).then((r) => r.data),
+};
+
+export interface ReportSchedule {
+  id: string;
+  name: string;
+  report_type: string;
+  weekly_cron: string;
+  timezone: string;
+  email_recipients: string;
+  enabled: boolean;
+  last_run_at?: number;
+  last_error?: string;
+  created_at: number;
+}
+
+export const reportsApi = {
+  list: () =>
+    api.get<{ schedules: ReportSchedule[] }>('/admin/reports').then((r) => r.data?.schedules ?? []),
+  create: (data: { name: string; report_type: string; weekly_cron: string; timezone: string; email_recipients: string[] }) =>
+    api.post<{ id: string }>('/admin/reports', data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/admin/reports/${id}`).then((r) => r.data),
+  run: (id: string) =>
+    api.post(`/admin/reports/${id}/run`, undefined, { responseType: 'blob' }).then((r) => r.data),
+};
+
+export const logsApi = {
+  recent: () =>
+    api.get<{ lines: string[] }>('/admin/logs/recent').then((r) => r.data?.lines ?? []),
+};
+
+export const snmpApi = {
+  list: () =>
+    api.get<{ targets: SNMPTarget[] }>('/snmp-targets').then((r) => r.data?.targets ?? []),
+  create: (data: {
+    name: string;
+    host: string;
+    port?: number;
+    v3_username: string;
+    v3_auth_protocol: 'SHA' | 'SHA256' | 'SHA512';
+    v3_auth_pass: string;
+    v3_priv_protocol: 'AES' | 'AES256';
+    v3_priv_pass: string;
+    oids: string[];
+    poll_interval_seconds?: number;
+  }) =>
+    api.post<{ id: string }>('/snmp-targets', data).then((r) => r.data),
+  remove: (id: string) =>
+    api.delete(`/snmp-targets/${id}`).then((r) => r.data),
 };
 
 // ── Network topology (Stage 2) ───────────────────────────────────────

@@ -1,0 +1,126 @@
+# GoReleaser config for vaporRMM agent + server + cli.
+#
+# Run via: goreleaser release --clean (signed release) or
+#          goreleaser release --snapshot --clean (local test build).
+#
+# macOS notarization is NOT wired here — it requires Apple Developer
+# credentials in CI secrets. Operators distributing macOS agents to
+# their fleet need to either codesign post-release or distribute via
+# a notarized installer wrapper. Documented in PRODUCTION.md.
+version: 2
+
+project_name: vaporrmm
+
+before:
+  hooks:
+    - go work sync
+
+builds:
+  - id: agent
+    main: ./packages/agent
+    binary: vaporrmm-agent
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # systray on Windows currently builds as native; arm64 windows
+      # support requires extra Windows SDK plumbing — defer.
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.Version={{.Version}} -X main.Commit={{.Commit}} -X main.BuildDate={{.Date}}
+
+  - id: server
+    main: ./packages/server
+    binary: vaporrmm-server
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.Version={{.Version}} -X main.Commit={{.Commit}} -X main.BuildDate={{.Date}}
+
+  - id: cli
+    main: ./packages/cli
+    binary: vaporrmm
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+
+archives:
+  - id: vaporrmm
+    builds:
+      - agent
+      - cli
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - LICENSE*
+      - README.md
+      - docs/AGENT_INSTALL.md
+
+  - id: server
+    builds:
+      - server
+    name_template: "{{ .ProjectName }}-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE*
+      - README.md
+      - docs/PRODUCTION.md
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - 'merge conflict'
+
+release:
+  draft: true
+  prerelease: auto
+  header: |
+    ## vaporRMM {{.Version}}
+
+    Multi-arch agent + server build. See `docs/PRODUCTION.md` for
+    deployment guidance and `docs/AGENT_INSTALL.md` for one-line
+    install commands.
+
+    ### Verify
+
+    All artifacts are SHA256-checksummed; verify with:
+
+    ```
+    sha256sum -c {{.ProjectName}}_{{.Version}}_checksums.txt
+    ```

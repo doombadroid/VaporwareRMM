@@ -12,11 +12,13 @@ import { useCurrentUser } from '@/components/CurrentUserProvider'
 import {
   ticketsApi,
   tenantUsersApi,
+  timeEntriesApi,
   type Ticket,
   type TicketComment,
   type TenantUser,
+  type TimeEntry,
 } from '@/lib/api'
-import { ArrowLeft, Send, Lock, Unlock } from 'lucide-react'
+import { ArrowLeft, Send, Lock, Unlock, Clock, Trash2 } from 'lucide-react'
 
 const STATUS_OPTIONS: Ticket['status'][] = ['open', 'in_progress', 'pending', 'resolved', 'closed']
 const PRIORITY_OPTIONS: Ticket['priority'][] = ['low', 'medium', 'high', 'critical']
@@ -53,6 +55,9 @@ export default function TicketDetailPage() {
   const [savingField, setSavingField] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [draftInternal, setDraftInternal] = useState(false)
+  const [entries, setEntries] = useState<TimeEntry[]>([])
+  const [timeForm, setTimeForm] = useState({ minutes: 30, note: '', billable: true })
+  const [loggingTime, setLoggingTime] = useState(false)
 
   const loadAll = async () => {
     setLoading(true)
@@ -78,8 +83,9 @@ export default function TicketDetailPage() {
   useEffect(() => {
     if (isAdmin) {
       tenantUsersApi.list().then(setUsers).catch(() => {})
+      timeEntriesApi.list(ticketId).then(setEntries).catch(() => {})
     }
-  }, [isAdmin])
+  }, [isAdmin, ticketId])
 
   const updateField = async (patch: Partial<Pick<Ticket, 'status' | 'priority' | 'assigned_to'>>) => {
     if (!ticket) return
@@ -94,6 +100,42 @@ export default function TicketDetailPage() {
       setSavingField(null)
     }
   }
+
+  const logTime = async () => {
+    if (timeForm.minutes <= 0) {
+      toast.error('minutes must be positive')
+      return
+    }
+    setLoggingTime(true)
+    try {
+      await timeEntriesApi.create(ticketId, {
+        minutes: timeForm.minutes,
+        billable: timeForm.billable,
+        note: timeForm.note,
+      })
+      const fresh = await timeEntriesApi.list(ticketId)
+      setEntries(fresh)
+      setTimeForm({ minutes: 30, note: '', billable: true })
+      toast.success('Logged')
+    } catch {
+      toast.error('Failed to log time')
+    } finally {
+      setLoggingTime(false)
+    }
+  }
+
+  const removeEntry = async (id: string) => {
+    if (!confirm('Delete this time entry?')) return
+    try {
+      await timeEntriesApi.remove(id)
+      setEntries((prev) => prev.filter((e) => e.id !== id))
+    } catch {
+      toast.error('Failed to delete')
+    }
+  }
+
+  const totalMinutes = entries.reduce((acc, e) => acc + e.minutes, 0)
+  const billableMinutes = entries.filter((e) => e.billable).reduce((acc, e) => acc + e.minutes, 0)
 
   const post = async () => {
     if (!draft.trim()) return
@@ -233,6 +275,73 @@ export default function TicketDetailPage() {
               </CardContent>
             </Card>
           </div>
+
+          {isAdmin && (
+            <Card className="bg-slate-900/60 border-slate-800/50">
+              <CardHeader className="pb-3 flex flex-row items-center justify-between">
+                <CardTitle className="text-sm font-medium text-slate-300 flex items-center gap-2">
+                  <Clock className="w-4 h-4" />
+                  Time tracking
+                </CardTitle>
+                <span className="text-xs text-slate-500">
+                  {Math.floor(totalMinutes / 60)}h {totalMinutes % 60}m logged
+                  {billableMinutes !== totalMinutes && <> · {Math.floor(billableMinutes / 60)}h {billableMinutes % 60}m billable</>}
+                </span>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="number"
+                    min={1}
+                    max={1440}
+                    value={timeForm.minutes}
+                    onChange={(e) => setTimeForm({ ...timeForm, minutes: parseInt(e.target.value) || 0 })}
+                    className="w-20 bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-1.5 text-sm"
+                  />
+                  <span className="text-xs text-slate-400">min</span>
+                  <input
+                    type="text"
+                    placeholder="note (optional)"
+                    value={timeForm.note}
+                    onChange={(e) => setTimeForm({ ...timeForm, note: e.target.value })}
+                    maxLength={1024}
+                    className="flex-1 min-w-[120px] bg-slate-800/50 border border-slate-700/50 rounded-md px-2 py-1.5 text-sm"
+                  />
+                  <label className="flex items-center gap-1 text-xs text-slate-400 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={timeForm.billable}
+                      onChange={(e) => setTimeForm({ ...timeForm, billable: e.target.checked })}
+                      className="rounded border-slate-600 bg-slate-800"
+                    />
+                    billable
+                  </label>
+                  <Button size="sm" onClick={logTime} disabled={loggingTime}>
+                    {loggingTime ? 'Saving…' : 'Log'}
+                  </Button>
+                </div>
+                {entries.length > 0 && (
+                  <div className="divide-y divide-slate-800/50">
+                    {entries.map((e) => (
+                      <div key={e.id} className="py-2 flex items-center justify-between text-xs">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-slate-200">
+                            {Math.floor(e.minutes / 60) > 0 && `${Math.floor(e.minutes / 60)}h `}{e.minutes % 60}m
+                            {!e.billable && <span className="text-slate-500"> · non-billable</span>}
+                            {e.note && <span className="text-slate-400"> — {e.note}</span>}
+                          </p>
+                          <p className="text-slate-500">{userById(e.user_id)} · {new Date(e.started_at * 1000).toLocaleString()}</p>
+                        </div>
+                        <button onClick={() => removeEntry(e.id)} className="text-rose-400 hover:text-rose-300 p-1">
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           <Card className="bg-slate-900/60 border-slate-800/50">
             <CardHeader className="pb-3">

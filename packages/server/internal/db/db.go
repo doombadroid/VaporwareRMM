@@ -720,6 +720,265 @@ func RunMigrations(dialect string) error {
 			);
 			CREATE INDEX IF NOT EXISTS idx_group_members_device ON device_group_members(device_id);`,
 		},
+		{
+			Version: "037",
+			Name:    "patches_v2_and_maintenance_windows",
+			// patches gets addressing columns for OS-discovered updates
+			// (kb_id for Windows / package name for unix-like; cve list
+			// for advisory linkage; source for "where did this come
+			// from" — apt/dnf/pacman/winupdate/macos/manual). The unique
+			// index lets the agent resync repeatedly without inserting
+			// dupes — INSERT ... ON CONFLICT (or INSERT OR IGNORE on
+			// SQLite) skips identical rows.
+			//
+			// maintenance_windows is per-tenant. group_id is nullable so a
+			// window can target the whole tenant fleet (NULL = all).
+			// weekly_cron is a 3-field expression "minute hour dow"
+			// (e.g. "0 2 0" = Sunday 02:00). timezone is an IANA name.
+			SQL: `ALTER TABLE patches ADD COLUMN kb_id TEXT;
+			ALTER TABLE patches ADD COLUMN cve TEXT;
+			ALTER TABLE patches ADD COLUMN source TEXT;
+			ALTER TABLE patches ADD COLUMN install_command TEXT;
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_patches_dedup ON patches(device_id, source, kb_id);
+
+			CREATE TABLE IF NOT EXISTS maintenance_windows (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				name TEXT NOT NULL,
+				group_id TEXT,
+				weekly_cron TEXT NOT NULL,
+				duration_minutes INTEGER NOT NULL DEFAULT 60,
+				timezone TEXT NOT NULL DEFAULT 'UTC',
+				enabled INTEGER NOT NULL DEFAULT 1,
+				last_run_at INTEGER,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_windows_tenant ON maintenance_windows(tenant_id);`,
+		},
+		{
+			Version: "038",
+			Name:    "portal_customers_and_time_entries",
+			// customer_users is the SECOND user table — kept entirely
+			// separate from the existing `users` table on purpose. Mixing
+			// admin and end-user identities in one table risks scope leaks
+			// (LIKE-search on email, role mistypes, etc.). Customer scope
+			// is enforced by a different JWT issuer + cookie name; the
+			// table separation makes that boundary obvious in the data.
+			//
+			// password_hash uses the same bcrypt routine as users; we do
+			// not allow customers to authenticate via OIDC / SSO until
+			// Stage 14 — they're local accounts only for now.
+			//
+			// device_id is optional; if set, the customer only sees
+			// tickets attached to that device (single-machine MSP
+			// customer). NULL device_id = full tenant visibility for
+			// that customer (multi-machine MSP customer).
+			//
+			// ticket_time_entries is admin-side only — never exposed via
+			// the portal endpoints. Used to compute billable hours per
+			// ticket / per tenant for monthly export.
+			SQL: `CREATE TABLE IF NOT EXISTS customer_users (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				email TEXT NOT NULL,
+				name TEXT NOT NULL,
+				password_hash TEXT NOT NULL,
+				device_id TEXT,
+				totp_secret TEXT,
+				totp_enabled INTEGER NOT NULL DEFAULT 0,
+				last_login INTEGER,
+				created_at INTEGER NOT NULL,
+				disabled INTEGER NOT NULL DEFAULT 0
+			);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_users_email ON customer_users(tenant_id, email);
+
+			CREATE TABLE IF NOT EXISTS ticket_time_entries (
+				id TEXT PRIMARY KEY,
+				ticket_id TEXT NOT NULL,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				user_id TEXT NOT NULL,
+				minutes INTEGER NOT NULL,
+				billable INTEGER NOT NULL DEFAULT 1,
+				note TEXT,
+				started_at INTEGER NOT NULL,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_time_entries_ticket ON ticket_time_entries(ticket_id);
+			CREATE INDEX IF NOT EXISTS idx_time_entries_tenant_started ON ticket_time_entries(tenant_id, started_at);`,
+		},
+		{
+			Version: "039",
+			Name:    "network_discovery_cert_snmp",
+			// neighbor_observations: agent-reported ARP / ip-neigh entries.
+			// Replace-per-agent semantics — each agent rebuilds its own
+			// list on each post; index supports the per-subnet aggregation
+			// the dashboard renders.
+			//
+			// cert_monitors: server-side TLS probe targets. internal_allowed
+			// gates the SSRF allowlist — defaults 0 so a tenant can't watch
+			// internal corp endpoints unless an admin explicitly opts in.
+			//
+			// snmp_targets: SNMP v3 only. credentials encrypted at rest with
+			// internal/crypto. The agent that's on the right subnet polls
+			// (server-side polling won't reach customer LANs).
+			SQL: `CREATE TABLE IF NOT EXISTS neighbor_observations (
+				id TEXT PRIMARY KEY,
+				device_id TEXT NOT NULL,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				ip TEXT NOT NULL,
+				mac TEXT,
+				hostname TEXT,
+				iface TEXT,
+				observed_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_neighbors_device ON neighbor_observations(device_id);
+			CREATE INDEX IF NOT EXISTS idx_neighbors_tenant ON neighbor_observations(tenant_id, observed_at DESC);
+
+			CREATE TABLE IF NOT EXISTS cert_monitors (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				url TEXT NOT NULL,
+				alert_threshold_days INTEGER NOT NULL DEFAULT 14,
+				internal_allowed INTEGER NOT NULL DEFAULT 0,
+				last_checked_at INTEGER,
+				last_expiry_at INTEGER,
+				last_status TEXT,
+				last_error TEXT,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_certs_tenant ON cert_monitors(tenant_id);
+
+			CREATE TABLE IF NOT EXISTS snmp_targets (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				name TEXT NOT NULL,
+				host TEXT NOT NULL,
+				port INTEGER NOT NULL DEFAULT 161,
+				v3_username TEXT NOT NULL,
+				v3_auth_protocol TEXT NOT NULL,
+				v3_auth_pass_enc TEXT NOT NULL,
+				v3_priv_protocol TEXT NOT NULL,
+				v3_priv_pass_enc TEXT NOT NULL,
+				oids TEXT NOT NULL,
+				poll_interval_seconds INTEGER NOT NULL DEFAULT 300,
+				enabled INTEGER NOT NULL DEFAULT 1,
+				last_polled_at INTEGER,
+				last_error TEXT,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_snmp_tenant ON snmp_targets(tenant_id);
+
+			CREATE TABLE IF NOT EXISTS snmp_observations (
+				id TEXT PRIMARY KEY,
+				target_id TEXT NOT NULL,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				oid TEXT NOT NULL,
+				value TEXT NOT NULL,
+				observed_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_snmp_obs_target ON snmp_observations(target_id, observed_at DESC);`,
+		},
+		{
+			Version: "040",
+			Name:    "auth_sso_webauthn_policies",
+			// tenant_oidc_configs: per-tenant OIDC provider. client_secret
+			// encrypted at rest. JIT-provisioned users get role="user" by
+			// default; admins can promote later.
+			//
+			// oidc_states: ephemeral state+nonce store for OIDC callback.
+			// Rows expire ~10 min after issue. We use a DB row instead of
+			// a signed cookie so a forged callback can't replay state from
+			// an attacker-controlled origin.
+			//
+			// webauthn_credentials: stored after registration. AAGUID +
+			// counter let us detect cloned authenticators.
+			//
+			// tenant_policies: per-tenant retention + lockout knobs.
+			// Defaults baked into the app code if no row exists.
+			SQL: `CREATE TABLE IF NOT EXISTS tenant_oidc_configs (
+				tenant_id TEXT PRIMARY KEY,
+				issuer_url TEXT NOT NULL,
+				client_id TEXT NOT NULL,
+				client_secret_enc TEXT NOT NULL,
+				default_role TEXT NOT NULL DEFAULT 'user',
+				enabled INTEGER NOT NULL DEFAULT 1,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			);
+
+			CREATE TABLE IF NOT EXISTS oidc_states (
+				state TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL,
+				nonce TEXT NOT NULL,
+				code_verifier TEXT NOT NULL,
+				redirect_uri TEXT NOT NULL,
+				expires_at INTEGER NOT NULL,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_oidc_states_expires ON oidc_states(expires_at);
+
+			CREATE TABLE IF NOT EXISTS webauthn_credentials (
+				id TEXT PRIMARY KEY,
+				user_id TEXT NOT NULL,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				credential_id BLOB NOT NULL,
+				public_key BLOB NOT NULL,
+				aaguid BLOB,
+				sign_count INTEGER NOT NULL DEFAULT 0,
+				transports TEXT,
+				name TEXT,
+				created_at INTEGER NOT NULL,
+				last_used_at INTEGER
+			);
+			CREATE INDEX IF NOT EXISTS idx_webauthn_user ON webauthn_credentials(user_id);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_webauthn_credid ON webauthn_credentials(credential_id);
+
+			CREATE TABLE IF NOT EXISTS webauthn_sessions (
+				id TEXT PRIMARY KEY,
+				user_id TEXT,
+				kind TEXT NOT NULL,
+				challenge BLOB NOT NULL,
+				expires_at INTEGER NOT NULL,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_webauthn_sessions_expires ON webauthn_sessions(expires_at);
+
+			CREATE TABLE IF NOT EXISTS report_schedules (
+				id TEXT PRIMARY KEY,
+				tenant_id TEXT NOT NULL DEFAULT 'default',
+				name TEXT NOT NULL,
+				report_type TEXT NOT NULL,
+				weekly_cron TEXT NOT NULL,
+				timezone TEXT NOT NULL DEFAULT 'UTC',
+				email_recipients TEXT NOT NULL,
+				enabled INTEGER NOT NULL DEFAULT 1,
+				last_run_at INTEGER,
+				last_error TEXT,
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_reports_tenant ON report_schedules(tenant_id);
+
+			CREATE TABLE IF NOT EXISTS tenant_policies (
+				tenant_id TEXT PRIMARY KEY,
+				audit_retention_days INTEGER NOT NULL DEFAULT 365,
+				metrics_retention_days INTEGER NOT NULL DEFAULT 90,
+				ticket_comment_retention_days INTEGER NOT NULL DEFAULT 0,
+				time_entry_retention_days INTEGER NOT NULL DEFAULT 0,
+				failed_login_threshold INTEGER NOT NULL DEFAULT 10,
+				lockout_minutes INTEGER NOT NULL DEFAULT 15,
+				updated_at INTEGER NOT NULL
+			);`,
+		},
+		{
+			Version: "041",
+			Name:    "device_network_latency",
+			// network_latency_ms is the round-trip time the agent
+			// measured to the server on its previous heartbeat. Updated
+			// on each heartbeat. We sanity-clamp the value at write
+			// time (see handlers/agent.go) so a buggy agent reporting
+			// 999999ms doesn't poison the dashboard average.
+			SQL: `ALTER TABLE devices ADD COLUMN network_latency_ms INTEGER DEFAULT 0;`,
+		},
 	}
 
 	for _, m := range migrations {

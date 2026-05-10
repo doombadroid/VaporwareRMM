@@ -62,6 +62,11 @@ type Agent struct {
 
 	mu           sync.Mutex
 	lastCommands []CommandResult
+
+	// RTT cache for the heartbeat loop. Updated after each successful
+	// heartbeat; attached to the NEXT heartbeat as network_latency_ms.
+	rttMu sync.Mutex
+	rttMs int64
 }
 
 // CommandRequest describes a command the server wants the agent to run.
@@ -83,9 +88,14 @@ type CommandResult struct {
 
 // Valid command types
 var allowedCommandTypes = map[string]bool{
-	"shell":  true,
-	"script": true,
+	"shell":         true,
+	"script":        true,
+	"patch_install": true,
 }
+
+// patchInstallTimeout is much longer than shell — installing a Windows
+// cumulative update can run 5+ minutes. Cap at 30 minutes.
+const patchInstallTimeout = 30 * time.Minute
 
 // dangerousPatterns blocks obvious destructive commands. Not a sandbox — proper
 // isolation requires seccomp/apparmor/containers.
@@ -346,6 +356,7 @@ func (a *Agent) Start() error {
 	mux.HandleFunc("/metrics", a.authMiddleware(a.handleMetrics))
 	mux.HandleFunc("/agent/file-transfer", a.authMiddleware(a.handleFileTransfer))
 	mux.HandleFunc("/agent/sunshine/pin", a.authMiddleware(a.handleGetSunshinePIN))
+	mux.HandleFunc("/agent/sunshine/pair", a.authMiddleware(a.handlePairSunshine))
 
 	// Bind address: 0.0.0.0 by default so the central server can reach the agent
 	// over Tailscale or LAN. Every endpoint above is wrapped in authMiddleware
@@ -396,6 +407,12 @@ func (a *Agent) Start() error {
 
 	// Periodic software/hardware inventory snapshot.
 	go a.inventoryLoop()
+
+	// Periodic available-patch discovery.
+	go a.patchSyncLoop()
+
+	// Periodic L2 neighbor (ARP / ip-neigh) sweep.
+	go a.neighborLoop()
 
 	return nil
 }
@@ -599,6 +616,24 @@ func (a *Agent) executeCommand(cmd CommandRequest) CommandResult {
 		return result
 	}
 
+	// patch_install is a typed channel: server sends {source, kb_id} only;
+	// agent owns the OS-specific shell/COM call. This prevents an API
+	// caller from injecting arbitrary commands via the patch path.
+	if cmdType == "patch_install" {
+		source, _ := cmd.Payload["source"].(string)
+		kbID, _ := cmd.Payload["kb_id"].(string)
+		out, runErr := runPatchInstall(source, kbID)
+		result.Output = truncateOutput(out)
+		if runErr != nil {
+			result.Success = false
+			result.Error = runErr.Error()
+		} else {
+			result.Success = true
+		}
+		a.addCommandResult(result)
+		return result
+	}
+
 	cmdStr, _ := cmd.Payload["command"].(string)
 	if cmdStr == "" {
 		result.Success = false
@@ -699,8 +734,15 @@ func (a *Agent) submitResults(results []CommandResult) error {
 }
 
 // sendHeartbeat posts the agent's current status to the server.
+// Measures the prior heartbeat's round-trip time (full HTTP cycle,
+// includes network + server processing) and sends it on the NEXT
+// heartbeat as `network_latency_ms`. Reporting on the next call rather
+// than this one keeps the timing measurement self-contained.
 func (a *Agent) sendHeartbeat() error {
 	status := a.getStatus()
+	if rtt := a.lastRTTMs(); rtt > 0 {
+		status["network_latency_ms"] = rtt
+	}
 	data, err := json.Marshal(status)
 	if err != nil {
 		return fmt.Errorf("marshal status: %w", err)
@@ -713,6 +755,7 @@ func (a *Agent) sendHeartbeat() error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.apiToken)
 
+	t0 := time.Now()
 	resp, err := newHTTPClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("post heartbeat: %w", err)
@@ -723,7 +766,30 @@ func (a *Agent) sendHeartbeat() error {
 		return fmt.Errorf("heartbeat returned status: %d", resp.StatusCode)
 	}
 
+	// Record RTT for the NEXT heartbeat to attach. Cap at 5000ms so a
+	// pathologically slow round-trip doesn't drown the dashboard
+	// average.
+	rttMs := time.Since(t0).Milliseconds()
+	if rttMs > 5000 {
+		rttMs = 5000
+	}
+	a.recordRTT(rttMs)
 	return nil
+}
+
+// lastRTTMs / recordRTT keep the most recent RTT measurement under a
+// mutex. Single-value cache — heartbeat loop is single-goroutine but
+// the field could be read by other surfaces later (debug endpoint).
+func (a *Agent) lastRTTMs() int64 {
+	a.rttMu.Lock()
+	defer a.rttMu.Unlock()
+	return a.rttMs
+}
+
+func (a *Agent) recordRTT(ms int64) {
+	a.rttMu.Lock()
+	a.rttMs = ms
+	a.rttMu.Unlock()
 }
 
 // ---------------------------------------------------------------------------

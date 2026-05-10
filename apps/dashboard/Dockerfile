@@ -38,13 +38,13 @@ EXPOSE 3000
 
 USER nextjs
 
-# node:22-alpine doesn't ship wget or curl, only node + npm. Earlier
-# 'wget --spider' ran the alpine builtin wget script which existed but
-# returned non-zero in this minimal image, so every healthcheck failed
-# silently while the server was happily serving 'Ready in 150ms'.
-# Use node's built-in fetch (Node 18+) so the only dependency is the
-# binary that's already PID 1.
+# node:22-alpine ships only node + npm — no wget, no curl, and the
+# previous shell-form 'node -e "fetch(...)"' was silently failing
+# (probably shell quoting around the arrow functions). Use exec form
+# with a TCP connect, which is the minimum the orchestrator needs to
+# know: 'is something listening on :3000?'. Keeps the probe trivial
+# and immune to dashboard route latency / 5xx flakes.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=8 \
-    CMD node -e "fetch('http://localhost:3000/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"
+    CMD ["node", "-e", "require('net').createConnection({host:'127.0.0.1',port:3000}).on('connect',function(){process.exit(0);}).on('error',function(){process.exit(1);});"]
 
 CMD ["node", "apps/dashboard/server.js"]

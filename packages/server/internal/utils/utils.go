@@ -122,45 +122,6 @@ func validateAgentIP(agentIP string) error {
 	return nil
 }
 
-// SendCommandToDevice sends a command to an agent at its tracked address with authorization.
-func SendCommandToDevice(agentIP string, agentPort int, apiToken string, cmdData []byte) error {
-	if agentIP == "" {
-		agentIP = "localhost"
-	}
-	if agentPort == 0 {
-		agentPort = 47991
-	}
-
-	if err := validateAgentIP(agentIP); err != nil {
-		return err
-	}
-
-	scheme := "http"
-	if os.Getenv("AGENT_CA_CERT") != "" {
-		scheme = "https"
-	}
-
-	url := fmt.Sprintf("%s://%s:%d/agent/run", scheme, agentIP, agentPort)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(cmdData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiToken)
-
-	resp, err := agentHTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send command to agent: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("agent returned non-OK status: %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
 // scanner is an interface that covers both *sql.Row and *sql.Rows
 type scanner interface {
 	Scan(dest ...interface{}) error

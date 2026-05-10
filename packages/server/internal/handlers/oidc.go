@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -26,12 +27,27 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// oidcOutboundClient is the HTTP client OIDC discovery / JWKS / token-
+// exchange runs through. Vars (not functions) so an integration test
+// can swap them for clients that allow loopback without changing
+// production behaviour — the production binary always reads through
+// the SafeOutboundClient that rejects private IPs at dial time.
+//
+// DO NOT expose these from outside the package. There is no env var
+// or runtime flag that flips them — the only writer is the test code
+// in this package's _test.go files.
+var (
+	oidcOutboundClient   = func(timeout time.Duration) *http.Client { return httputilv.SafeOutboundClient(timeout) }
+	oidcIssuerValidator  = httputilv.RejectPrivateHost
+	oidcTimeoutDiscovery = 15 * time.Second
+)
+
 // oidcSafeContext returns a context that pins go-oidc + golang.org/x/oauth2
 // to the SSRF-safe HTTP client. Without this, the OIDC discovery + JWKS +
 // token-exchange calls run on http.DefaultClient and can be redirected to
 // cloud-metadata or LAN addresses.
 func oidcSafeContext(parent context.Context) context.Context {
-	c := httputilv.SafeOutboundClient(15 * time.Second)
+	c := oidcOutboundClient(oidcTimeoutDiscovery)
 	ctx := oidc.ClientContext(parent, c)
 	return context.WithValue(ctx, oauth2.HTTPClient, c)
 }
@@ -107,7 +123,7 @@ func validIssuerURL(raw string) error {
 	if u.Host == "" {
 		return errors.New("issuer missing host")
 	}
-	if err := httputilv.RejectPrivateHost(raw); err != nil {
+	if err := oidcIssuerValidator(raw); err != nil {
 		return err
 	}
 	return nil

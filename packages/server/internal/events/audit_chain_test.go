@@ -44,15 +44,26 @@ func writeRow(t *testing.T, action, details string) {
 	AuditLogTenantSync("default", "system", action, "audit_test", "rid-1", details, "127.0.0.1")
 }
 
+// verifyDefaultTenant runs VerifyAuditChain scoped to "default" and
+// returns the single result. Tests are all single-tenant.
+func verifyDefaultTenant(t *testing.T) AuditChainVerifyResult {
+	t.Helper()
+	res, err := VerifyAuditChain("default")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("expected exactly one tenant result, got %d", len(res))
+	}
+	return res[0]
+}
+
 func TestAuditChain_IntactAfterLegitimateWrites(t *testing.T) {
 	setupTestDB(t)
 	for i := 0; i < 5; i++ {
 		writeRow(t, "test.action", "row")
 	}
-	res, err := VerifyAuditChain()
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
+	res := verifyDefaultTenant(t)
 	if !res.OK {
 		t.Fatalf("expected OK chain, got reason=%q first_bad=%s", res.Reason, res.FirstBadID)
 	}
@@ -70,17 +81,14 @@ func TestAuditChain_BreaksOnRowEdit(t *testing.T) {
 	// over the row no longer matches; the verifier should report this
 	// row as the first bad one.
 	var victimID string
-	if err := db.DB.QueryRow(`SELECT id FROM audit_logs ORDER BY created_at ASC, id ASC LIMIT 1 OFFSET 2`).Scan(&victimID); err != nil {
+	if err := db.DB.QueryRow(`SELECT id FROM audit_logs WHERE tenant_id = 'default' ORDER BY chain_seq ASC LIMIT 1 OFFSET 2`).Scan(&victimID); err != nil {
 		t.Fatalf("pick victim: %v", err)
 	}
 	if _, err := db.DB.Exec(`UPDATE audit_logs SET details = ? WHERE id = ?`, "TAMPERED", victimID); err != nil {
 		t.Fatalf("tamper: %v", err)
 	}
 
-	res, err := VerifyAuditChain()
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
+	res := verifyDefaultTenant(t)
 	if res.OK {
 		t.Fatal("expected verifier to flag the tampered row, got OK")
 	}
@@ -101,7 +109,7 @@ func TestAuditChain_BreaksOnRowDelete(t *testing.T) {
 	// the one that breaks: its "previous signature" no longer exists in
 	// the chain (we deleted it), so its recomputed signature uses the
 	// new previous head and won't match what was stored.
-	rows, err := db.DB.Query(`SELECT id FROM audit_logs ORDER BY created_at ASC, id ASC`)
+	rows, err := db.DB.Query(`SELECT id FROM audit_logs WHERE tenant_id = 'default' ORDER BY chain_seq ASC`)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -125,10 +133,7 @@ func TestAuditChain_BreaksOnRowDelete(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 
-	res, err := VerifyAuditChain()
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
+	res := verifyDefaultTenant(t)
 	if res.OK {
 		t.Fatal("expected verifier to flag the orphaned successor, got OK")
 	}
@@ -174,10 +179,7 @@ func TestAuditChain_IntactAcrossDBRestart(t *testing.T) {
 		writeRow(t, "test.after_restart", "row")
 	}
 
-	res, err := VerifyAuditChain()
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
+	res := verifyDefaultTenant(t)
 	if !res.OK {
 		t.Fatalf("expected OK chain across restart, got reason=%q first_bad=%s (verified %d/%d)", res.Reason, res.FirstBadID, res.Verified, res.Total)
 	}

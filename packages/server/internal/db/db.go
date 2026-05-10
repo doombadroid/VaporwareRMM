@@ -1002,6 +1002,27 @@ func RunMigrations(dialect string) error {
 			// AuditLogTenant always set a non-empty value.
 			SQL: `ALTER TABLE audit_logs ADD COLUMN signature TEXT NOT NULL DEFAULT '';`,
 		},
+		{
+			Version: "043",
+			Name:    "audit_log_chain_seq",
+			// Explicit per-tenant chain ordering. The original chain
+			// in migration 042 sorted by (created_at, id), which broke
+			// the moment retention deleted old rows: the chain needs
+			// to be navigable past gaps, and a compaction record
+			// inserted now has a created_at greater than the rows it
+			// bridges so it sorts at the wrong end of the chain.
+			//
+			// chain_seq is a monotonic per-tenant counter assigned
+			// under auditChainMu. Compaction records claim the
+			// smallest chain_seq of the rows they replace, so the
+			// verifier walks rows in chain_seq ASC and sees the CR
+			// in the spot the deleted rows used to occupy.
+			//
+			// Backfill in code (events.BackfillAuditChain) walks rows
+			// in (tenant_id, created_at, id) order and assigns seq
+			// starting from 1 per tenant.
+			SQL: `ALTER TABLE audit_logs ADD COLUMN chain_seq INTEGER NOT NULL DEFAULT 0;`,
+		},
 	}
 
 	for _, m := range migrations {

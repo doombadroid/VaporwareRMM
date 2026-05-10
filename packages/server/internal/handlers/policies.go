@@ -179,22 +179,19 @@ func RetentionPruneOnce() {
 		// this split a row with empty tenant_id would get DELETE'd by
 		// every tenant's pass.
 		auditCutoff := now - int64(p.AuditRetentionDays)*86400
-		var auditRes interface {
-			RowsAffected() (int64, error)
+		// Audit retention MUST go through CompactAuditChainForTenant —
+		// a bare DELETE would falsify the tamper-evident chain at the
+		// first surviving row. Compaction inserts a signed bridge
+		// record in the deleted range's chain slot so the chain stays
+		// verifiable end-to-end.
+		if n, _, err := events.CompactAuditChainForTenant(tid, auditCutoff); err != nil {
+			slog.Warn("retention: audit chain compaction failed", "tenant", tid, "error", err)
+		} else if n > 0 {
+			slog.Info("retention compacted audit_logs", "tenant", tid, "rows", n)
 		}
-		var auditErr error
-		if tid == "default" {
-			res, err := db.DB.Exec(`DELETE FROM audit_logs WHERE (tenant_id = ? OR tenant_id IS NULL OR tenant_id = '') AND created_at < ?`, tid, auditCutoff)
-			auditRes, auditErr = res, err
-		} else {
-			res, err := db.DB.Exec(`DELETE FROM audit_logs WHERE tenant_id = ? AND created_at < ?`, tid, auditCutoff)
-			auditRes, auditErr = res, err
-		}
-		if auditErr == nil && auditRes != nil {
-			if n, _ := auditRes.RowsAffected(); n > 0 {
-				slog.Info("retention pruned audit_logs", "tenant", tid, "rows", n)
-			}
-		}
+		// Legacy rows with NULL/empty tenant_id are reassigned to
+		// "default" by the chain backfill at startup; the compaction
+		// path above handles them under tid="default".
 		metricCutoff := now - int64(p.MetricsRetentionDays)*86400
 		if res, err := db.DB.Exec(`DELETE FROM metrics_history WHERE tenant_id = ? AND recorded_at < ?`, tid, metricCutoff); err == nil {
 			if n, _ := res.RowsAffected(); n > 0 {

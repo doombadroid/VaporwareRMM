@@ -22,7 +22,6 @@ import (
 	"vaporrmm/server/internal/redis"
 
 	"github.com/gofiber/websocket/v2"
-	"github.com/google/uuid"
 )
 
 // wsClientSendBuf is the per-connection outbound queue depth. A slow
@@ -176,34 +175,20 @@ func AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, deta
 	auditChainMu.Lock()
 	defer auditChainMu.Unlock()
 
-	prevSig, err := loadLastAuditSignature()
+	prevSig, prevSeq, err := loadLastAuditState(tenantID)
 	if err != nil {
 		slog.Warn("audit log: failed to load chain head; row will write but chain may be discontinuous", "error", err)
 	}
 
-	// uuid v7 is time-ordered: alphabetical id order matches insertion
-	// order (modulo a 12-bit per-millisecond entropy that we don't
-	// generate two of in the same write thanks to auditChainMu). This
-	// is the property the chain-head lookup relies on — we sort by
-	// (created_at, id) and need that ordering to match the order rows
-	// were written. v4 (random) IDs broke the chain whenever two rows
-	// landed in the same Unix-second.
-	v7, err := uuid.NewV7()
-	if err != nil {
-		// Fall back to v4 — chain may break on same-second collisions
-		// but a working insert beats a panic in pathological clock
-		// conditions. Loud log so the operator notices.
-		slog.Error("audit log: NewV7 failed; falling back to NewRandom (chain may break on same-second writes)", "error", err)
-		v7 = uuid.New()
-	}
-	id := v7.String()
+	id := newAuditID()
 	ts := auditNow()
 	sig := auditSignature(prevSig, canonicalAuditPayload(id, tenantID, userID, action, resourceType, resourceID, details, ipAddress, ts))
+	seq := prevSeq + 1
 
 	if _, err := db.DB.Exec(
-		`INSERT INTO audit_logs (id, user_id, action, resource_type, resource_id, details, ip_address, created_at, tenant_id, signature)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, userID, action, resourceType, resourceID, details, ipAddress, ts, tenantID, sig,
+		`INSERT INTO audit_logs (id, user_id, action, resource_type, resource_id, details, ip_address, created_at, tenant_id, signature, chain_seq)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, userID, action, resourceType, resourceID, details, ipAddress, ts, tenantID, sig, seq,
 	); err != nil {
 		// A write failure on a privileged action is the kind of silent
 		// gap the audit log exists to prevent. Log loudly — observ-

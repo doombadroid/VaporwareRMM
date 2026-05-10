@@ -63,21 +63,33 @@ func RegisterAuditRoutes(api fiber.Router, cfg Config) {
 		return c.JSON(fiber.Map{"logs": logs})
 	})
 
-	// Tamper-evidence verifier. Walks the audit_log hash chain and
-	// reports the first row whose stored signature doesn't recompute,
-	// or whose signature is missing. Super_admin only — there is no
-	// per-tenant scope because the chain is fleet-wide; a tenant_admin
-	// who could verify only their own slice could be lied to about
-	// rows that were deleted or rewritten in a different tenant slot.
+	// Tamper-evidence verifier. Walks every tenant's audit_log hash
+	// chain and reports the first row in each whose stored signature
+	// doesn't recompute, whose signature is missing, or — for
+	// compaction records that bridge a retention deletion — whose
+	// claimed end_sig is missing. Super_admin only because the chain
+	// covers cross-tenant data: a tenant_admin who could verify only
+	// their own slice could be lied to about rows touched in another
+	// tenant's slot.
+	//
+	// Pass ?tenant_id=foo to scope to one tenant for a faster check.
 	api.Get("/audit-logs/verify", auth.AdminMiddleware(), func(c *fiber.Ctx) error {
 		role, _ := c.Locals("user_role").(string)
 		if !auth.IsSuperAdmin(role) {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "super_admin only"})
 		}
-		res, err := events.VerifyAuditChain()
+		scopeTenant := c.Query("tenant_id")
+		res, err := events.VerifyAuditChain(scopeTenant)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
-		return c.JSON(res)
+		allOK := true
+		for _, r := range res {
+			if !r.OK {
+				allOK = false
+				break
+			}
+		}
+		return c.JSON(fiber.Map{"ok": allOK, "tenants": res})
 	})
 }

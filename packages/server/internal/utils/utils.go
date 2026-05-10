@@ -7,9 +7,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -240,94 +238,18 @@ func ReadSecret(envVar, fileEnvVar string) string {
 	return ""
 }
 
-// FetchSunshinePIN requests the current pairing PIN from the agent.
-func FetchSunshinePIN(agentIP string, agentPort int, apiToken string) (string, error) {
-	if agentIP == "" {
-		agentIP = "localhost"
-	}
-	if agentPort == 0 {
-		agentPort = 47991
-	}
-
-	// SSRF guard. agent_ip is supplied by the agent during heartbeat and
-	// stored on the device row; without this check a compromised agent
-	// could redirect the server's PIN fetch to internal services
-	// (Redis on loopback, AWS metadata, etc.) and exfiltrate the
-	// response body via the dashboard.
-	if err := validateAgentIP(agentIP); err != nil {
-		return "", err
-	}
-
-	scheme := "http"
-	if os.Getenv("AGENT_CA_CERT") != "" {
-		scheme = "https"
-	}
-
-	url := fmt.Sprintf("%s://%s:%d/agent/sunshine/pin", scheme, agentIP, agentPort)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+apiToken)
-
-	resp, err := agentHTTPClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch PIN from agent: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("agent returned non-OK status: %d", resp.StatusCode)
-	}
-
-	var result struct {
-		PIN string `json:"pin"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode PIN response: %w", err)
-	}
-
-	return result.PIN, nil
-}
-
-// SubmitSunshinePIN forwards a Moonlight pairing PIN to the agent's
-// /agent/sunshine/pair endpoint. The agent posts to local Sunshine at
-// 127.0.0.1:47990 (see packages/agent/sunshine_pair.go).
-func SubmitSunshinePIN(agentIP string, agentPort int, apiToken, pin, name string) error {
-	if agentIP == "" {
-		agentIP = "localhost"
-	}
-	if agentPort == 0 {
-		agentPort = 47991
-	}
-	if err := validateAgentIP(agentIP); err != nil {
-		return err
-	}
-
-	scheme := "http"
-	if os.Getenv("AGENT_CA_CERT") != "" {
-		scheme = "https"
-	}
-	url := fmt.Sprintf("%s://%s:%d/agent/sunshine/pair", scheme, agentIP, agentPort)
-	bodyJSON, _ := json.Marshal(map[string]string{"pin": pin, "name": name})
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(bodyJSON))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiToken)
-
-	resp, err := agentHTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to forward PIN: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
-}
+// Server->agent push has been removed. Both Sunshine PIN helpers
+// (FetchSunshinePIN, SubmitSunshinePIN) and the SendCommandToDevice
+// helper that preceded them shared the same structural bug: the
+// server only holds the SHA-256 hash of the agent's bearer token,
+// while the agent compares against plaintext, so any Bearer header
+// constructed from RegisteredTokens cannot match. Every push 401'd.
+//
+// Delivery is pull-only by design. The agent's commandPollLoop fetches
+// queued work every 15 seconds; new server-initiated capabilities go
+// through a database row that the agent polls for. Do NOT reintroduce
+// outbound agent calls without first redesigning the token model — a
+// new helper would walk straight into the same bug.
 
 // GenerateSecureKey creates a random base64-encoded 32-byte key
 func GenerateSecureKey() string {

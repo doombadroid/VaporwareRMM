@@ -239,10 +239,16 @@ func main() {
 
 	// Customer portal routes — completely separate auth chain. Hard
 	// scope split: portal_token cookie + iss="vaporrmm-portal" only.
-	// CSRFMiddleware shares the global double-submit cookie pattern with
-	// the admin chain — defense-in-depth alongside the cookie's
-	// SameSite=Lax scoping. Stage 12.
-	portalAPI := app.Group("/api/v1", auth.PortalAuthMiddleware(), auth.CSRFMiddleware())
+	// CSRFMiddleware shares the double-submit cookie pattern with the
+	// admin chain — defense-in-depth alongside SameSite=Lax cookie
+	// scoping. Stage 12.
+	//
+	// IMPORTANT: prefix MUST be distinct from `api`'s `/api/v1` —
+	// fiber's Group middleware is registered as `app.register(Use,
+	// prefix, ...)` which means a second Group at the same prefix would
+	// stack PortalAuthMiddleware on top of admin routes too, 401-ing
+	// every admin request because no portal_token cookie is present.
+	portalAPI := app.Group("/api/v1/portal", auth.PortalAuthMiddleware(), auth.CSRFMiddleware())
 
 	// Backward compatibility: redirect legacy /api/* paths to /api/v1/*
 	// Uses 308 (Permanent Redirect) to preserve HTTP method (POST, PUT, etc.)
@@ -394,7 +400,11 @@ func main() {
 				// rows the UPDATE actually changed — prior pattern picked N
 				// already-offline rows and re-emitted alerts every tick.
 				type offlineCandidate struct{ id, hostname, ownerID, tid string }
-				selRows, err := db.DB.Query(`SELECT id, hostname, COALESCE(user_id,''), COALESCE(tenant_id,'default') FROM devices WHERE last_seen < ? AND status != 'offline' LIMIT 500`, threshold)
+				// Devices table has no user_id column on fresh DB schemas;
+				// the older "owner" concept never made it into the
+				// canonical CREATE. Pass empty string to keep the
+				// downstream WSBroadcastFiltered call's signature.
+				selRows, err := db.DB.Query(`SELECT id, hostname, COALESCE(tenant_id,'default') FROM devices WHERE last_seen < ? AND status != 'offline' LIMIT 500`, threshold)
 				if err != nil {
 					slog.Warn("offline candidate query failed", "error", err)
 					continue
@@ -402,7 +412,7 @@ func main() {
 				var candidates []offlineCandidate
 				for selRows.Next() {
 					var c offlineCandidate
-					if err := selRows.Scan(&c.id, &c.hostname, &c.ownerID, &c.tid); err == nil {
+					if err := selRows.Scan(&c.id, &c.hostname, &c.tid); err == nil {
 						candidates = append(candidates, c)
 					}
 				}

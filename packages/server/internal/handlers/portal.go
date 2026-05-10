@@ -178,7 +178,7 @@ func RegisterPortalRoutes(app *fiber.App, publicAPI fiber.Router, portalAPI fibe
 
 	// Protected portal endpoints. portalAPI has PortalAuthMiddleware
 	// applied at registration time in main.go.
-	portalAPI.Get("/portal/me", func(c *fiber.Ctx) error {
+	portalAPI.Get("/me", func(c *fiber.Ctx) error {
 		customerID, _ := c.Locals("customer_id").(string)
 		tenantID, _ := c.Locals("tenant_id").(string)
 		deviceID, _ := c.Locals("customer_device_id").(string)
@@ -190,7 +190,7 @@ func RegisterPortalRoutes(app *fiber.App, publicAPI fiber.Router, portalAPI fibe
 	})
 
 	// Tickets list — scoped to customer's tenant + device (if set).
-	portalAPI.Get("/portal/tickets", func(c *fiber.Ctx) error {
+	portalAPI.Get("/tickets", func(c *fiber.Ctx) error {
 		tenantID, _ := c.Locals("tenant_id").(string)
 		deviceID, _ := c.Locals("customer_device_id").(string)
 		args := []interface{}{tenantID}
@@ -223,7 +223,7 @@ func RegisterPortalRoutes(app *fiber.App, publicAPI fiber.Router, portalAPI fibe
 	})
 
 	// Single ticket — verifies tenant + device scope before returning.
-	portalAPI.Get("/portal/tickets/:id", func(c *fiber.Ctx) error {
+	portalAPI.Get("/tickets/:id", func(c *fiber.Ctx) error {
 		tenantID, _ := c.Locals("tenant_id").(string)
 		deviceID, _ := c.Locals("customer_device_id").(string)
 		ticketID := c.Params("id")
@@ -252,7 +252,7 @@ func RegisterPortalRoutes(app *fiber.App, publicAPI fiber.Router, portalAPI fibe
 	// stricter 3 / minute burst guard. In-memory only; multi-server
 	// would need Redis fan-out (Stage 16). Keys via the customer_id
 	// local that PortalAuthMiddleware sets.
-	portalAPI.Post("/portal/tickets", portalCustomerRateLimiter(10, time.Hour), portalCustomerRateLimiter(3, time.Minute), func(c *fiber.Ctx) error {
+	portalAPI.Post("/tickets", portalCustomerRateLimiter(10, time.Hour), portalCustomerRateLimiter(3, time.Minute), func(c *fiber.Ctx) error {
 		tenantID, _ := c.Locals("tenant_id").(string)
 		customerID, _ := c.Locals("customer_id").(string)
 		deviceID, _ := c.Locals("customer_device_id").(string)
@@ -293,7 +293,7 @@ func RegisterPortalRoutes(app *fiber.App, publicAPI fiber.Router, portalAPI fibe
 	})
 
 	// Comments — internal=0 only on read; force internal=false on write.
-	portalAPI.Get("/portal/tickets/:id/comments", func(c *fiber.Ctx) error {
+	portalAPI.Get("/tickets/:id/comments", func(c *fiber.Ctx) error {
 		tenantID, _ := c.Locals("tenant_id").(string)
 		deviceID, _ := c.Locals("customer_device_id").(string)
 		ticketID := c.Params("id")
@@ -325,7 +325,7 @@ func RegisterPortalRoutes(app *fiber.App, publicAPI fiber.Router, portalAPI fibe
 		return c.JSON(fiber.Map{"comments": out})
 	})
 
-	portalAPI.Post("/portal/tickets/:id/comments", portalCustomerRateLimiter(30, time.Hour), func(c *fiber.Ctx) error {
+	portalAPI.Post("/tickets/:id/comments", portalCustomerRateLimiter(30, time.Hour), func(c *fiber.Ctx) error {
 		tenantID, _ := c.Locals("tenant_id").(string)
 		customerID, _ := c.Locals("customer_id").(string)
 		deviceID, _ := c.Locals("customer_device_id").(string)

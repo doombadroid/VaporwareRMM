@@ -352,13 +352,12 @@ export const devices = {
   installSunshine: (id: string) =>
     api.post(`/devices/${id}/sunshine/install`).then((res) => res.data),
 
-  getSunshinePIN: (id: string) =>
-    api.get<{ pin: string; device_id: string }>(`/devices/${id}/sunshine/pin`).then((res) => res.data),
-
-  // Submit a Moonlight pairing PIN. The agent forwards to local
-  // Sunshine /api/pin. Replaces the older "fetch PIN from logs" flow.
-  pairSunshine: (id: string, pin: string, name = '') =>
-    api.post<{ message: string }>(`/devices/${id}/sunshine/pair`, { pin, name }).then((res) => res.data),
+  // Dashboard-initiated Sunshine pairing was removed in server commit
+  // 3ff3923: the underlying helpers FetchSunshinePIN / SubmitSunshinePIN
+  // shared the same hash-vs-plaintext token bug as the original
+  // server->agent command push, so every call 401'd. The endpoints now
+  // return 501. Operators pair Sunshine host-side instead — see the
+  // RemoteControlModal's pairing instruction panel.
 
   getSunshineProxyUrl: (id: string) =>
     `${API_BASE_URL}/devices/${id}/sunshine/proxy`,

@@ -10,9 +10,7 @@ import {
   Download,
   Loader2,
   Globe,
-  Copy,
-  Check,
-  KeyRound,
+  Info,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { devices as devicesApi } from '@/lib/api'
@@ -35,17 +33,10 @@ export default function RemoteControlModal({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [installing, setInstalling] = useState(false)
-  const [pin, setPin] = useState<string | null>(null)
-  const [pinLoading, setPinLoading] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const [pairPIN, setPairPIN] = useState('')
-  const [pairing, setPairing] = useState(false)
 
   useEffect(() => {
     if (isOpen && device) {
       fetchSunshineStatus()
-      setPin(null)
-      setCopied(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, device])
@@ -78,49 +69,6 @@ export default function RemoteControlModal({
     } finally {
       setInstalling(false)
     }
-  }
-
-  const handleFetchPIN = async () => {
-    if (!device) return
-    setPinLoading(true)
-    try {
-      const result = await devicesApi.getSunshinePIN(device.id)
-      setPin(result.pin)
-      toast.success('PIN fetched from device')
-    } catch {
-      toast.error('Failed to fetch PIN. Ensure Sunshine is running and paired at least once.')
-    } finally {
-      setPinLoading(false)
-    }
-  }
-
-  const handleSubmitPIN = async () => {
-    if (!device) return
-    if (pairPIN.length < 4 || pairPIN.length > 8) {
-      toast.error('PIN must be 4-8 digits')
-      return
-    }
-    setPairing(true)
-    try {
-      await devicesApi.pairSunshine(device.id, pairPIN)
-      toast.success('Paired with Moonlight')
-      setPairPIN('')
-    } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.message
-        || (e as { response?: { data?: { message?: string; error?: string } } })?.response?.data?.error
-        || 'Pair failed'
-      toast.error(msg)
-    } finally {
-      setPairing(false)
-    }
-  }
-
-  const handleCopyPIN = () => {
-    if (!pin) return
-    navigator.clipboard.writeText(pin)
-    setCopied(true)
-    toast.success('PIN copied to clipboard')
-    setTimeout(() => setCopied(false), 2000)
   }
 
   const handleConnect = () => {
@@ -252,75 +200,26 @@ export default function RemoteControlModal({
 
               {sunshineStatus.sunshine?.running ? (
                 <div className="space-y-3">
-                  {/* Submit Moonlight PIN */}
-                  <div className="p-4 bg-cyan-500/5 border border-cyan-500/20 rounded-xl space-y-2">
-                    <p className="text-sm text-cyan-300 font-medium">Pair Moonlight</p>
-                    <p className="text-xs text-white/50">
-                      Open Moonlight, click this device, copy the 4-digit PIN it shows, paste here.
-                    </p>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        pattern="[0-9]{4,8}"
-                        maxLength={8}
-                        value={pairPIN}
-                        onChange={(e) => setPairPIN(e.target.value.replace(/\D/g, ''))}
-                        placeholder="1234"
-                        className="flex-1 bg-slate-900 border border-white/[0.08] rounded-md px-3 py-2 text-sm font-mono text-center tracking-widest"
-                      />
-                      <Button
-                        size="sm"
-                        onClick={handleSubmitPIN}
-                        disabled={pairing || pairPIN.length < 4}
-                        className="bg-cyan-600 hover:bg-cyan-500"
-                      >
-                        {pairing ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Pair'}
-                      </Button>
+                  {/*
+                    Sunshine pairing is host-side, not dashboard-initiated.
+                    The earlier in-modal pair flow called server endpoints
+                    that pushed to the agent's HTTP listener with the
+                    wrong-shaped bearer (server holds a SHA-256 hash;
+                    agent compares against plaintext) and 401'd every
+                    time. Server commit 3ff3923 removed those endpoints;
+                    this panel replaces the broken UI. See README.md
+                    "Agent trust model" callout.
+                    TODO(docs): once docs/REMOTE_DESKTOP.md ships, link
+                    it from here instead of the README anchor.
+                  */}
+                  <div className="p-4 bg-white/[0.02] border border-white/[0.06] rounded-xl space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Info className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <p className="text-sm text-white/85 font-medium">Pair Moonlight host-side</p>
                     </div>
-                  </div>
-                  {/* Legacy "fetch PIN from logs" — kept for backwards compat */}
-                  <div className="space-y-2">
-                    {!pin ? (
-                      <Button
-                        variant="outline"
-                        className="w-full border-white/[0.08] text-white/80 hover:bg-white/[0.04]"
-                        onClick={handleFetchPIN}
-                        disabled={pinLoading}
-                      >
-                        {pinLoading ? (
-                          <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                        ) : (
-                          <KeyRound className="w-4 h-4 mr-2" />
-                        )}
-                        {pinLoading ? 'Fetching PIN...' : 'Read PIN from logs (legacy)'}
-                      </Button>
-                    ) : (
-                      <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm text-amber-400 font-medium">
-                            Pairing PIN
-                          </span>
-                          <button
-                            onClick={handleCopyPIN}
-                            className="text-white/40 hover:text-white transition-colors"
-                            title="Copy PIN"
-                          >
-                            {copied ? (
-                              <Check className="w-4 h-4 text-emerald-400" />
-                            ) : (
-                              <Copy className="w-4 h-4" />
-                            )}
-                          </button>
-                        </div>
-                        <div className="text-3xl font-mono font-bold text-white tracking-widest text-center py-2">
-                          {pin}
-                        </div>
-                        <p className="text-xs text-white/40 text-center">
-                          Paste this PIN into Moonlight Web Stream&apos;s pairing dialog
-                        </p>
-                      </div>
-                    )}
+                    <p className="text-xs text-white/55 leading-relaxed">
+                      Open Sunshine&apos;s Web UI on the device (the Web UI button below), enter the PIN that Moonlight shows. Dashboard-initiated pairing was removed — the server can&apos;t present the agent&apos;s bearer token, so it could never complete the pair.
+                    </p>
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">

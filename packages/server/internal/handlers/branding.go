@@ -104,20 +104,33 @@ func RegisterBrandingRoutes(app *fiber.App, api fiber.Router) {
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
-		// AppName is interpolated into shell scripts (install.sh) AND systemd
-		// unit names. Restrict to a strict charset to prevent template / shell
-		// injection. Operators who want fancy display names should use CompanyName.
+		// AppName becomes a systemd unit name AND a /etc/<app_name> path
+		// component AND a downloaded-file name. The restricted charset
+		// here is enforcing those positional constraints, NOT shell-
+		// injection paranoia (the install script also routes app_name
+		// through shellSafeOrFallback as defense-in-depth). Display
+		// strings with spaces, punctuation, etc. go in CompanyName.
 		if req.AppName != "" && !brandAppNameRe.MatchString(req.AppName) {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "app_name must be 1-64 chars, ASCII letters/digits/dash/underscore only"})
 		}
-		// CompanyName appears in the install-script comment header. Reject
-		// shell metacharacters and CRLF to keep the comment a comment.
+		// CompanyName is a display field. The only rejection is line
+		// breaks — a one-line display field has no business carrying
+		// newlines, and stripping them keeps the install-script
+		// comment header valid. Every other character (including &
+		// ' " $ ` \ ; |) is accepted because real customer names
+		// contain them ("Smith & Jones IT", "T&C IT Systems",
+		// "O'Reilly Media"). Safety against shell injection in the
+		// generated install script is the responsibility of
+		// generateInstallScript, which embeds the value inside a
+		// shell comment line — comments do not interpret
+		// metacharacters. See threatmodel.md §3: reject at output
+		// boundary, not at input.
 		if req.CompanyName != "" {
 			if len(req.CompanyName) > 128 {
 				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "company_name must be 128 chars or fewer"})
 			}
-			if strings.ContainsAny(req.CompanyName, "\r\n\"'`$\\;|&") {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "company_name contains forbidden characters"})
+			if strings.ContainsAny(req.CompanyName, "\r\n") {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "company_name must not contain line breaks"})
 			}
 		}
 		// PrimaryColor must look like a CSS hex color (#RGB or #RRGGBB).
@@ -233,11 +246,17 @@ func shellSafeOrFallback(s string) string {
 	return "vaporrmm"
 }
 
-// scrubForComment strips bytes that could break out of a `#` shell comment line
-// (newlines) or be confused for shell control characters in a defense-in-depth
-// pass over the comment header.
+// scrubForComment strips bytes that could break out of a `#` shell comment
+// line. Newlines are the only real escape vector — bash comments run to
+// end-of-line and do not interpret metacharacters (no backtick exec, no
+// $-substitution, no quote pairing). Earlier passes also stripped ` $ \
+// "as defense in depth" but that mangled legitimate display names like
+// "Tesla, Inc. ($TSLA)" into "Tesla, Inc. ( TSLA)". The threat-model
+// principle is: reject at the output boundary where the character matters,
+// not at the input. Here the boundary is the comment line and the only
+// boundary-violating character is a newline.
 func scrubForComment(s string) string {
-	out := strings.NewReplacer("\r", " ", "\n", " ", "`", "'", "$", " ", "\\", " ").Replace(s)
+	out := strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
 	if len(out) > 128 {
 		out = out[:128]
 	}

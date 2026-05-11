@@ -137,13 +137,25 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		case err == nil && existingID != "":
 			deviceID = existingID
 			popVerdict = auth.VerifyAgentPoP(tenantID, deviceID, hostname, existingAgentToken)
-			switch popVerdict {
-			case auth.PoPAcceptCurrent, auth.PoPAcceptGraceRotationAck, auth.PoPAcceptGraceCrashRecovery:
-				// PoP satisfied. UPDATE the device row and proceed to
-				// token rotation. Audit-log every grace-window accept
-				// so operators can correlate the network-blip vs
-				// crash-recovery signals; current-token accepts are
-				// the happy path and don't need their own audit row.
+			// One-time legacy bypass: an agent registered before this
+			// commit has no persisted token to present. The check fires
+			// only when (a) no active token row exists for the device
+			// AND (b) the device has not consumed its bypass yet AND (c)
+			// VAPOR_REFUSE_LEGACY_BYPASS_AFTER (if set) has not passed.
+			// PoPReject (token rows exist but presented token doesn't
+			// match) is NOT eligible — that's the take-over attempt.
+			legacyBypass := false
+			if popVerdict == auth.PoPNoPriorToken && auth.IsLegacyAgentEligibleForBypass(deviceID) {
+				legacyBypass = true
+			}
+			switch {
+			case popVerdict == auth.PoPAcceptCurrent || popVerdict == auth.PoPAcceptGraceRotationAck || popVerdict == auth.PoPAcceptGraceCrashRecovery || legacyBypass:
+				// PoP satisfied (current/grace) OR one-time legacy
+				// bypass. UPDATE the device row and proceed to token
+				// rotation. The legacy-bypass branch additionally
+				// flips devices.legacy_pop_bypass_used so subsequent
+				// re-registers for this device are on the standard
+				// PoP track.
 				if _, err := db.DB.Exec(
 					`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
 					localIP, osName, osVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
@@ -151,9 +163,25 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 					db.DedupMu.Unlock()
 					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
 				}
+				if legacyBypass {
+					if err := auth.MarkLegacyBypassConsumed(deviceID); err != nil {
+						slog.Warn("could not mark legacy bypass consumed", "device_id", deviceID, "error", err)
+					}
+				}
 				if popVerdict == auth.PoPAcceptGraceRotationAck || popVerdict == auth.PoPAcceptGraceCrashRecovery {
 					events.AuditLogTenant(tenantID, "system", "device.register.pop_grace", "device", deviceID,
 						fmt.Sprintf("grace_window_pop_accept verdict=%s hostname=%s ip=%s", popVerdict.String(), hostname, c.IP()),
+						c.IP())
+				}
+				if legacyBypass {
+					// WARN level intentionally — the bypass is a known
+					// trust-on-first-use carve-out for pre-Codex-#6
+					// agents and operators should be able to see it
+					// happen in the log without grepping at debug
+					// verbosity.
+					slog.Warn("legacy agent pre-Codex-#6 pop bypass consumed", "device_id", deviceID, "hostname", hostname, "ip", c.IP())
+					events.AuditLogTenant(tenantID, "system", "legacy_agent_pop_bypass", "device", deviceID,
+						fmt.Sprintf("legacy_agent_pop_bypass hostname=%s ip=%s", hostname, c.IP()),
 						c.IP())
 				}
 			default:

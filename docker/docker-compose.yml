@@ -58,8 +58,18 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.moonlight-web
     container_name: vaporrmm-moonlight-web
+    # Codex #3 follow-up: TCP 8081 (HTTP signaling) binds to host
+    # loopback like every other service in this file; a reverse proxy
+    # or BIND_ADDR=0.0.0.0 override exposes it externally. The UDP
+    # 40000-40100 range carries the WebRTC media stream — ICE
+    # candidates announce reachable addresses to the remote browser,
+    # so the range MUST be externally reachable for streams to land.
+    # Binding the UDP range to 127.0.0.1 silently breaks remote
+    # desktop without breaking the HTTP signaling handshake, which is
+    # the worst failure mode (looks healthy, isn't). Documented split
+    # so the next reviewer doesn't unify the bindings and break it.
     ports:
-      - "8081:8080"
+      - "${BIND_ADDR:-127.0.0.1}:8081:8080"
       - "40000-40100:40000-40100/udp"
     environment:
       - WEBRTC_NAT_1TO1_HOST=${WEBRTC_NAT_1TO1_HOST:-}

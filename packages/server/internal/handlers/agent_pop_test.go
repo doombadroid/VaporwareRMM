@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"sync/atomic"
+
 	"vaporrmm/models"
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
@@ -57,10 +59,17 @@ func popTestEnv(t *testing.T) *fiber.App {
 	// has a 10/min per-IP gate and the table tests blow past it.
 	auth.ResetRateLimitStoreForTests()
 	t.Cleanup(func() {
-		// Don't close db.DB — async audit/webhook goroutines from
-		// this test may still be in flight when the cleanup runs.
-		// The next test's popTestEnv overwrites DB anyway; the leak
-		// is bounded to one connection per test.
+		// Drain async audit/webhook goroutines BEFORE closing the
+		// DB so their writes land against the connection they
+		// intended. Without this, the race detector (correctly)
+		// flagged the prior test's pending TriggerEmailAlerts
+		// goroutine reading db.DB while the next test's setup
+		// reassigned it. Codex PR review (P2, agent_pop_test.go:60)
+		// flagged this leak; this WaitGroup drains it.
+		events.WaitAsyncOpsForTests()
+		if db.DB != nil && os.Getenv("DATABASE_URL") == "" {
+			_ = db.DB.Close()
+		}
 		auth.TokenMu.Lock()
 		auth.RegisteredTokens = make(map[string]*models.AgentToken)
 		auth.TokenMu.Unlock()
@@ -167,8 +176,7 @@ func TestReRegister_WrongTokenReturns409(t *testing.T) {
 	}
 	resp2.Body.Close()
 
-	// Give async audit log goroutine a moment.
-	time.Sleep(100 * time.Millisecond)
+	events.WaitAsyncOpsForTests()
 	var n int
 	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action = 'device.register.pop_rejected'`).Scan(&n); err != nil {
 		t.Fatalf("audit count: %v", err)
@@ -241,7 +249,7 @@ func TestReRegister_PreviousTokenWithinGraceWindow(t *testing.T) {
 	}
 	r3.Body.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	events.WaitAsyncOpsForTests()
 	var details string
 	if err := db.DB.QueryRow(`SELECT details FROM audit_logs WHERE action = 'device.register.pop_grace' ORDER BY id DESC LIMIT 1`).Scan(&details); err != nil {
 		t.Fatalf("audit lookup: %v", err)
@@ -278,7 +286,7 @@ func TestReRegister_PreviousTokenWithinGraceWindow(t *testing.T) {
 	}
 	rC.Body.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	events.WaitAsyncOpsForTests()
 	if err := db.DB.QueryRow(`SELECT details FROM audit_logs WHERE action = 'device.register.pop_grace' ORDER BY id DESC LIMIT 1`).Scan(&details); err != nil {
 		t.Fatalf("audit lookup crash: %v", err)
 	}
@@ -357,7 +365,7 @@ func TestReRegister_LegacyBypass(t *testing.T) {
 	}
 	r2.Body.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	events.WaitAsyncOpsForTests()
 	var bypassRows int
 	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action = 'legacy_agent_pop_bypass'`).Scan(&bypassRows); err != nil {
 		t.Fatalf("audit count: %v", err)
@@ -456,7 +464,7 @@ func TestReRegister_LegacyBypassOnPoPReject(t *testing.T) {
 	}
 	r2.Body.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	events.WaitAsyncOpsForTests()
 	var bypassRows int
 	if err := db.DB.QueryRow(
 		`SELECT COUNT(*) FROM audit_logs WHERE action = 'legacy_agent_pop_bypass' AND resource_id = ?`,
@@ -488,10 +496,10 @@ func TestConflictWebhookRateLimit(t *testing.T) {
 	events.SetWebhookOutboundForTests(func(string) error { return nil }, permissiveOutboundClient)
 	t.Cleanup(func() { events.SetWebhookOutboundForTests(nil, nil) })
 
-	var hits int
+	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-VaporRMM-Event") == "device.registration_conflict" {
-			hits++
+			hits.Add(1)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -533,9 +541,9 @@ func TestConflictWebhookRateLimit(t *testing.T) {
 		rr.Body.Close()
 	}
 
-	time.Sleep(300 * time.Millisecond)
-	if hits != 1 {
-		t.Errorf("expected exactly 1 webhook fire, got %d", hits)
+	events.WaitAsyncOpsForTests()
+	if got := hits.Load(); got != 1 {
+		t.Errorf("expected exactly 1 webhook fire, got %d", got)
 	}
 	var auditRows int
 	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action = 'device.register.pop_rejected'`).Scan(&auditRows); err != nil {
@@ -553,10 +561,10 @@ func TestConflictWebhookSecondHour(t *testing.T) {
 	events.SetWebhookOutboundForTests(func(string) error { return nil }, permissiveOutboundClient)
 	t.Cleanup(func() { events.SetWebhookOutboundForTests(nil, nil) })
 
-	var hits int
+	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-VaporRMM-Event") == "device.registration_conflict" {
-			hits++
+			hits.Add(1)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -586,9 +594,9 @@ func TestConflictWebhookSecondHour(t *testing.T) {
 		t.Fatalf("first conflict expected 409, got %d", rr.StatusCode)
 	}
 	rr.Body.Close()
-	time.Sleep(200 * time.Millisecond)
-	if hits != 1 {
-		t.Fatalf("expected 1 webhook after first conflict, got %d", hits)
+	events.WaitAsyncOpsForTests()
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected 1 webhook after first conflict, got %d", got)
 	}
 
 	// Simulate >1h elapsed.
@@ -600,9 +608,9 @@ func TestConflictWebhookSecondHour(t *testing.T) {
 		t.Fatalf("second-window conflict expected 409, got %d", rr2.StatusCode)
 	}
 	rr2.Body.Close()
-	time.Sleep(200 * time.Millisecond)
-	if hits != 2 {
-		t.Errorf("expected 2 webhook fires across two windows, got %d", hits)
+	events.WaitAsyncOpsForTests()
+	if got := hits.Load(); got != 2 {
+		t.Errorf("expected 2 webhook fires across two windows, got %d", got)
 	}
 }
 
@@ -631,10 +639,10 @@ func TestConflictWebhookRateLimitDistributed(t *testing.T) {
 	events.SetWebhookOutboundForTests(func(string) error { return nil }, permissiveOutboundClient)
 	t.Cleanup(func() { events.SetWebhookOutboundForTests(nil, nil) })
 
-	var hits int
+	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-VaporRMM-Event") == "device.registration_conflict" {
-			hits++
+			hits.Add(1)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -666,7 +674,7 @@ func TestConflictWebhookRateLimitDistributed(t *testing.T) {
 		t.Fatalf("instance-A conflict expected 409, got %d", rA.StatusCode)
 	}
 	rA.Body.Close()
-	time.Sleep(200 * time.Millisecond)
+	events.WaitAsyncOpsForTests()
 
 	// Wipe in-memory bucket map: this is the "second instance"
 	// (which has its own empty map but shares Redis with A).
@@ -680,10 +688,10 @@ func TestConflictWebhookRateLimitDistributed(t *testing.T) {
 		t.Fatalf("instance-B conflict expected 409, got %d", rB.StatusCode)
 	}
 	rB.Body.Close()
-	time.Sleep(200 * time.Millisecond)
+	events.WaitAsyncOpsForTests()
 
-	if hits != 1 {
-		t.Errorf("expected exactly 1 webhook fire across two instances sharing Redis, got %d", hits)
+	if got := hits.Load(); got != 1 {
+		t.Errorf("expected exactly 1 webhook fire across two instances sharing Redis, got %d", got)
 	}
 
 	// Redis key carries the documented schema; the existence proves

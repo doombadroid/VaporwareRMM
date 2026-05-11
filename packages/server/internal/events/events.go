@@ -154,13 +154,33 @@ func AuditLog(userID, action, resourceType, resourceID, details, ipAddress strin
 	AuditLogTenant("default", userID, action, resourceType, resourceID, details, ipAddress)
 }
 
+// asyncOpsWG tracks every fire-and-forget goroutine spawned by this
+// package so tests can drain them before closing the DB. Production
+// code never blocks on it; the WaitGroup is purely a test-time aid
+// against the test-pollution race where a prior test's audit /
+// webhook goroutine writes to a global db.DB that a later test has
+// already reassigned.
+var asyncOpsWG sync.WaitGroup
+
+// WaitAsyncOpsForTests blocks until every audit/webhook goroutine
+// spawned by this package has returned. Production code never calls
+// this. Test cleanup calls it before closing the test DB so the
+// pending writes complete against the connection they intended.
+func WaitAsyncOpsForTests() {
+	asyncOpsWG.Wait()
+}
+
 // AuditLogTenant records an admin action scoped to a tenant. Fires the
 // chained insert from a background goroutine so handler latency
 // doesn't depend on the chain lock; the goroutine itself is
 // synchronous-on-the-mutex (auditChainMu) so concurrent callers see a
 // well-defined chain.
 func AuditLogTenant(tenantID, userID, action, resourceType, resourceID, details, ipAddress string) {
-	go AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, details, ipAddress)
+	asyncOpsWG.Add(1)
+	go func() {
+		defer asyncOpsWG.Done()
+		AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, details, ipAddress)
+	}()
 }
 
 // AuditLogTenantSync is the synchronous variant. Tests use it directly
@@ -385,7 +405,9 @@ func SetWebhookOutboundForTests(validator func(string) error, client func(time.D
 // TriggerWebhooks fires webhooks subscribed in the given tenant for the named event.
 // Pass tenantID="" to fan out across all tenants (system events).
 func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
+	asyncOpsWG.Add(1)
 	go func() {
+		defer asyncOpsWG.Done()
 		var rows *sql.Rows
 		var err error
 		if tenantID == "" {
@@ -442,7 +464,11 @@ func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
 		}
 	}()
 
-	go TriggerEmailAlerts(tenantID, event, payload)
+	asyncOpsWG.Add(1)
+	go func() {
+		defer asyncOpsWG.Done()
+		TriggerEmailAlerts(tenantID, event, payload)
+	}()
 }
 
 // TriggerEmailAlerts loads SMTP settings and alert rules for the given tenant

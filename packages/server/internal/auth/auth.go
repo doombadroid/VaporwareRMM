@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -1018,35 +1019,23 @@ func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 	supersedeAt := now + int64(AgentTokenSupersedeWindow.Seconds())
 	expiresAt := now + 90*24*60*60 // 90 days
 
-	// Find the existing active token (if any) for this tuple. We need
-	// its hash to record as previous_token_hash on the row we're about
-	// to insert. Read outside the in-memory mutex so we don't hold the
-	// cache lock across a DB call.
-	// TODO(codex-6 followup): move prior-hash read inside TokenMu —
-	// race on concurrent re-register for same (tenant, device, hostname)
-	// can cause two simultaneous writes to record the same previous_token_hash,
-	// losing one agent's true previous-token state. Spec is single-previous,
-	// but the lost-state agent's next re-register within the 60s grace window
-	// will incorrectly receive 409. See implementation report item #5.
-	var priorHash string
-	if err := db.DB.QueryRow(
-		`SELECT token_hash FROM agent_tokens
-		  WHERE tenant_id = ? AND device_id = ? AND hostname = ?
-		    AND (superseded_at IS NULL OR superseded_at = 0)
-		    AND token_hash <> ?
-		  ORDER BY created_at DESC LIMIT 1`,
-		tenantID, deviceID, hostname, tokenHash,
-	).Scan(&priorHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		slog.Warn("could not read prior token for rotation linkage", "error", err)
-	}
-
+	// Serialize the entire prior-hash read + new-row write + supersede
+	// update sequence. TokenMu blocks concurrent re-registers within this
+	// process; the surrounding DB transaction makes the three statements
+	// atomic so a multi-node future doesn't reintroduce a torn-write.
+	// Without the lock, two re-registers for the same (tenant, device,
+	// hostname) could both read the same prior hash and each record it
+	// as previous_token_hash, losing one agent's true previous state and
+	// causing a spurious 409 on its next rotation inside the grace
+	// window (Codex #6 report, item #5).
 	TokenMu.Lock()
 	defer TokenMu.Unlock()
 
-	// Mark every prior token for this (tenant, device, hostname) tuple
-	// as superseded in the cache. Skip the row we're about to insert
-	// (token_hash collisions are statistically impossible but the
-	// guard keeps the contract clean).
+	// In-memory cache update is unconditional: the cache is the
+	// authoritative source for AgentAuthMiddleware, and tests +
+	// pre-DB-init paths rely on it staying populated even if the
+	// surrounding DB writes fail. The DB writes below are best-effort
+	// persistence on top of the cache.
 	for h, tok := range RegisteredTokens {
 		if h == tokenHash {
 			continue
@@ -1055,13 +1044,40 @@ func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 			tok.SupersededAt = supersedeAt
 		}
 	}
-
 	RegisteredTokens[tokenHash] = &models.AgentToken{
 		TokenHash: tokenHash,
 		DeviceID:  deviceID,
 		Hostname:  hostname,
 		TenantID:  tenantID,
 		ExpiresAt: expiresAt,
+	}
+
+	if db.DB == nil {
+		return
+	}
+
+	tx, err := db.DB.BeginTx(context.Background(), nil)
+	if err != nil {
+		slog.Warn("could not begin agent token rotation tx", "error", err)
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var priorHash string
+	if err := tx.QueryRow(
+		db.DB.Q(`SELECT token_hash FROM agent_tokens
+		  WHERE tenant_id = ? AND device_id = ? AND hostname = ?
+		    AND (superseded_at IS NULL OR superseded_at = 0)
+		    AND token_hash <> ?
+		  ORDER BY created_at DESC LIMIT 1`),
+		tenantID, deviceID, hostname, tokenHash,
+	).Scan(&priorHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		slog.Warn("could not read prior token for rotation linkage", "error", err)
 	}
 
 	// previous_token_hash + previous_token_rotated_at are nullable;
@@ -1082,20 +1098,28 @@ func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 	} else {
 		upsertToken = `INSERT OR REPLACE INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at, superseded_at, previous_token_hash, previous_token_rotated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
 	}
-	if _, err := db.DB.Exec(upsertToken, tokenHash, deviceID, hostname, tenantID, now, expiresAt, prevHashArg, prevRotatedAtArg); err != nil {
+	if _, err := tx.Exec(db.DB.Q(upsertToken), tokenHash, deviceID, hostname, tenantID, now, expiresAt, prevHashArg, prevRotatedAtArg); err != nil {
 		slog.Warn("could not persist agent token", "error", err)
+		return
 	}
 
 	// Persist the supersede mark for every prior token row keyed by
 	// the same (tenant, device, hostname) tuple. Only flip rows whose
 	// superseded_at is 0 so a token already on its way out doesn't
 	// get its TTL extended by another rotation.
-	if _, err := db.DB.Exec(
-		`UPDATE agent_tokens SET superseded_at = ? WHERE tenant_id = ? AND device_id = ? AND hostname = ? AND token_hash <> ? AND (superseded_at IS NULL OR superseded_at = 0)`,
+	if _, err := tx.Exec(
+		db.DB.Q(`UPDATE agent_tokens SET superseded_at = ? WHERE tenant_id = ? AND device_id = ? AND hostname = ? AND token_hash <> ? AND (superseded_at IS NULL OR superseded_at = 0)`),
 		supersedeAt, tenantID, deviceID, hostname, tokenHash,
 	); err != nil {
 		slog.Warn("could not supersede prior agent tokens", "error", err)
+		return
 	}
+
+	if err := tx.Commit(); err != nil {
+		slog.Warn("could not commit agent token rotation", "error", err)
+		return
+	}
+	committed = true
 }
 
 // LoadAgentTokens restores persisted agent tokens from the database into memory

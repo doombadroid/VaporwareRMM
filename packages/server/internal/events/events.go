@@ -203,6 +203,12 @@ func AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, deta
 // windowStart is the Unix timestamp of the first fire in the current
 // 1-hour window; count is the number of conflicts (fired AND
 // suppressed) inside that window.
+//
+// Used only when Redis is not configured. With Redis configured, the
+// per-(tenant, device) counter lives in Redis (see
+// redis.IncrementConflictWebhook) so the limit holds across server
+// instances. The in-memory map is the degraded-mode fallback so the
+// limit is never silently disabled on a Redis outage.
 type conflictWebhookBucket struct {
 	windowStart int64
 	count       int
@@ -215,12 +221,35 @@ var (
 	conflictWebhookBuckets = make(map[string]*conflictWebhookBucket)
 )
 
+// conflictWebhookLimiter is the indirection seam tests use to verify
+// the Redis path without standing up a real Redis. Production code
+// hits redisIncrementConflictWebhook which delegates to the redis
+// package.
+var conflictWebhookLimiter = redisIncrementConflictWebhook
+
+func redisIncrementConflictWebhook(tenantID, deviceID string, window time.Duration) (int64, bool) {
+	return redis.IncrementConflictWebhook(tenantID, deviceID, window)
+}
+
+// SetConflictWebhookLimiterForTests swaps the Redis call for a fake.
+// Pass nil to restore the production path. Production code never
+// calls this.
+func SetConflictWebhookLimiterForTests(f func(tenantID, deviceID string, window time.Duration) (int64, bool)) {
+	if f == nil {
+		conflictWebhookLimiter = redisIncrementConflictWebhook
+		return
+	}
+	conflictWebhookLimiter = f
+}
+
 // TriggerRegistrationConflictWebhook fires the
 // device.registration_conflict webhook for the given device, subject
 // to the Codex #6 spec's per-device rate limit (1 webhook per device
-// per hour). Every call increments the bucket count regardless of
-// whether the webhook actually fires, so the next webhook to fire
-// can report attempt_count_within_window accurately.
+// per hour). The rate limit lives in Redis when configured so the
+// 1/device/hour cap holds across server instances; on Redis outage or
+// when Redis is not configured, the limiter falls back to the
+// in-memory bucket map with a one-time warn so operators know they're
+// in degraded (per-process) mode.
 //
 // Audit logs are NOT written here — the registration handler logs
 // every conflict unconditionally. This function only governs whether
@@ -230,24 +259,41 @@ func TriggerRegistrationConflictWebhook(tenantID, deviceID, claimedHostname, cla
 		tenantID = "default"
 	}
 	now := time.Now().Unix()
-	key := tenantID + "|" + deviceID
 
-	conflictWebhookMu.Lock()
-	bucket, ok := conflictWebhookBuckets[key]
-	if !ok {
-		bucket = &conflictWebhookBucket{}
-		conflictWebhookBuckets[key] = bucket
-	}
+	window := time.Duration(conflictWebhookWindowSeconds) * time.Second
 	fire := false
-	if bucket.windowStart == 0 || now-bucket.windowStart >= conflictWebhookWindowSeconds {
-		bucket.windowStart = now
-		bucket.count = 1
-		fire = true
+	var fireCount int64
+
+	if count, ok := conflictWebhookLimiter(tenantID, deviceID, window); ok {
+		// Redis path: count is the post-INCR value. count==1 means
+		// this is the first conflict in the current window; >1 means
+		// a prior server-instance already fired and we suppress.
+		fireCount = count
+		fire = count == 1
 	} else {
-		bucket.count++
+		// Degraded mode: Redis is unavailable. Fall back to the
+		// per-process in-memory map so the rate limit is not
+		// silently disabled. Emit a one-shot warn (rate-limited
+		// against the same map) so operators see it without
+		// flooding logs.
+		warnDegradedConflictLimiter(tenantID, deviceID, now)
+		key := tenantID + "|" + deviceID
+		conflictWebhookMu.Lock()
+		bucket, ok := conflictWebhookBuckets[key]
+		if !ok {
+			bucket = &conflictWebhookBucket{}
+			conflictWebhookBuckets[key] = bucket
+		}
+		if bucket.windowStart == 0 || now-bucket.windowStart >= conflictWebhookWindowSeconds {
+			bucket.windowStart = now
+			bucket.count = 1
+			fire = true
+		} else {
+			bucket.count++
+		}
+		fireCount = int64(bucket.count)
+		conflictWebhookMu.Unlock()
 	}
-	fireCount := bucket.count
-	conflictWebhookMu.Unlock()
 
 	if !fire {
 		return
@@ -262,6 +308,28 @@ func TriggerRegistrationConflictWebhook(tenantID, deviceID, claimedHostname, cla
 		"window_seconds":              conflictWebhookWindowSeconds,
 		"timestamp":                   now,
 	})
+}
+
+// conflictWebhookDegradedWarn tracks the last time we logged the
+// degraded-mode warning, per (tenant, device), so a Redis outage
+// during a burst doesn't flood logs.
+var (
+	conflictWebhookDegradedWarnMu sync.Mutex
+	conflictWebhookDegradedWarnAt = make(map[string]int64)
+)
+
+func warnDegradedConflictLimiter(tenantID, deviceID string, now int64) {
+	key := tenantID + "|" + deviceID
+	conflictWebhookDegradedWarnMu.Lock()
+	last := conflictWebhookDegradedWarnAt[key]
+	if now-last < conflictWebhookWindowSeconds {
+		conflictWebhookDegradedWarnMu.Unlock()
+		return
+	}
+	conflictWebhookDegradedWarnAt[key] = now
+	conflictWebhookDegradedWarnMu.Unlock()
+	slog.Warn("conflict webhook rate limit running in per-process degraded mode (Redis unavailable)",
+		"tenant_id", tenantID, "device_id", deviceID)
 }
 
 // ResetRegistrationConflictWebhookBucketsForTests clears the

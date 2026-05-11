@@ -50,6 +50,31 @@ func IsEnabled() bool {
 	return Client != nil
 }
 
+// IncrementConflictWebhook atomically increments a per-(tenant,device)
+// registration-conflict counter with TTL. The first INCR in a new
+// window returns 1 (caller fires the webhook); subsequent INCRs inside
+// the TTL window return >1 (caller suppresses). When the key expires,
+// the next call starts a fresh window.
+//
+// Returns (count, true) when Redis is reachable; (0, false) when Redis
+// is not configured or the call errors. Callers MUST fall back to an
+// in-memory limiter in the (0, false) case so the rate limit is not
+// silently disabled in degraded mode.
+func IncrementConflictWebhook(tenantID, deviceID string, window time.Duration) (int64, bool) {
+	if Client == nil {
+		return 0, false
+	}
+	key := "webhook_ratelimit:registration_conflict:" + tenantID + ":" + deviceID
+	pipe := Client.Pipeline()
+	incr := pipe.Incr(Ctx, key)
+	pipe.Expire(Ctx, key, window)
+	if _, err := pipe.Exec(Ctx); err != nil {
+		slog.Warn("redis INCR for conflict webhook rate limit failed", "error", err)
+		return 0, false
+	}
+	return incr.Val(), true
+}
+
 // IncrementRateLimit atomically increments a per-IP request counter with expiration.
 func IncrementRateLimit(ip string, window time.Duration, maxRequests int) (allowed bool, resetAt time.Time, err error) {
 	if Client == nil {

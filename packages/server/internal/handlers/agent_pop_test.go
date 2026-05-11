@@ -17,8 +17,11 @@ import (
 	"vaporrmm/server/internal/auth"
 	"vaporrmm/server/internal/db"
 	"vaporrmm/server/internal/events"
+	"vaporrmm/server/internal/redis"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gofiber/fiber/v2"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 // permissiveOutboundClient returns an http.Client without the
@@ -121,7 +124,15 @@ func TestReRegister_RequiresPoP(t *testing.T) {
 		body, _ := io.ReadAll(resp1.Body)
 		t.Fatalf("first register expected 200, got %d body=%s", resp1.StatusCode, string(body))
 	}
-	deviceIDFor(t, resp1)
+	deviceID := deviceIDFor(t, resp1)
+	// Burn the one-time legacy bypass so the next no-PoP attempt
+	// hits the standard 409 path. Without this, the first
+	// registration's row (previous_token_hash IS NULL) would still
+	// qualify for the upgrade bypass and the second register would
+	// 200 instead of 409.
+	if _, err := db.DB.Exec(`UPDATE devices SET legacy_pop_bypass_used = 1 WHERE id = ?`, deviceID); err != nil {
+		t.Fatalf("mark bypass consumed: %v", err)
+	}
 
 	t2 := strings.Repeat("b", 40)
 	resp2 := registerOnce(t, app, t2, "", "host-pop-1", "aa:bb:cc:dd:ee:01")
@@ -143,7 +154,10 @@ func TestReRegister_WrongTokenReturns409(t *testing.T) {
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("first register expected 200, got %d", resp1.StatusCode)
 	}
-	resp1.Body.Close()
+	deviceID := deviceIDFor(t, resp1)
+	if _, err := db.DB.Exec(`UPDATE devices SET legacy_pop_bypass_used = 1 WHERE id = ?`, deviceID); err != nil {
+		t.Fatalf("mark bypass consumed: %v", err)
+	}
 
 	t2 := strings.Repeat("b", 40)
 	wrong := strings.Repeat("z", 40)
@@ -495,7 +509,14 @@ func TestConflictWebhookRateLimit(t *testing.T) {
 	if r1.StatusCode != http.StatusOK {
 		t.Fatalf("first register expected 200, got %d", r1.StatusCode)
 	}
-	r1.Body.Close()
+	deviceID := deviceIDFor(t, r1)
+	// Mark the legacy bypass consumed so the first wrong-PoP
+	// re-register below produces 409 instead of taking the
+	// PoPReject+legacy-row bypass branch. The rate-limit semantics
+	// are what this test exercises, not the migration bypass.
+	if _, err := db.DB.Exec(`UPDATE devices SET legacy_pop_bypass_used = 1 WHERE id = ?`, deviceID); err != nil {
+		t.Fatalf("mark bypass consumed: %v", err)
+	}
 
 	// The /agent/register handler is rate-limited 10/min per IP.
 	// Reset so the 10-conflict burst below doesn't get throttled
@@ -554,6 +575,9 @@ func TestConflictWebhookSecondHour(t *testing.T) {
 		t.Fatalf("first register expected 200, got %d", r1.StatusCode)
 	}
 	deviceID := deviceIDFor(t, r1)
+	if _, err := db.DB.Exec(`UPDATE devices SET legacy_pop_bypass_used = 1 WHERE id = ?`, deviceID); err != nil {
+		t.Fatalf("mark bypass consumed: %v", err)
+	}
 
 	wrong := strings.Repeat("z", 40)
 	rB := strings.Repeat("b", 40)
@@ -579,5 +603,101 @@ func TestConflictWebhookSecondHour(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if hits != 2 {
 		t.Errorf("expected 2 webhook fires across two windows, got %d", hits)
+	}
+}
+
+// TestConflictWebhookRateLimitDistributed simulates two server
+// instances behind a load balancer sharing one Redis backend. Each
+// "instance" sees a conflict for the same device; the second must
+// observe the first's INCR via Redis and suppress the webhook.
+// Without the Redis-backed limiter, each process's in-memory map
+// would fire its own webhook and the documented 1/device/hour cap
+// would be violated under HA. Resetting in-memory state between the
+// two registers ensures the suppression has to come from Redis.
+func TestConflictWebhookRateLimitDistributed(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	prev := redis.Client
+	redis.Client = goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() {
+		_ = redis.Client.Close()
+		redis.Client = prev
+	})
+
+	app := popTestEnv(t)
+	events.SetWebhookOutboundForTests(func(string) error { return nil }, permissiveOutboundClient)
+	t.Cleanup(func() { events.SetWebhookOutboundForTests(nil, nil) })
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-VaporRMM-Event") == "device.registration_conflict" {
+			hits++
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	now := time.Now().Unix()
+	if _, err := db.DB.Exec(
+		`INSERT INTO webhooks (id, url, secret, events, enabled, tenant_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"webhook-pop-distributed", srv.URL, "", "device.registration_conflict", 1, "default", now,
+	); err != nil {
+		t.Fatalf("seed webhook: %v", err)
+	}
+
+	t1 := strings.Repeat("a", 40)
+	r1 := registerOnce(t, app, t1, "", "host-pop-dist", "aa:bb:cc:dd:ee:0a")
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("first register expected 200, got %d", r1.StatusCode)
+	}
+	deviceID := deviceIDFor(t, r1)
+	if _, err := db.DB.Exec(`UPDATE devices SET legacy_pop_bypass_used = 1 WHERE id = ?`, deviceID); err != nil {
+		t.Fatalf("mark bypass consumed: %v", err)
+	}
+	auth.ResetRateLimitStoreForTests()
+
+	wrong := strings.Repeat("z", 40)
+
+	// Instance A fires a conflict; Redis INCR returns 1; webhook fires.
+	rA := registerOnce(t, app, strings.Repeat("b", 40), wrong, "host-pop-dist", "aa:bb:cc:dd:ee:0a")
+	if rA.StatusCode != http.StatusConflict {
+		t.Fatalf("instance-A conflict expected 409, got %d", rA.StatusCode)
+	}
+	rA.Body.Close()
+	time.Sleep(200 * time.Millisecond)
+
+	// Wipe in-memory bucket map: this is the "second instance"
+	// (which has its own empty map but shares Redis with A).
+	events.ResetRegistrationConflictWebhookBucketsForTests()
+	auth.ResetRateLimitStoreForTests()
+
+	// Instance B fires a conflict for the same device; Redis INCR
+	// returns 2; webhook suppressed.
+	rB := registerOnce(t, app, strings.Repeat("c", 40), wrong, "host-pop-dist", "aa:bb:cc:dd:ee:0a")
+	if rB.StatusCode != http.StatusConflict {
+		t.Fatalf("instance-B conflict expected 409, got %d", rB.StatusCode)
+	}
+	rB.Body.Close()
+	time.Sleep(200 * time.Millisecond)
+
+	if hits != 1 {
+		t.Errorf("expected exactly 1 webhook fire across two instances sharing Redis, got %d", hits)
+	}
+
+	// Redis key carries the documented schema; the existence proves
+	// the limiter actually touched Redis rather than the in-memory
+	// fallback.
+	keys := mr.Keys()
+	found := false
+	for _, k := range keys {
+		if strings.HasPrefix(k, "webhook_ratelimit:registration_conflict:default:") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected Redis key webhook_ratelimit:registration_conflict:default:* but saw %v", keys)
 	}
 }

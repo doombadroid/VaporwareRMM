@@ -1122,6 +1122,34 @@ func RunMigrations(dialect string) error {
 			// 401-flapping during rotation.
 			SQL: `ALTER TABLE agent_tokens ADD COLUMN superseded_at INTEGER NOT NULL DEFAULT 0;`,
 		},
+		{
+			Version: "045",
+			Name:    "agent_tokens_proof_of_possession",
+			// Codex #6: re-registration hijack fix. The current re-register
+			// handler matches an existing device by (tenant_id, hostname,
+			// mac_address) — all client-controlled — and silently rotates
+			// its token. Anyone holding REGISTRATION_SECRET can take over
+			// any device by claiming its hostname+MAC. The fix requires
+			// the caller to prove possession of either the active token
+			// or the recently-rotated previous token (60s grace window
+			// for in-flight heartbeats and benign rotation races).
+			//
+			// previous_token_hash + previous_token_rotated_at sit on the
+			// CURRENT (active) row: a single-step memory of the token
+			// that was superseded by the row's creation. Single previous,
+			// not a chain — the proposal doc rules out chained history.
+			//
+			// devices.legacy_pop_bypass_used records whether the device
+			// has already consumed its one-time pre-migration bypass.
+			// Agents in the field built before this commit do not carry
+			// a persisted token to present; the bypass lets them
+			// re-register exactly once, after which the device is on
+			// the standard PoP track for every subsequent re-register.
+			SQL: `ALTER TABLE agent_tokens ADD COLUMN previous_token_hash TEXT;
+			      ALTER TABLE agent_tokens ADD COLUMN previous_token_rotated_at INTEGER;
+			      ALTER TABLE devices ADD COLUMN legacy_pop_bypass_used INTEGER NOT NULL DEFAULT 0;
+			      CREATE INDEX IF NOT EXISTS idx_agent_tokens_active_device ON agent_tokens(tenant_id, device_id, hostname, superseded_at);`,
+		},
 	}
 
 	for _, m := range migrations {

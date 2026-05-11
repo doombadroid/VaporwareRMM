@@ -808,12 +808,197 @@ func AgentAuthMiddleware() fiber.Handler {
 // count to ~1 active + 0-1 grace-window rows per device.
 const AgentTokenSupersedeWindow = 60 * time.Second
 
+// AgentPoPGraceWindow bounds how long the previous token (the one
+// rotated out by the most recent re-register) remains valid as
+// proof-of-possession for ANOTHER re-register. Same physical 60s as
+// the supersede window — they describe the same race (in-flight
+// rotation acks, brief network blips) — but kept as a separate
+// constant so a future change to one doesn't quietly change the
+// other. Codex #6 spec mandates 60s.
+const AgentPoPGraceWindow = 60 * time.Second
+
+// PoPVerdict is the result of VerifyAgentPoP. The grace-window
+// outcomes split into rotation_ack vs crash_recovery so the audit
+// log can tell network flakiness from a crashing agent without
+// the operator having to correlate timestamps after the fact.
+type PoPVerdict int
+
+const (
+	// PoPNoPriorToken means no active agent_tokens row exists for
+	// this (tenant, device, hostname) tuple — there is no current
+	// secret to prove possession of. The handler decides whether
+	// this is a first-time registration (proceed) or a legacy agent
+	// needing one-time bypass (mark + proceed) or a hard failure.
+	PoPNoPriorToken PoPVerdict = iota
+	// PoPAcceptCurrent means the presented token matches the active
+	// token_hash on the row. Standard happy-path re-register.
+	PoPAcceptCurrent
+	// PoPAcceptGraceRotationAck means the presented token matches
+	// previous_token_hash, the rotation is within
+	// AgentPoPGraceWindow, AND the device has heartbeat traffic
+	// post-rotation under the new token. The agent persisted the
+	// new token successfully but a stale in-flight request from
+	// before rotation is using the old one.
+	PoPAcceptGraceRotationAck
+	// PoPAcceptGraceCrashRecovery means the presented token matches
+	// previous_token_hash within the grace window, BUT the device
+	// has not heartbeated under the new token since rotation. Most
+	// likely the agent crashed before persisting the new token and
+	// is now re-registering with the only token it kept.
+	PoPAcceptGraceCrashRecovery
+	// PoPReject means the presented token matches neither current
+	// nor (in-window) previous. Handler returns 409.
+	PoPReject
+)
+
+// String renders the verdict as the audit-tag form the spec names.
+// Operators searching audit logs match on these strings exactly, so
+// they must not drift.
+func (v PoPVerdict) String() string {
+	switch v {
+	case PoPNoPriorToken:
+		return "no_prior_token"
+	case PoPAcceptCurrent:
+		return "current_token"
+	case PoPAcceptGraceRotationAck:
+		return "grace_window_used_rotation_ack"
+	case PoPAcceptGraceCrashRecovery:
+		return "grace_window_used_crash_recovery"
+	case PoPReject:
+		return "rejected"
+	default:
+		return "unknown"
+	}
+}
+
+// VerifyAgentPoP applies the Codex #6 proof-of-possession check
+// against the active agent_tokens row for (tenant, device, hostname).
+// The presentedToken is the plaintext bearer the agent sent in the
+// X-Existing-Agent-Token header on a re-register; an empty string
+// means the agent presented no token. Returns PoPNoPriorToken when
+// no active row exists (the handler then decides whether to allow a
+// first-time INSERT or refuse via legacy-bypass rules).
+//
+// Constant-time hash compare. previous_token_rotated_at is compared
+// to time.Now() with a strict less-than-window bound; equal-to-window
+// counts as expired so the grace can't be stretched by clock skew.
+func VerifyAgentPoP(tenantID, deviceID, hostname, presentedToken string) PoPVerdict {
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	var currentHash string
+	var previousHash sql.NullString
+	var previousRotatedAt sql.NullInt64
+	err := db.DB.QueryRow(
+		`SELECT token_hash, previous_token_hash, previous_token_rotated_at
+		   FROM agent_tokens
+		  WHERE tenant_id = ? AND device_id = ? AND hostname = ?
+		    AND (superseded_at IS NULL OR superseded_at = 0)
+		  ORDER BY created_at DESC
+		  LIMIT 1`,
+		tenantID, deviceID, hostname,
+	).Scan(&currentHash, &previousHash, &previousRotatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PoPNoPriorToken
+	}
+	if err != nil {
+		slog.Warn("VerifyAgentPoP query failed", "error", err)
+		return PoPReject
+	}
+	if presentedToken == "" {
+		return PoPReject
+	}
+	presentedHash := HashToken(presentedToken)
+	if subtleConstantTimeEqual(presentedHash, currentHash) {
+		return PoPAcceptCurrent
+	}
+	if !previousHash.Valid || !previousRotatedAt.Valid {
+		return PoPReject
+	}
+	if !subtleConstantTimeEqual(presentedHash, previousHash.String) {
+		return PoPReject
+	}
+	now := time.Now().Unix()
+	if now-previousRotatedAt.Int64 >= int64(AgentPoPGraceWindow.Seconds()) {
+		return PoPReject
+	}
+	// Inside grace window. Decide rotation_ack vs crash_recovery
+	// based on whether the device has heartbeated since the rotation
+	// landed. Heartbeat updates devices.last_seen via the new token;
+	// if last_seen > previous_token_rotated_at, the new token has
+	// been used → stale in-flight request from before rotation =
+	// rotation_ack. Otherwise the new token has never been used,
+	// the agent likely didn't persist it = crash_recovery.
+	var lastSeen sql.NullInt64
+	if err := db.DB.QueryRow(`SELECT last_seen FROM devices WHERE id = ?`, deviceID).Scan(&lastSeen); err != nil {
+		slog.Warn("VerifyAgentPoP last_seen lookup failed", "device_id", deviceID, "error", err)
+		// Fall back to rotation_ack on a read failure rather than
+		// crash_recovery — the latter is the noisier alarm and a
+		// transient DB error shouldn't escalate the audit signal.
+		return PoPAcceptGraceRotationAck
+	}
+	if lastSeen.Valid && lastSeen.Int64 > previousRotatedAt.Int64 {
+		return PoPAcceptGraceRotationAck
+	}
+	return PoPAcceptGraceCrashRecovery
+}
+
+// subtleConstantTimeEqual compares two equal-length hex hash strings
+// in constant time. Both arguments are SHA-256 hex digests (64
+// chars); a length mismatch returns false without leaking timing.
+func subtleConstantTimeEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var diff byte
+	for i := 0; i < len(a); i++ {
+		diff |= a[i] ^ b[i]
+	}
+	return diff == 0
+}
+
+// IsLegacyAgentEligibleForBypass returns true if the device has not
+// yet consumed its one-time pre-Codex-#6 bypass and the operator has
+// not set VAPOR_REFUSE_LEGACY_BYPASS_AFTER to a past timestamp.
+// Reading the env var on each call is cheap (it's a single Getenv)
+// and means the operator can flip the cutoff without restarting.
+func IsLegacyAgentEligibleForBypass(deviceID string) bool {
+	cutoff := os.Getenv("VAPOR_REFUSE_LEGACY_BYPASS_AFTER")
+	if cutoff != "" {
+		if t, err := time.Parse(time.RFC3339, cutoff); err == nil {
+			if time.Now().After(t) {
+				return false
+			}
+		} else {
+			slog.Warn("VAPOR_REFUSE_LEGACY_BYPASS_AFTER did not parse as RFC3339; treating as unset", "value", cutoff, "error", err)
+		}
+	}
+	var used int
+	if err := db.DB.QueryRow(`SELECT COALESCE(legacy_pop_bypass_used, 0) FROM devices WHERE id = ?`, deviceID).Scan(&used); err != nil {
+		return false
+	}
+	return used == 0
+}
+
+// MarkLegacyBypassConsumed flips devices.legacy_pop_bypass_used to 1
+// for the device. Idempotent; subsequent calls are no-ops at the
+// SQL level.
+func MarkLegacyBypassConsumed(deviceID string) error {
+	_, err := db.DB.Exec(`UPDATE devices SET legacy_pop_bypass_used = 1 WHERE id = ?`, deviceID)
+	return err
+}
+
 // RegisterAgentToken stores an agent token in memory and persists it
 // to the database. Any prior tokens for the same (tenant_id, device_id,
 // hostname) are marked superseded with a short overlap window so an
 // in-flight heartbeat carrying the old token doesn't 401-flap during
 // rotation; once the window passes, both the in-memory cache prune and
 // the AuthMiddleware reject the old tokens.
+//
+// The hash of the immediately-prior token (if any) is recorded on the
+// new row as previous_token_hash + previous_token_rotated_at to back
+// the Codex #6 proof-of-possession grace window. Single previous; not
+// a chain (spec-locked).
 func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 	if tenantID == "" {
 		tenantID = "default"
@@ -822,6 +1007,23 @@ func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 	now := time.Now().Unix()
 	supersedeAt := now + int64(AgentTokenSupersedeWindow.Seconds())
 	expiresAt := now + 90*24*60*60 // 90 days
+
+	// Find the existing active token (if any) for this tuple. We need
+	// its hash to record as previous_token_hash on the row we're about
+	// to insert. Read outside the in-memory mutex so we don't hold the
+	// cache lock across a DB call.
+	var priorHash string
+	if err := db.DB.QueryRow(
+		`SELECT token_hash FROM agent_tokens
+		  WHERE tenant_id = ? AND device_id = ? AND hostname = ?
+		    AND (superseded_at IS NULL OR superseded_at = 0)
+		    AND token_hash <> ?
+		  ORDER BY created_at DESC LIMIT 1`,
+		tenantID, deviceID, hostname, tokenHash,
+	).Scan(&priorHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		slog.Warn("could not read prior token for rotation linkage", "error", err)
+	}
+
 	TokenMu.Lock()
 	defer TokenMu.Unlock()
 
@@ -846,14 +1048,25 @@ func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 		ExpiresAt: expiresAt,
 	}
 
+	// previous_token_hash + previous_token_rotated_at are nullable;
+	// pass *string / *int64 so the dbWrapper sends NULL on first
+	// registration. The grace-window PoP check skips rows where
+	// previous_token_rotated_at is NULL.
+	var prevHashArg interface{}
+	var prevRotatedAtArg interface{}
+	if priorHash != "" {
+		prevHashArg = priorHash
+		prevRotatedAtArg = now
+	}
+
 	var upsertToken string
 	if db.DB.Dialect == "postgres" {
-		upsertToken = `INSERT INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at, superseded_at) VALUES (?, ?, ?, ?, ?, ?, 0)
-			ON CONFLICT (token_hash) DO UPDATE SET device_id=EXCLUDED.device_id, hostname=EXCLUDED.hostname, tenant_id=EXCLUDED.tenant_id, created_at=EXCLUDED.created_at, expires_at=EXCLUDED.expires_at, superseded_at=0`
+		upsertToken = `INSERT INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at, superseded_at, previous_token_hash, previous_token_rotated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+			ON CONFLICT (token_hash) DO UPDATE SET device_id=EXCLUDED.device_id, hostname=EXCLUDED.hostname, tenant_id=EXCLUDED.tenant_id, created_at=EXCLUDED.created_at, expires_at=EXCLUDED.expires_at, superseded_at=0, previous_token_hash=EXCLUDED.previous_token_hash, previous_token_rotated_at=EXCLUDED.previous_token_rotated_at`
 	} else {
-		upsertToken = `INSERT OR REPLACE INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at, superseded_at) VALUES (?, ?, ?, ?, ?, ?, 0)`
+		upsertToken = `INSERT OR REPLACE INTO agent_tokens (token_hash, device_id, hostname, tenant_id, created_at, expires_at, superseded_at, previous_token_hash, previous_token_rotated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`
 	}
-	if _, err := db.DB.Exec(upsertToken, tokenHash, deviceID, hostname, tenantID, now, expiresAt); err != nil {
+	if _, err := db.DB.Exec(upsertToken, tokenHash, deviceID, hostname, tenantID, now, expiresAt, prevHashArg, prevRotatedAtArg); err != nil {
 		slog.Warn("could not persist agent token", "error", err)
 	}
 

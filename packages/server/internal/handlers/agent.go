@@ -102,6 +102,20 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		agentVersion, _ := regInfo["agent_version"].(string)
 		osClass := sysfeatures.ClassifyOS(osName)
 
+		// Codex #6: on the re-registration branch we require the caller
+		// to prove possession of the device's currently-bound agent
+		// token (or the previous one inside the 60s rotation grace
+		// window). Without that gate, anyone holding the tenant's
+		// REGISTRATION_SECRET could take over any device by guessing
+		// its hostname+MAC. The header is plaintext; the comparison
+		// hashes before comparing so a timing oracle on the row's
+		// previous_token_hash can't leak the prior secret. Header on
+		// FIRST registration is ignored — the no-prior-token path is
+		// the legitimate first-INSERT case (and, on a hostname-match
+		// where the device row has lost every token, the
+		// legacy-bypass case wired up in a later commit).
+		existingAgentToken := strings.TrimPrefix(c.Get("X-Existing-Agent-Token"), "Bearer ")
+
 		// Re-registration check + INSERT runs under db.DedupMu so a
 		// concurrent dedup pass can't race with this critical section.
 		// Without the lock, the dedup migration could be midway
@@ -118,15 +132,45 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		).Scan(&existingID)
 		var deviceID string
 		var registered bool
+		var popVerdict auth.PoPVerdict = auth.PoPNoPriorToken
 		switch {
 		case err == nil && existingID != "":
 			deviceID = existingID
-			if _, err := db.DB.Exec(
-				`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
-				localIP, osName, osVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
-			); err != nil {
+			popVerdict = auth.VerifyAgentPoP(tenantID, deviceID, hostname, existingAgentToken)
+			switch popVerdict {
+			case auth.PoPAcceptCurrent, auth.PoPAcceptGraceRotationAck, auth.PoPAcceptGraceCrashRecovery:
+				// PoP satisfied. UPDATE the device row and proceed to
+				// token rotation. Audit-log every grace-window accept
+				// so operators can correlate the network-blip vs
+				// crash-recovery signals; current-token accepts are
+				// the happy path and don't need their own audit row.
+				if _, err := db.DB.Exec(
+					`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
+					localIP, osName, osVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
+				); err != nil {
+					db.DedupMu.Unlock()
+					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
+				}
+				if popVerdict == auth.PoPAcceptGraceRotationAck || popVerdict == auth.PoPAcceptGraceCrashRecovery {
+					events.AuditLogTenant(tenantID, "system", "device.register.pop_grace", "device", deviceID,
+						fmt.Sprintf("grace_window_pop_accept verdict=%s hostname=%s ip=%s", popVerdict.String(), hostname, c.IP()),
+						c.IP())
+				}
+			default:
+				// PoP rejected. The dedup lock is released before the
+				// audit/webhook hooks fire — they don't touch the
+				// devices/agent_tokens critical section and we want
+				// concurrent legitimate re-registers to proceed.
 				db.DedupMu.Unlock()
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
+				events.AuditLogTenant(tenantID, "system", "device.register.pop_rejected", "device", deviceID,
+					fmt.Sprintf("pop_rejected verdict=%s claimed_hostname=%s claimed_mac=%s ip=%s",
+						popVerdict.String(), hostname, macAddr, c.IP()),
+					c.IP())
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+					"error":   "Device exists; proof-of-possession required",
+					"message": "This hostname is already registered. Re-registration requires presenting the current agent token in the X-Existing-Agent-Token header. If the agent has lost its token, an administrator must remove the device first.",
+					"code":    409,
+				})
 			}
 		default:
 			deviceID = uuid.New().String()

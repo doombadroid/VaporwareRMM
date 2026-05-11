@@ -393,3 +393,29 @@ func TestAgent_StableAcrossInterfaceReordering(t *testing.T) {
 		t.Errorf("agent discarded device_id despite matching machine-id+hostname; got %q want %q", agent.deviceID, seed.DeviceID)
 	}
 }
+
+// TestSaveAgentState_RejectsSeparatorFreeOverride is the Codex
+// second-pass regression: a VAPOR_AGENT_STATE_FILE_OVERRIDE set to a
+// bare filename used to panic in saveAgentState's
+// strings.LastIndexAny slice (-1 return → slice[:negative]). The fix
+// returns a clear error instead. A panic here would cascade into a
+// PoP lockout on restart because the post-rotation persist could
+// never land.
+func TestSaveAgentState_RejectsSeparatorFreeOverride(t *testing.T) {
+	t.Setenv("VAPOR_AGENT_STATE_FILE_OVERRIDE", "agent-state.json")
+
+	err := saveAgentState(agentState{
+		DeviceID: "device-no-sep",
+		Hostname: "host-no-sep",
+		APIToken: "bearer-no-sep-1234567890",
+	})
+	if err == nil {
+		t.Fatal("expected error for separator-free override, got nil")
+	}
+	if !strings.Contains(err.Error(), "VAPOR_AGENT_STATE_FILE_OVERRIDE") {
+		t.Errorf("error should mention the env var; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "directory separator") {
+		t.Errorf("error should explain the constraint; got: %v", err)
+	}
+}

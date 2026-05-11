@@ -1551,7 +1551,18 @@ func saveAgentState(state agentState) error {
 		return fmt.Errorf("marshal agent state: %w", err)
 	}
 	path := agentStateFile()
-	dir := path[:strings.LastIndexAny(path, "/\\")]
+	sepIdx := strings.LastIndexAny(path, "/\\")
+	if sepIdx == -1 {
+		// VAPOR_AGENT_STATE_FILE_OVERRIDE was set to a bare filename
+		// with no directory separator. Refuse explicitly instead of
+		// slicing path[:-1] (which would panic). An operator setting
+		// the override should be giving us a full path; silently
+		// dropping the file into CWD is too easy to misconfigure
+		// (the CWD changes between systemd, launchd, sc.exe, and
+		// dev runs).
+		return fmt.Errorf("VAPOR_AGENT_STATE_FILE_OVERRIDE must contain a directory separator: got %q", path)
+	}
+	dir := path[:sepIdx]
 	if dir != "" {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("mkdir agent state dir: %w", err)

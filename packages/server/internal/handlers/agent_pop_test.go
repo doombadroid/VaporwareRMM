@@ -418,13 +418,19 @@ func TestReRegister_LegacyBypassRefusedAfterCutoff(t *testing.T) {
 }
 
 // TestReRegister_LegacyBypassOnPoPReject covers the realistic upgrade
-// path Codex flagged: a pre-Codex-#6 agent has an active agent_tokens
-// row (previous_token_hash IS NULL), the operator deploys the new
-// binary, the agent restarts with a fresh-generated bearer and either
-// no persisted token or a stale persisted token. VerifyAgentPoP
-// returns PoPReject (the active row exists but presented PoP doesn't
-// match). Without this branch, every restarted legacy endpoint would
-// 409 forever.
+// path: a pre-Codex-#6 agent has an active agent_tokens row that was
+// inserted by old code (is_legacy_pre_codex_6 = 1, set by migration
+// 050 at upgrade time). The operator deploys the new binary, the
+// agent restarts with a fresh-generated bearer and either no
+// persisted token or a stale persisted token. VerifyAgentPoP returns
+// PoPReject (the active row exists but presented PoP doesn't match).
+// Without this branch, every restarted legacy endpoint would 409
+// forever.
+//
+// The seed: simulate the migration-050 effect with an UPDATE.
+// migration 050 marks every row that existed at upgrade time as
+// is_legacy_pre_codex_6 = 1. In a real upgrade, that flip happens to
+// rows the OLD code wrote; in this test we synthesize it.
 func TestReRegister_LegacyBypassOnPoPReject(t *testing.T) {
 	app := popTestEnv(t)
 	t1 := strings.Repeat("a", 40)
@@ -435,26 +441,21 @@ func TestReRegister_LegacyBypassOnPoPReject(t *testing.T) {
 	}
 	deviceID := deviceIDFor(t, r1)
 
-	// First registration produces an agent_tokens row with
-	// previous_token_hash IS NULL — that's how the discriminator
-	// in ActiveTokenIsLegacy identifies pre-Codex-#6 rows.
-	var hasPrior bool
-	if err := db.DB.QueryRow(
-		`SELECT previous_token_hash IS NOT NULL FROM agent_tokens WHERE device_id = ? AND (superseded_at IS NULL OR superseded_at = 0)`,
+	// Synthesize the post-migration-050 state: mark the active
+	// agent_tokens row as a pre-Codex-#6 row.
+	if _, err := db.DB.Exec(
+		`UPDATE agent_tokens SET is_legacy_pre_codex_6 = 1 WHERE device_id = ? AND (superseded_at IS NULL OR superseded_at = 0)`,
 		deviceID,
-	).Scan(&hasPrior); err != nil {
-		t.Fatalf("read prior: %v", err)
-	}
-	if hasPrior {
-		t.Fatal("first register should leave previous_token_hash NULL")
+	); err != nil {
+		t.Fatalf("mark active row legacy: %v", err)
 	}
 
 	// Upgraded agent re-registers with a NEW bearer and a wrong
 	// X-Existing-Agent-Token (simulating either a stale persisted
 	// token from before upgrade or a generated value the agent had
 	// no way to know matched the DB row). VerifyAgentPoP → PoPReject.
-	// ActiveTokenIsLegacy → true. IsLegacyAgentEligibleForBypass →
-	// true. Bypass fires once → 200.
+	// ActiveTokenIsLegacy → true (row is_legacy_pre_codex_6 = 1).
+	// IsLegacyAgentEligibleForBypass → true. Bypass fires once → 200.
 	t2 := strings.Repeat("b", 40)
 	wrongExisting := strings.Repeat("x", 40)
 	r2 := registerOnce(t, app, t2, wrongExisting, "host-pop-legacy-reject", "aa:bb:cc:dd:ee:08")
@@ -487,6 +488,68 @@ func TestReRegister_LegacyBypassOnPoPReject(t *testing.T) {
 		t.Fatalf("second register after bypass expected 409, got %d body=%s", r3.StatusCode, string(body))
 	}
 	r3.Body.Close()
+}
+
+// TestReRegister_FreshAgentCannotBypassEvenWithoutPreviousToken is
+// the Codex second-pass regression: a freshly-registered Codex-#6
+// device has is_legacy_pre_codex_6 = 0 (default) on its active row.
+// The first pass's discriminator (previous_token_hash IS NULL)
+// matched this case too, which would have let an attacker holding
+// REGISTRATION_SECRET take over any newly-enrolled device once. With
+// the explicit column, the bypass is denied and the wrong-PoP
+// re-register returns 409.
+func TestReRegister_FreshAgentCannotBypassEvenWithoutPreviousToken(t *testing.T) {
+	app := popTestEnv(t)
+	t1 := strings.Repeat("a", 40)
+
+	r1 := registerOnce(t, app, t1, "", "host-fresh-no-bypass", "aa:bb:cc:dd:ee:0b")
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("first register expected 200, got %d", r1.StatusCode)
+	}
+	deviceID := deviceIDFor(t, r1)
+
+	// Confirm the seed state: row exists, has no previous_token_hash
+	// (first registration), and crucially is_legacy_pre_codex_6 = 0
+	// because the migration-050 backfill ran before this row was
+	// inserted.
+	var isLegacy int
+	var hasPrior bool
+	if err := db.DB.QueryRow(
+		`SELECT is_legacy_pre_codex_6, previous_token_hash IS NOT NULL FROM agent_tokens
+		   WHERE device_id = ? AND (superseded_at IS NULL OR superseded_at = 0)`,
+		deviceID,
+	).Scan(&isLegacy, &hasPrior); err != nil {
+		t.Fatalf("read active row: %v", err)
+	}
+	if isLegacy != 0 {
+		t.Fatalf("fresh registration should have is_legacy_pre_codex_6 = 0, got %d", isLegacy)
+	}
+	if hasPrior {
+		t.Fatal("fresh registration should have NULL previous_token_hash")
+	}
+
+	// Wrong PoP against a fresh row MUST 409. Under the first pass's
+	// rule (previous_token_hash IS NULL → legacy), this would have
+	// 200'd via the one-time bypass and rotated the bearer to the
+	// attacker.
+	t2 := strings.Repeat("b", 40)
+	wrong := strings.Repeat("x", 40)
+	r2 := registerOnce(t, app, t2, wrong, "host-fresh-no-bypass", "aa:bb:cc:dd:ee:0b")
+	if r2.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(r2.Body)
+		t.Fatalf("wrong-PoP on fresh agent expected 409, got %d body=%s", r2.StatusCode, string(body))
+	}
+	r2.Body.Close()
+
+	// And legacy_pop_bypass_used MUST still be 0 — the bypass latch
+	// was not consumed because the bypass never fired.
+	var used int
+	if err := db.DB.QueryRow(`SELECT legacy_pop_bypass_used FROM devices WHERE id = ?`, deviceID).Scan(&used); err != nil {
+		t.Fatalf("read bypass flag: %v", err)
+	}
+	if used != 0 {
+		t.Errorf("legacy_pop_bypass_used should remain 0 on denied bypass, got %d", used)
+	}
 }
 
 // TestConflictWebhookRateLimit: 10 conflicts on the same device

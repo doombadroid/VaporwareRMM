@@ -1172,6 +1172,41 @@ func RunMigrations(dialect string) error {
 			// every agent token rotation.
 			SQL: `CREATE INDEX IF NOT EXISTS idx_agent_tokens_active_device ON agent_tokens(tenant_id, device_id, hostname, superseded_at);`,
 		},
+		{
+			Version: "049",
+			Name:    "agent_tokens_add_is_legacy_pre_codex_6",
+			// Explicit pre-Codex-#6 discriminator. The first PR-review
+			// pass used `previous_token_hash IS NULL` to detect legacy
+			// rows, but Codex's second pass pointed out that brand-new
+			// Codex-#6 rows also have NULL there (until first rotation),
+			// so a fresh registration would still qualify for the
+			// one-time bypass — re-opening a fleet-wide hijack primitive
+			// on every newly-enrolled device. Replace the inferred
+			// discriminator with an explicit column.
+			//
+			// Migration 049 adds the column (default 0 for both
+			// existing and new rows, courtesy of the NOT NULL DEFAULT
+			// clause). Migration 050 then flips the rows that existed
+			// BEFORE Codex #6 landed to 1, marking them as legacy.
+			// New INSERTs (which only happen AFTER the migration runs
+			// at server startup) get the default 0.
+			SQL: `ALTER TABLE agent_tokens ADD COLUMN is_legacy_pre_codex_6 INTEGER NOT NULL DEFAULT 0;`,
+		},
+		{
+			Version: "050",
+			Name:    "agent_tokens_mark_existing_as_legacy",
+			// One-time data migration: every row that already exists
+			// at upgrade time is, by definition, a pre-Codex-#6 row.
+			// The migration runner records this version after exec, so
+			// it cannot run a second time — even if 050 reruns on a
+			// crashed-restart scenario, the WHERE clause makes it
+			// idempotent.
+			//
+			// Servers booting cleanly with no pre-existing rows
+			// (greenfield deployments) get an UPDATE that affects 0
+			// rows. That's fine — there were no legacy agents to mark.
+			SQL: `UPDATE agent_tokens SET is_legacy_pre_codex_6 = 1 WHERE is_legacy_pre_codex_6 = 0;`,
+		},
 	}
 
 	for _, m := range migrations {

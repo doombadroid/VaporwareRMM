@@ -1025,14 +1025,16 @@ func IsLegacyAgentEligibleForBypass(deviceID string) bool {
 }
 
 // ActiveTokenIsLegacy reports whether the device's active agent_tokens
-// row was inserted by pre-Codex-#6 code. The discriminator is
-// previous_token_hash IS NULL: Codex-#6 rotations always write a
-// non-NULL previous_token_hash (except on the very first registration,
-// which still produces a NULL — but that path goes through
-// PoPNoPriorToken, not PoPReject). When the verdict is PoPReject and
-// the active row predates Codex-#6, the legacy bypass is the only way
-// for the agent to recover without admin intervention, because the
-// pre-Codex agent never persisted a bearer it could present as PoP.
+// row was inserted by pre-Codex-#6 code. The discriminator is the
+// explicit is_legacy_pre_codex_6 column, set to 1 by migration 050
+// for every row that existed at upgrade time and to 0 by default for
+// every row inserted afterwards.
+//
+// Codex's second review pass flagged the previous implementation,
+// which used `previous_token_hash IS NULL`: fresh Codex-#6 rows also
+// have NULL there until their first rotation, so a wrong-PoP attempt
+// on a freshly-enrolled device qualified for the one-time bypass —
+// re-opening the hijack primitive the PoP gate was built to close.
 //
 // Returns false on any DB error or when no active row is found —
 // fail-closed so the bypass is never granted on a partial read.
@@ -1040,18 +1042,18 @@ func ActiveTokenIsLegacy(tenantID, deviceID, hostname string) bool {
 	if tenantID == "" {
 		tenantID = "default"
 	}
-	var hasPrior sql.NullString
+	var isLegacy int
 	err := db.DB.QueryRow(
-		`SELECT previous_token_hash FROM agent_tokens
+		`SELECT is_legacy_pre_codex_6 FROM agent_tokens
 		  WHERE tenant_id = ? AND device_id = ? AND hostname = ?
 		    AND (superseded_at IS NULL OR superseded_at = 0)
 		  ORDER BY created_at DESC LIMIT 1`,
 		tenantID, deviceID, hostname,
-	).Scan(&hasPrior)
+	).Scan(&isLegacy)
 	if err != nil {
 		return false
 	}
-	return !hasPrior.Valid
+	return isLegacy == 1
 }
 
 // MarkLegacyBypassConsumed flips devices.legacy_pop_bypass_used to 1

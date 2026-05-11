@@ -62,7 +62,40 @@ const (
 	defaultHSTSMaxAge       = 31536000
 )
 
+// sentinelSecretValue is the placeholder value shipped in
+// docker/.env.example for fields the operator MUST regenerate before
+// running the server. RefuseSentinelSecrets() aborts boot if any
+// required secret still contains this string — that's the failure
+// mode Codex #3 demanded ("CreateDefaultAdmin refuses to accept"
+// sentinel values; "server boot fails fast if any sentinel is still
+// present").
+const sentinelSecretValue = "__GENERATE_ME__"
+
+// RefuseSentinelSecrets aborts boot when any of the required secret
+// env vars (ADMIN_PASSWORD, JWT_SECRET, SECRETS_ENCRYPTION_KEY) is
+// still set to the sentinel placeholder. setup-docker.sh fills these
+// in with cryptographically random values on first run; an operator
+// who hand-copied .env.example without running setup-docker.sh will
+// hit this branch and the error explains the fix.
+func RefuseSentinelSecrets() {
+	for _, name := range []string{"ADMIN_PASSWORD", "JWT_SECRET", "SECRETS_ENCRYPTION_KEY"} {
+		v := os.Getenv(name)
+		if v == sentinelSecretValue {
+			slog.Error("refusing to start: required secret is the sentinel placeholder; run docker/setup-docker.sh or generate a real value (openssl rand -base64 32) before booting", "var", name)
+			os.Exit(1)
+		}
+	}
+}
+
 func main() {
+	// Codex #3: refuse the sentinel before anything else. An operator
+	// who copied .env.example unchanged would otherwise reach
+	// CreateDefaultAdmin with ADMIN_PASSWORD=__GENERATE_ME__ and
+	// boot fine (the password strength check accepts it: 14 chars,
+	// upper/lower/digit/symbol if the underscores count). The
+	// sentinel literal is what makes it dangerous, not the strength.
+	RefuseSentinelSecrets()
+
 	// Load configuration from environment / Docker secrets
 	auth.JWTSecret = utils.ReadSecret("JWT_SECRET", "JWT_SECRET_FILE")
 	if auth.JWTSecret == "" {

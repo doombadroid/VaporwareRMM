@@ -20,21 +20,82 @@ log "========================================"
 log "  vaporRMM Docker Setup"
 log "========================================"
 
-# Check if .env exists, create from example if not
+# Codex #3: generate cryptographically random ADMIN_PASSWORD,
+# JWT_SECRET, and SECRETS_ENCRYPTION_KEY into .env before bringing
+# the stack up. Idempotent: any field still set to __GENERATE_ME__
+# (the sentinel value in .env.example) gets replaced; fields already
+# customised are left alone. Operators rotating credentials on an
+# existing install can `sed -i 's|.*=.*|FOO=__GENERATE_ME__|' .env`
+# the relevant lines and re-run this script to regenerate.
+#
+# The admin password is printed to stdout once. CreateDefaultAdmin
+# hashes it on first server start and the plaintext is unrecoverable
+# afterwards. Operators MUST record it from the script output; we do
+# not write it to a file the operator might forget about.
+
+# Pick a random-bytes generator that exists on the host. base64 -w0
+# is GNU-only; tr is portable; openssl is the preferred path.
+gen_secret() {
+  local nbytes="${1:-32}"
+  if command -v openssl &> /dev/null; then
+    openssl rand -base64 "$nbytes" | tr -d '\n'
+  else
+    dd if=/dev/urandom bs="$nbytes" count=1 2>/dev/null | base64 | tr -d '=+/\n'
+  fi
+}
+
 if [ ! -f .env ]; then
   if [ -f .env.example ]; then
     log "Creating .env from example..."
     cp .env.example .env
-    # Generate a random JWT_SECRET
-    if command -v openssl &> /dev/null; then
-      SECRET=$(openssl rand -base64 32)
-    else
-      SECRET=$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64 | tr -d '=+/')
-    fi
-    sed -i "s|JWT_SECRET=.*|JWT_SECRET=$SECRET|" .env
-    warn "Generated random JWT_SECRET in .env"
-    warn "Please review and customize .env before running again if needed"
+  else
+    error ".env.example not found; cannot bootstrap .env"
+    exit 1
   fi
+fi
+
+SENTINEL="__GENERATE_ME__"
+# Map of (var name, byte count) — 48 bytes for JWT_SECRET so the
+# base64 output comfortably exceeds the 32-char minimum the server
+# enforces; 32 bytes for the rest.
+declare -a SECRETS=(
+  "ADMIN_PASSWORD:32"
+  "JWT_SECRET:48"
+  "SECRETS_ENCRYPTION_KEY:32"
+)
+ADMIN_PW_PRINTED=""
+for entry in "${SECRETS[@]}"; do
+  name="${entry%%:*}"
+  nbytes="${entry##*:}"
+  current=$(grep -E "^${name}=" .env | head -1 | cut -d= -f2-)
+  if [ -z "$current" ] || [ "$current" = "$SENTINEL" ]; then
+    value=$(gen_secret "$nbytes")
+    # sed delimiter is | because base64 output contains / and +; the
+    # generator strips =+/ in the dd fallback but openssl output can
+    # contain them and we keep them for entropy.
+    if grep -qE "^${name}=" .env; then
+      sed -i "s|^${name}=.*|${name}=${value}|" .env
+    else
+      printf '%s=%s\n' "$name" "$value" >> .env
+    fi
+    warn "Generated random $name in .env"
+    if [ "$name" = "ADMIN_PASSWORD" ]; then
+      ADMIN_PW_PRINTED="$value"
+    fi
+  else
+    log "$name already set in .env; leaving unchanged"
+  fi
+done
+
+if [ -n "$ADMIN_PW_PRINTED" ]; then
+  echo ""
+  log "================================================================"
+  log "  ADMIN CREDENTIALS — RECORD NOW (one-time output)"
+  log "================================================================"
+  log "  Email:    admin@vaporrmm.local"
+  log "  Password: $ADMIN_PW_PRINTED"
+  log "================================================================"
+  echo ""
 fi
 
 # Source .env for the test script

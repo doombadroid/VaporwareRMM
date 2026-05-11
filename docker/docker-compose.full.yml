@@ -8,12 +8,20 @@ services:
       dockerfile: Dockerfile.server
     container_name: vaporrmm-server
     hostname: vaporrmm-server
+    # Codex #3: bind to host loopback by default; override with
+    # BIND_ADDR=0.0.0.0 in the shell env when running on a trusted
+    # network or behind a reverse proxy.
     ports:
-      - "8080:8080"
+      - "${BIND_ADDR:-127.0.0.1}:8080:8080"
     environment:
+      # No literal default for any required secret. setup-docker.sh
+      # generates them on first run; the server boot path refuses to
+      # start with the sentinel placeholder (see RefuseSentinelSecrets
+      # in packages/server/main.go).
       - JWT_SECRET=${JWT_SECRET}
+      - SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - DATABASE_PATH=/app/data/vapor_rmm.db
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-ChangeMe123!}
       - SERVER_PORT=8080
       - SERVER_HOST=0.0.0.0
       - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://server:8080
@@ -43,8 +51,9 @@ services:
       context: ./dashboard-files
       dockerfile: Dockerfile
     container_name: vaporrmm-dashboard
+    # Codex #3: loopback by default.
     ports:
-      - "3000:3000"
+      - "${BIND_ADDR:-127.0.0.1}:3000:3000"
     environment:
       - NODE_ENV=production
       - NEXT_PUBLIC_API_URL=http://localhost:8080/api
@@ -62,8 +71,13 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.moonlight-web
     container_name: vaporrmm-moonlight-web
+    # Codex #3: loopback by default. WebRTC requires the UDP range
+    # to reach clients, so the UDP ports stay on 0.0.0.0 — that's
+    # the protocol contract, not a default-credential exposure. The
+    # TCP signalling port (8081) goes through the reverse proxy /
+    # loopback like the rest of the stack.
     ports:
-      - "8081:8080"
+      - "${BIND_ADDR:-127.0.0.1}:8081:8080"
       - "40000-40100:40000-40100/udp"
     environment:
       - WEBRTC_NAT_1TO1_HOST=${WEBRTC_NAT_1TO1_HOST:-}

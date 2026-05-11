@@ -6,12 +6,23 @@ services:
       context: .
       dockerfile: Dockerfile.server
     container_name: vaporrmm-server
+    # Codex #3: bind to host loopback by default; the previous
+    # "8080:8080" mapping bound 0.0.0.0:8080 on the host and exposed
+    # an unhardened admin API to the network. Operators behind a
+    # reverse proxy (Caddy / nginx) keep loopback; operators on a
+    # trusted network override BIND_ADDR=0.0.0.0 in their shell env.
     ports:
-      - "8080:8080"
+      - "${BIND_ADDR:-127.0.0.1}:8080:8080"
     environment:
-      - JWT_SECRET=${JWT_SECRET:-change-me-to-a-random-string}
+      # No literal default for JWT_SECRET / ADMIN_PASSWORD. .env is
+      # required and setup-docker.sh generates the random values.
+      # An operator running `docker compose up` without .env will
+      # hit RefuseSentinelSecrets at boot (good) or be missing the
+      # vars entirely (also good — server fails closed).
+      - JWT_SECRET=${JWT_SECRET}
+      - SECRETS_ENCRYPTION_KEY=${SECRETS_ENCRYPTION_KEY}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - DATABASE_PATH=/app/data/vapor_rmm.db
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-ChangeMe123!}
       - SERVER_PORT=8080
       - SERVER_HOST=0.0.0.0
       - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
@@ -31,8 +42,10 @@ services:
       context: ./dashboard-files
       dockerfile: Dockerfile
     container_name: vaporrmm-dashboard
+    # Codex #3: loopback by default. Reverse proxy or BIND_ADDR=0.0.0.0
+    # for external exposure.
     ports:
-      - "3000:3000"
+      - "${BIND_ADDR:-127.0.0.1}:3000:3000"
     environment:
       - NODE_ENV=production
       - NEXT_PUBLIC_API_URL=http://localhost:8080/api

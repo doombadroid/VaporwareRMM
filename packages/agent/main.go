@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -123,15 +124,29 @@ const patchInstallTimeout = 30 * time.Minute
 // admin role equals root on every endpoint" and that fact belongs in
 // every conversation about RBAC, not in a regexp here.
 
-// NewAgent creates an Agent, generating a random API token if none is provided.
+// NewAgent creates an Agent. Token-source precedence is:
+//   1. apiToken argument (typically from VAPOR_AGENT_TOKEN env)
+//   2. persisted state file's APIToken (continuity across restarts)
+//   3. freshly generated random token (first-run case)
+//
+// Step 2 is the Codex #6 addition: a restart that loses continuity
+// to the server's previous_token_hash forces operator intervention
+// per the new PoP gate, so we persist the bearer and re-use it on
+// every restart. The token never leaves the host except inside the
+// Authorization / X-Existing-Agent-Token headers over TLS.
 func NewAgent(serverURL string, port int, apiToken string) (*Agent, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
+
+	persisted := loadAgentState()
+	if apiToken == "" {
+		apiToken = persisted.APIToken
+	}
 	if apiToken == "" {
 		apiToken = generateToken()
-		slog.Info("No VAPOR_AGENT_TOKEN set. Generated ephemeral token (not logged for security)")
+		slog.Info("no VAPOR_AGENT_TOKEN and no persisted token; generated a fresh ephemeral token (not logged for security)")
 	}
 
 	// Load branding from server
@@ -154,16 +169,13 @@ func NewAgent(serverURL string, port int, apiToken string) (*Agent, error) {
 		}
 	}
 
-	// Restore device ID from previous run if available
-	persistedDeviceID := loadDeviceID()
-
 	return &Agent{
 		serverURL:    serverURL,
 		port:         port,
 		hostname:     hostname,
 		apiToken:     apiToken,
-		deviceID:     persistedDeviceID,
-		registered:   persistedDeviceID != "",
+		deviceID:     persisted.DeviceID,
+		registered:   persisted.DeviceID != "",
 		appName:      appName,
 		companyName:  companyName,
 		iconURL:      iconURL,
@@ -471,6 +483,21 @@ func (a *Agent) connectTailscale() {
 }
 
 // registerWithServer registers this agent with the central server.
+//
+// Codex #6: re-registers must present proof-of-possession of the
+// current agent token. We send the persisted token in the
+// X-Existing-Agent-Token header. The Authorization header carries
+// the bearer the server will bind to the device on success; under
+// VAPOR_ROTATE_TOKEN=1 this is a freshly-generated rotation
+// candidate (the persisted token stays in X-Existing-Agent-Token
+// to satisfy PoP), otherwise it is the same persisted token (a
+// no-op re-register at the token layer).
+//
+// 409 response = server rejected PoP. We do NOT silently retry —
+// the only way out is operator intervention (admin-side device
+// removal or recovery flow). Silent retry would either burn
+// rate-limit budget on a doomed loop or, worse, hide the
+// rejection from the operator log.
 func (a *Agent) registerWithServer() error {
 	regInfo := a.getRegistrationInfo()
 	data, err := json.Marshal(regInfo)
@@ -478,12 +505,26 @@ func (a *Agent) registerWithServer() error {
 		return fmt.Errorf("marshal registration info: %w", err)
 	}
 
+	priorToken := a.apiToken
+	newToken := a.apiToken
+	rotating := os.Getenv("VAPOR_ROTATE_TOKEN") == "1"
+	if rotating {
+		newToken = generateToken()
+	}
+
 	req, err := http.NewRequest(http.MethodPost, a.serverURL+"/agent/register", bytes.NewBuffer(data))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.apiToken)
+	req.Header.Set("Authorization", "Bearer "+newToken)
+	// X-Existing-Agent-Token is the prior bearer the server stored
+	// for this device. On first-time install priorToken is whatever
+	// got generated/loaded; the server's PoP check returns
+	// PoPNoPriorToken for a fresh device row and lets the INSERT
+	// proceed. Sending it unconditionally simplifies the agent
+	// state machine and is harmless on first run.
+	req.Header.Set("X-Existing-Agent-Token", priorToken)
 	if regSecret := os.Getenv("REGISTRATION_SECRET"); regSecret != "" {
 		req.Header.Set("X-Registration-Secret", regSecret)
 	}
@@ -494,6 +535,14 @@ func (a *Agent) registerWithServer() error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusConflict {
+		// PoP rejected. Surface the response body to the operator
+		// log — the server's error message contains the recovery
+		// instruction (admin-side device removal). No retry loop.
+		body, _ := io.ReadAll(resp.Body)
+		slog.Error("re-registration rejected (409); operator action required", "body", string(body))
+		return fmt.Errorf("registration rejected by PoP gate: %s", strings.TrimSpace(string(body)))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("registration failed with status: %d", resp.StatusCode)
 	}
@@ -503,13 +552,21 @@ func (a *Agent) registerWithServer() error {
 		slog.Warn("could not decode register response", "error", err)
 	}
 
+	// Server accepted the new token. Persist it BEFORE updating the
+	// in-memory bearer so a crash between the two doesn't leave us
+	// with a different token than the server has on record.
+	a.apiToken = newToken
 	if deviceID, ok := result["device_id"].(string); ok {
 		a.deviceID = deviceID
 		a.registered = true
-		slog.Info("agent registered", "device_id", deviceID)
-		saveDeviceID(deviceID, a.hostname)
+		slog.Info("agent registered", "device_id", deviceID, "rotated", rotating)
+		saveAgentState(agentState{DeviceID: deviceID, Hostname: a.hostname, APIToken: newToken})
 	} else {
 		slog.Warn("no device_id in registration response")
+		// Still persist the token if it changed — server has it now.
+		if rotating {
+			saveAgentState(agentState{DeviceID: a.deviceID, Hostname: a.hostname, APIToken: newToken})
+		}
 	}
 
 	return nil
@@ -1250,27 +1307,56 @@ func agentStateFile() string {
 	return "/etc/vaporrmm/agent-state.json"
 }
 
+// agentState is what we persist between runs so the agent can prove
+// continuity of identity to the server. Codex #6 added APIToken to
+// this struct: the bearer the agent uses on protected routes is also
+// the proof-of-possession value we present on re-register, and
+// regenerating a fresh token on every restart used to be silent
+// fleet-grade Russian roulette — the new token never matched
+// previous_token_hash on the server row, so the server's PoP gate
+// would reject every restart as a take-over attempt.
 type agentState struct {
 	DeviceID string `json:"device_id"`
 	Hostname string `json:"hostname"`
+	APIToken string `json:"api_token,omitempty"`
 }
 
 // loadDeviceID reads a previously registered device ID from disk.
 func loadDeviceID() string {
+	return loadAgentState().DeviceID
+}
+
+// loadAgentState reads the full persisted state — device ID,
+// hostname, and the persisted bearer token used as proof-of-
+// possession on subsequent re-registers. Returns a zero-value
+// state on any error; the caller treats missing fields as "no
+// prior state, generate a fresh one".
+func loadAgentState() agentState {
 	data, err := os.ReadFile(agentStateFile())
 	if err != nil {
-		return ""
+		return agentState{}
 	}
 	var state agentState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return ""
+		return agentState{}
 	}
-	return state.DeviceID
+	return state
 }
 
-// saveDeviceID persists the device ID to disk so it survives restarts.
+// saveDeviceID is a Codex-#6-era shim: keep the old call sites
+// compiling while the canonical save path becomes saveAgentState.
+// Reads the existing APIToken so the rewrite doesn't accidentally
+// blank out a persisted bearer.
 func saveDeviceID(deviceID, hostname string) {
-	state := agentState{DeviceID: deviceID, Hostname: hostname}
+	prev := loadAgentState()
+	saveAgentState(agentState{DeviceID: deviceID, Hostname: hostname, APIToken: prev.APIToken})
+}
+
+// saveAgentState writes the full state atomically (best effort —
+// os.WriteFile is the same single-syscall write the prior code used;
+// we don't pretend to fsync). Permissions 0600 because the file
+// contains the bearer.
+func saveAgentState(state agentState) {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		slog.Warn("could not marshal agent state", "error", err)

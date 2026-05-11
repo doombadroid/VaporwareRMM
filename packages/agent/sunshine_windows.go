@@ -42,8 +42,13 @@ func (a *Agent) startSunshineHidden() {
 		return
 	}
 
-	// Ensure Sunshine is configured with known credentials
-	if err := a.configureSunshine("vaporrmm"); err != nil {
+	// Codex #2: refuse to launch with legacy hard-coded creds.
+	creds, err := loadOrGenerateSunshineCreds()
+	if err != nil {
+		slog.Error("refusing to launch Sunshine", "error", err)
+		return
+	}
+	if err := a.configureSunshine(creds.Password); err != nil {
 		slog.Warn("could not configure Sunshine credentials", "error", err)
 	}
 
@@ -85,7 +90,7 @@ func (a *Agent) configureSunshine(password string) error {
 	// Write credentials.json
 	credsPath := filepath.Join(configDir, "credentials.json")
 	creds := map[string]interface{}{
-		"username": "vaporrmm",
+		"username": agentSunshineUsername,
 		"password": password,
 	}
 	data, err := json.MarshalIndent(creds, "", "  ")
@@ -99,7 +104,9 @@ func (a *Agent) configureSunshine(password string) error {
 	// Ensure sunshine.conf exists with basic settings
 	confPath := filepath.Join(configDir, "sunshine.conf")
 	if _, err := os.Stat(confPath); os.IsNotExist(err) {
-		conf := `origin_web_ui_allowed = *\nmin_log_level = info\n`
+		// Codex #2: origin_web_ui_allowed was previously `*`. Restrict
+		// to LAN so the credentialed UI can't be reached cross-origin.
+		conf := "origin_web_ui_allowed = lan\nmin_log_level = info\n"
 		if err := os.WriteFile(confPath, []byte(conf), 0644); err != nil {
 			return fmt.Errorf("write config: %w", err)
 		}
@@ -128,7 +135,13 @@ func (a *Agent) getSunshinePIN() (string, error) {
 
 // getSunshinePINFromAPI tries to get PIN via Sunshine's REST API
 func (a *Agent) getSunshinePINFromAPI() (string, error) {
-	loginBody, _ := json.Marshal(map[string]string{"password": "vaporrmm"})
+	// Codex #2: load the per-device credential generated at install
+	// time; the literal "vaporrmm" password is gone.
+	creds, err := loadOrGenerateSunshineCreds()
+	if err != nil {
+		return "", fmt.Errorf("sunshine creds load: %w", err)
+	}
+	loginBody, _ := json.Marshal(map[string]string{"password": creds.Password})
 	loginReq, err := http.NewRequest(http.MethodPost, "http://localhost:47990/api/password", bytes.NewReader(loginBody))
 	if err != nil {
 		return "", err

@@ -43,8 +43,17 @@ func (a *Agent) startSunshineHidden() {
 		return
 	}
 
-	// Ensure Sunshine is configured with known credentials
-	if err := a.configureSunshine("vaporrmm"); err != nil {
+	// Codex #2: refuse to launch with legacy hard-coded creds.
+	// loadOrGenerateSunshineCreds returns errSunshineDefaultCreds
+	// when the persisted password is the literal "vaporrmm" string
+	// the previous build baked into the binary. Operators rotate
+	// with VAPOR_ROTATE_SUNSHINE=1.
+	creds, err := loadOrGenerateSunshineCreds()
+	if err != nil {
+		slog.Error("refusing to launch Sunshine", "error", err)
+		return
+	}
+	if err := a.configureSunshine(creds.Password); err != nil {
 		slog.Warn("could not configure Sunshine credentials", "error", err)
 	}
 
@@ -88,7 +97,7 @@ func (a *Agent) configureSunshine(password string) error {
 	// Write credentials.json
 	credsPath := filepath.Join(configDir, "credentials.json")
 	creds := map[string]interface{}{
-		"username": "vaporrmm",
+		"username": agentSunshineUsername,
 		"password": password,
 	}
 	data, err := json.MarshalIndent(creds, "", "  ")
@@ -99,10 +108,15 @@ func (a *Agent) configureSunshine(password string) error {
 		return fmt.Errorf("write credentials: %w", err)
 	}
 
-	// Ensure sunshine.conf exists with basic settings
+	// Ensure sunshine.conf exists with basic settings.
+	// Codex #2: origin_web_ui_allowed was previously `*` which lets any
+	// origin frame / fetch the Sunshine web UI. Restrict to localhost
+	// so the credentialed UI can't be reached cross-origin even if
+	// someone tunnels port 47990. Operators who want LAN access can
+	// edit the file post-install.
 	confPath := filepath.Join(configDir, "sunshine.conf")
 	if _, err := os.Stat(confPath); os.IsNotExist(err) {
-		conf := `origin_web_ui_allowed = *
+		conf := `origin_web_ui_allowed = lan
 min_log_level = info
 `
 		if err := os.WriteFile(confPath, []byte(conf), 0644); err != nil {
@@ -133,9 +147,14 @@ func (a *Agent) getSunshinePIN() (string, error) {
 
 // getSunshinePINFromAPI tries to get PIN via Sunshine's REST API
 func (a *Agent) getSunshinePINFromAPI() (string, error) {
-	// Sunshine API requires authentication
-	// First login to get session cookie
-	loginBody, _ := json.Marshal(map[string]string{"password": "vaporrmm"})
+	// Sunshine API requires authentication. Load the per-device
+	// credential the agent generated at install time (Codex #2);
+	// hard-coded "vaporrmm" is gone.
+	creds, err := loadOrGenerateSunshineCreds()
+	if err != nil {
+		return "", fmt.Errorf("sunshine creds load: %w", err)
+	}
+	loginBody, _ := json.Marshal(map[string]string{"password": creds.Password})
 	loginReq, err := http.NewRequest(http.MethodPost, "http://localhost:47990/api/password", bytes.NewReader(loginBody))
 	if err != nil {
 		return "", err

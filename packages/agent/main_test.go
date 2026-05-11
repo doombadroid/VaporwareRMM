@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -36,6 +39,51 @@ func TestAgentRunRouteAbsent(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected 404 or 401, got %d", resp.StatusCode)
+	}
+}
+
+// TestAgentBinaryHasNoHardcodedSunshineCreds is the Codex #2 attack-
+// path regression: build a fresh agent binary and assert it does not
+// embed the legacy literal "vaporrmm" password used by the previous
+// configureSunshine / getSunshinePINFromAPI calls. Codex's spec
+// phrased this as "agent binary built from CI does not contain the
+// string 'vaporrmm:vaporrmm'" — the literal colon-joined form was
+// never in source, but the password literal was, and that's what an
+// attacker grepping the binary would find.
+//
+// The build matches what CI does: `go build -o agent .` from
+// packages/agent/. Username is intentionally kept as the string
+// "vaporrmm" (agentSunshineUsername constant) so Moonlight pairings
+// don't need to re-authenticate after rotation; the secret is the
+// password, and the password must NOT appear in the binary.
+func TestAgentBinaryHasNoHardcodedSunshineCreds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip binary build in -short mode")
+	}
+	tmp := t.TempDir()
+	out := filepath.Join(tmp, "agent-test-build")
+	cmd := exec.Command("go", "build", "-o", out, ".")
+	cmd.Dir = "."
+	if buildOut, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, buildOut)
+	}
+	bin, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read binary: %v", err)
+	}
+	// The Sunshine password literal must not appear as a substring of
+	// the compiled binary. Username "vaporrmm" can appear (it's not the
+	// secret), but the password-literal pattern Codex flagged — a JSON
+	// field with that exact value — must not.
+	forbidden := []string{
+		`"password":"vaporrmm"`,
+		`"password": "vaporrmm"`,
+		`vaporrmm:vaporrmm`, // colon-joined form Codex's spec named
+	}
+	for _, needle := range forbidden {
+		if bytes.Contains(bin, []byte(needle)) {
+			t.Errorf("Codex #2 regressed: agent binary embeds %q", needle)
+		}
 	}
 }
 

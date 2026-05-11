@@ -153,34 +153,48 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 			// PoPReject against a Codex-#6-era row (previous_token_hash
 			// IS NOT NULL) is NOT eligible — that's the take-over
 			// attempt the PoP gate was built to stop.
-			legacyBypass := false
+			// Decide eligibility first, then atomically claim the
+			// one-time latch. The latch claim and the eligibility
+			// check are split because:
+			//   1) auth.IsLegacyAgentEligibleForBypass owns the
+			//      env-cutoff check, which is process-level state
+			//      that doesn't belong in an SQL predicate.
+			//   2) auth.ActiveTokenIsLegacy reads a stable
+			//      post-migration value (is_legacy_pre_codex_6 on
+			//      the active row).
+			//   3) auth.AcquireLegacyBypass is the atomic write that
+			//      serializes concurrent claimants — exactly one
+			//      caller flips legacy_pop_bypass_used from 0 to 1
+			//      and gets true; everyone else gets false.
+			legacyBypassEligible := false
 			if auth.IsLegacyAgentEligibleForBypass(deviceID) {
 				switch {
 				case popVerdict == auth.PoPNoPriorToken:
-					legacyBypass = true
+					legacyBypassEligible = true
 				case popVerdict == auth.PoPReject && auth.ActiveTokenIsLegacy(tenantID, deviceID, hostname):
-					legacyBypass = true
+					legacyBypassEligible = true
 				}
+			}
+			legacyBypass := false
+			if legacyBypassEligible {
+				claimed, err := auth.AcquireLegacyBypass(deviceID)
+				if err != nil {
+					slog.Warn("could not acquire legacy bypass latch", "device_id", deviceID, "error", err)
+				}
+				legacyBypass = claimed
 			}
 			switch {
 			case popVerdict == auth.PoPAcceptCurrent || popVerdict == auth.PoPAcceptGraceRotationAck || popVerdict == auth.PoPAcceptGraceCrashRecovery || legacyBypass:
 				// PoP satisfied (current/grace) OR one-time legacy
 				// bypass. UPDATE the device row and proceed to token
-				// rotation. The legacy-bypass branch additionally
-				// flips devices.legacy_pop_bypass_used so subsequent
-				// re-registers for this device are on the standard
-				// PoP track.
+				// rotation. legacy_pop_bypass_used was already flipped
+				// to 1 atomically inside AcquireLegacyBypass.
 				if _, err := db.DB.Exec(
 					`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
 					localIP, osName, osVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
 				); err != nil {
 					db.DedupMu.Unlock()
 					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
-				}
-				if legacyBypass {
-					if err := auth.MarkLegacyBypassConsumed(deviceID); err != nil {
-						slog.Warn("could not mark legacy bypass consumed", "device_id", deviceID, "error", err)
-					}
 				}
 				if popVerdict == auth.PoPAcceptGraceRotationAck || popVerdict == auth.PoPAcceptGraceCrashRecovery {
 					events.AuditLogTenant(tenantID, "system", "device.register.pop_grace", "device", deviceID,

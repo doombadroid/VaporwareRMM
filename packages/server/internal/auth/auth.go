@@ -1058,10 +1058,41 @@ func ActiveTokenIsLegacy(tenantID, deviceID, hostname string) bool {
 
 // MarkLegacyBypassConsumed flips devices.legacy_pop_bypass_used to 1
 // for the device. Idempotent; subsequent calls are no-ops at the
-// SQL level.
+// SQL level. Used by the legacy bypass flow only after
+// AcquireLegacyBypass has confirmed the latch was held by the caller.
 func MarkLegacyBypassConsumed(deviceID string) error {
 	_, err := db.DB.Exec(`UPDATE devices SET legacy_pop_bypass_used = 1 WHERE id = ?`, deviceID)
 	return err
+}
+
+// AcquireLegacyBypass atomically consumes the one-time pre-Codex-#6
+// migration bypass for the device. Returns true exactly once per
+// device — the first caller that finds legacy_pop_bypass_used=0 wins
+// and the column is flipped to 1 in the same UPDATE; concurrent
+// callers see rows-affected=0 and return false.
+//
+// Codex's second review pass flagged the read-then-write pattern in
+// MarkLegacyBypassConsumed paired with IsLegacyAgentEligibleForBypass:
+// in a multi-instance deployment, two re-registrations could both
+// observe used=0 and both succeed, violating the one-time guarantee.
+// This single-statement atomic guard fixes that without distributed
+// locking — the database is the serialization point.
+//
+// Callers MUST check the higher-level eligibility predicates
+// (env cutoff via ParseLegacyBypassCutoff, the PoP verdict, and
+// ActiveTokenIsLegacy when the verdict is PoPReject) BEFORE invoking
+// this function. AcquireLegacyBypass only enforces the per-device
+// one-time atomic latch.
+func AcquireLegacyBypass(deviceID string) (bool, error) {
+	res, err := db.DB.Exec(`UPDATE devices SET legacy_pop_bypass_used = 1 WHERE id = ? AND legacy_pop_bypass_used = 0`, deviceID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 // RegisterAgentToken stores an agent token in memory and persists it

@@ -351,9 +351,16 @@ func RegisterOIDCRoutes(app *fiber.App, publicAPI fiber.Router, api fiber.Router
 		if idToken.Nonce != nonce {
 			return c.Status(fiber.StatusUnauthorized).SendString("nonce mismatch")
 		}
+		// Codex #4: the email_verified claim must be present AND true.
+		// Without it, an IdP account that lets the user pick their own
+		// email claim (most IdPs do, by design) pivots straight to
+		// "log in as anyone in the tenant whose email matches". The
+		// claim is decoded as *bool so we can distinguish absent
+		// (nil) from false; both reject, but the error message tells
+		// the operator which it was.
 		var claims struct {
 			Email         string `json:"email"`
-			EmailVerified bool   `json:"email_verified"`
+			EmailVerified *bool  `json:"email_verified"`
 			Name          string `json:"name"`
 			Sub           string `json:"sub"`
 		}
@@ -362,6 +369,14 @@ func RegisterOIDCRoutes(app *fiber.App, publicAPI fiber.Router, api fiber.Router
 		}
 		if claims.Email == "" {
 			return c.Status(fiber.StatusBadRequest).SendString("provider did not return email")
+		}
+		if claims.EmailVerified == nil {
+			slog.Warn("oidc login rejected: id_token missing email_verified claim", "email", claims.Email)
+			return c.Status(fiber.StatusUnauthorized).SendString("oidc: id_token missing email_verified claim; refusing to bind identity")
+		}
+		if !*claims.EmailVerified {
+			slog.Warn("oidc login rejected: email_verified=false", "email", claims.Email)
+			return c.Status(fiber.StatusUnauthorized).SendString("oidc: email_verified=false; refusing to bind identity")
 		}
 		// JIT provision: look up by email; create if missing.
 		var (

@@ -146,6 +146,12 @@ func TestOIDC_E2E(t *testing.T) {
 	idp.nextSub = "subject-42"
 	idp.nextEmail = "alice@example.com"
 	idp.nextName = "Alice Tester"
+	// Codex #4: email_verified must be present and true for the
+	// success path. The existing E2E continues to verify the full
+	// happy flow; the three-branch matrix lives in the dedicated
+	// TestOIDC_EmailVerifiedBranches test below.
+	verified := true
+	idp.nextEmailVerified = &verified
 
 	callbackReq := httptest.NewRequest(http.MethodGet,
 		fmt.Sprintf("/api/auth/oidc/callback?state=%s&code=any-code", state), nil)
@@ -230,6 +236,12 @@ type mockIdp struct {
 	nextSub   string
 	nextEmail string
 	nextName  string
+	// nextEmailVerified controls the email_verified claim sent in the
+	// id_token. Codex #4 introduced this knob so tests can exercise
+	// the absent/false/true branches. Default zero value (nil pointer)
+	// means "omit the claim entirely" — the IdP shape an unmodified
+	// /token response uses.
+	nextEmailVerified *bool
 }
 
 func startMockOIDC(t *testing.T, priv *rsa.PrivateKey, pub *rsa.PublicKey) *mockIdp {
@@ -288,6 +300,12 @@ func startMockOIDC(t *testing.T, priv *rsa.PrivateKey, pub *rsa.PublicKey) *mock
 			"nonce": m.nextNonce,
 			"iat":   now.Unix(),
 			"exp":   now.Add(5 * time.Minute).Unix(),
+		}
+		// Codex #4: include email_verified iff the test set it. Absent
+		// pointer = absent claim, mirroring IdPs that don't issue
+		// email_verified at all.
+		if m.nextEmailVerified != nil {
+			claims["email_verified"] = *m.nextEmailVerified
 		}
 		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 		token.Header["kid"] = "test-key-1"
@@ -348,3 +366,137 @@ func readAllBody(resp *http.Response) (string, error) {
 // the linter doesn't see that as a top-level use until the test runs.
 var _ = context.TODO
 var _ = httputilv.SafeOutboundClient
+
+// TestOIDC_EmailVerifiedBranches is the Codex #4 attack-path
+// regression. The OIDC callback must reject id_tokens that do not
+// carry email_verified=true; without that check, any IdP account
+// that lets the user pick their own email claim pivots to "log in
+// as <admin email>". Codex's spec named three cases that must
+// reject (missing, false) and one that must succeed (true).
+func TestOIDC_EmailVerifiedBranches(t *testing.T) {
+	if os.Getenv("DATABASE_URL") == "" {
+		os.Setenv("DATABASE_PATH", t.TempDir()+"/oidc_email_verified.db")
+	}
+	os.Setenv("SECRETS_ENCRYPTION_KEY", "fmZn0pFd/f58gKeknlaECEbcMDh5oQ+nRhFB/sAMScY=")
+	auth.JWTSecret = "oidc-emailver-jwt-secret-which-is-long-enough-for-tests"
+	if err := db.Init(); err != nil {
+		t.Fatalf("db init: %v", err)
+	}
+	if err := db.ResetForTests(); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	t.Cleanup(func() {
+		if db.DB != nil && os.Getenv("DATABASE_URL") == "" {
+			db.DB.Close()
+		}
+	})
+
+	priv, pub := newRSAKey(t)
+	idp := startMockOIDC(t, priv, pub)
+	defer idp.server.Close()
+
+	origClient := oidcOutboundClient
+	origValidator := oidcIssuerValidator
+	oidcOutboundClient = func(d time.Duration) *http.Client {
+		return &http.Client{
+			Timeout:   d,
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}},
+		}
+	}
+	oidcIssuerValidator = func(string) error { return nil }
+	t.Cleanup(func() {
+		oidcOutboundClient = origClient
+		oidcIssuerValidator = origValidator
+	})
+
+	const tenantID = "default"
+	enc, err := crypto.Encrypt("vapor-test-secret")
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := db.DB.Exec(
+		`INSERT INTO tenant_oidc_configs (tenant_id, issuer_url, client_id, client_secret_enc, default_role, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		tenantID, idp.issuerURL, "vapor-test-client", enc, "user", 1, now, now,
+	); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	app := fiber.New(fiber.Config{DisableStartupMessage: true})
+	publicAPI := app.Group("/api", auth.RateLimiter(60, time.Minute))
+	api := app.Group("/api/v1", auth.AuthMiddleware(), auth.CSRFMiddleware())
+	RegisterOIDCRoutes(app, publicAPI, api)
+
+	truth := true
+	falsy := false
+	for _, tc := range []struct {
+		name        string
+		verified    *bool
+		wantStatus  int
+		wantSession bool
+	}{
+		{"absent_claim_rejected", nil, http.StatusUnauthorized, false},
+		{"verified_false_rejected", &falsy, http.StatusUnauthorized, false},
+		{"verified_true_accepted", &truth, http.StatusFound, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Burn fresh state per subtest so a session from the
+			// success case doesn't bleed into the rejection cases.
+			if _, err := db.DB.Exec(`DELETE FROM oidc_states`); err != nil {
+				t.Fatalf("clear states: %v", err)
+			}
+			if _, err := db.DB.Exec(`DELETE FROM user_sessions`); err != nil {
+				t.Fatalf("clear sessions: %v", err)
+			}
+			// /login to issue a fresh state row.
+			loginReq := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login?tenant="+tenantID, nil)
+			loginReq.Host = "example.com"
+			loginResp, err := app.Test(loginReq, -1)
+			if err != nil {
+				t.Fatalf("login: %v", err)
+			}
+			if loginResp.StatusCode != http.StatusFound {
+				t.Fatalf("login expected 302, got %d", loginResp.StatusCode)
+			}
+			authURL := loginResp.Header.Get("Location")
+			parsed, err := url.Parse(authURL)
+			if err != nil {
+				t.Fatalf("parse authURL: %v", err)
+			}
+			state := parsed.Query().Get("state")
+			var nonce, redirectURI string
+			if err := db.DB.QueryRow(`SELECT nonce, redirect_uri FROM oidc_states WHERE state = ?`, state).Scan(&nonce, &redirectURI); err != nil {
+				t.Fatalf("read state: %v", err)
+			}
+
+			// Configure the mock IdP for this branch.
+			idp.nextNonce = nonce
+			idp.nextSub = "subject-" + tc.name
+			idp.nextEmail = "branch-" + tc.name + "@example.com"
+			idp.nextName = "Branch " + tc.name
+			idp.nextEmailVerified = tc.verified
+
+			cbReq := httptest.NewRequest(http.MethodGet,
+				fmt.Sprintf("/api/auth/oidc/callback?state=%s&code=any", state), nil)
+			cbReq.Host = "example.com"
+			cbResp, err := app.Test(cbReq, -1)
+			if err != nil {
+				t.Fatalf("callback: %v", err)
+			}
+			if cbResp.StatusCode != tc.wantStatus {
+				body, _ := readAllBody(cbResp)
+				t.Fatalf("callback status = %d, want %d body=%s",
+					cbResp.StatusCode, tc.wantStatus, body)
+			}
+			// Sanity: a rejection must NOT create a session row.
+			var n int
+			if err := db.DB.QueryRow(`SELECT COUNT(*) FROM user_sessions`).Scan(&n); err != nil {
+				t.Fatalf("count sessions: %v", err)
+			}
+			gotSession := n > 0
+			if gotSession != tc.wantSession {
+				t.Errorf("session created = %v, want %v", gotSession, tc.wantSession)
+			}
+		})
+	}
+}

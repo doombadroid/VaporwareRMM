@@ -1022,6 +1022,12 @@ func RegisterAgentToken(token, deviceID, hostname, tenantID string) {
 	// its hash to record as previous_token_hash on the row we're about
 	// to insert. Read outside the in-memory mutex so we don't hold the
 	// cache lock across a DB call.
+	// TODO(codex-6 followup): move prior-hash read inside TokenMu —
+	// race on concurrent re-register for same (tenant, device, hostname)
+	// can cause two simultaneous writes to record the same previous_token_hash,
+	// losing one agent's true previous-token state. Spec is single-previous,
+	// but the lost-state agent's next re-register within the 60s grace window
+	// will incorrectly receive 409. See implementation report item #5.
 	var priorHash string
 	if err := db.DB.QueryRow(
 		`SELECT token_hash FROM agent_tokens

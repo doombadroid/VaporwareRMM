@@ -349,11 +349,18 @@ func (a *Agent) Start() error {
 	slog.Info("server URL", "url", a.serverURL)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/agent/run", a.authMiddleware(a.handleRunCommand))
+	// /agent/run was a server->agent push channel for shell commands.
+	// Codex Security verified that a committed pre-auth agent binary
+	// (packages/agent/vapor-agent, also vaporRMM_agent / vaporrmm-agent)
+	// served this route WITHOUT auth and executed arbitrary shell as
+	// root. Source had authMiddleware wrapping it, but a tracked
+	// binary built before that gate is the artifact running in the
+	// wild. Per the cleanup-pass contract, command delivery is
+	// pull-only — commandPollLoop fetches queued rows from the
+	// server every 15s and posts results back. There is no
+	// inbound-from-server command path. Route removed; handler
+	// deleted; binaries removed from the tree.
 	mux.HandleFunc("/metrics", a.authMiddleware(a.handleMetrics))
-	mux.HandleFunc("/agent/file-transfer", a.authMiddleware(a.handleFileTransfer))
-	mux.HandleFunc("/agent/sunshine/pin", a.authMiddleware(a.handleGetSunshinePIN))
-	mux.HandleFunc("/agent/sunshine/pair", a.authMiddleware(a.handlePairSunshine))
 
 	// Bind address: 0.0.0.0 by default so the central server can reach the agent
 	// over Tailscale or LAN. Every endpoint above is wrapped in authMiddleware
@@ -785,86 +792,6 @@ func (a *Agent) recordRTT(ms int64) {
 // ---------------------------------------------------------------------------
 // HTTP handlers
 // ---------------------------------------------------------------------------
-
-func (a *Agent) handleRunCommand(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var cmdReq struct {
-		Type    string `json:"type"`
-		Command string `json:"command"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&cmdReq); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	if cmdReq.Command == "" {
-		http.Error(w, "command field is required", http.StatusBadRequest)
-		return
-	}
-
-	cmdType := strings.ToLower(cmdReq.Type)
-	if !allowedCommandTypes[cmdType] {
-		result := CommandResult{
-			CommandID: generateCommandID(),
-			Success:   false,
-			Error:     fmt.Sprintf("unsupported command type: %q (supported: shell, script)", cmdReq.Type),
-			Timestamp: time.Now(),
-		}
-		a.addCommandResult(result)
-		writeJSON(w, http.StatusBadRequest, result)
-		return
-	}
-
-	slog.Info("executing HTTP command", "command", cmdReq.Command)
-
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-
-	// Authenticated admin RCE channel. Trust boundary is authMiddleware
-	// (bearer token from server) + Tailscale firewall on port 47991.
-	// Shell invocation is the API contract: the server side sends
-	// operator-authored commands (patch installs, service restarts) that
-	// require shell features (pipes, env, quoting). CodeQL
-	// go/command-injection is a true positive on dataflow but a false
-	// positive on intent — same risk profile as ssh.
-	// (See trust-model comment block above the removed dangerousPatterns
-	// list at the top of this file.)
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd.exe", "/C", cmdReq.Command)
-	} else {
-		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", cmdReq.Command)
-	}
-
-	outputBytes, err := cmd.CombinedOutput()
-	output := truncateOutput(outputBytes)
-
-	var success bool
-	var runErr string
-	if ctx.Err() == context.DeadlineExceeded {
-		success = false
-		runErr = "command timed out after 60s"
-	} else if err != nil {
-		success = false
-		runErr = err.Error()
-	} else {
-		success = true
-	}
-
-	result := CommandResult{
-		CommandID: generateCommandID(),
-		Success:   success,
-		Output:    output,
-		Error:     runErr,
-		Timestamp: time.Now(),
-	}
-
-	a.addCommandResult(result)
-	writeJSON(w, http.StatusOK, result)
-}
 
 // addCommandResult adds a command result to the history with bounded size.
 func (a *Agent) addCommandResult(result CommandResult) {

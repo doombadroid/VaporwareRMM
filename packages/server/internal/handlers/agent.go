@@ -139,14 +139,28 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 			popVerdict = auth.VerifyAgentPoP(tenantID, deviceID, hostname, existingAgentToken)
 			// One-time legacy bypass: an agent registered before this
 			// commit has no persisted token to present. The check fires
-			// only when (a) no active token row exists for the device
-			// AND (b) the device has not consumed its bypass yet AND (c)
-			// VAPOR_REFUSE_LEGACY_BYPASS_AFTER (if set) has not passed.
-			// PoPReject (token rows exist but presented token doesn't
-			// match) is NOT eligible — that's the take-over attempt.
+			// when (a) the device has not consumed its bypass yet AND
+			// (b) VAPOR_REFUSE_LEGACY_BYPASS_AFTER (if set) has not
+			// passed AND one of:
+			//   - PoPNoPriorToken (no active token row at all), or
+			//   - PoPReject + active token row is a pre-Codex-#6 row
+			//     (previous_token_hash IS NULL). This is the realistic
+			//     upgrade path: legacy agent has an active row but the
+			//     freshly-installed binary either generated a new
+			//     bearer or never persisted the old one, so the PoP it
+			//     presents doesn't match. Without this branch every
+			//     restarted legacy endpoint would 409 forever.
+			// PoPReject against a Codex-#6-era row (previous_token_hash
+			// IS NOT NULL) is NOT eligible — that's the take-over
+			// attempt the PoP gate was built to stop.
 			legacyBypass := false
-			if popVerdict == auth.PoPNoPriorToken && auth.IsLegacyAgentEligibleForBypass(deviceID) {
-				legacyBypass = true
+			if auth.IsLegacyAgentEligibleForBypass(deviceID) {
+				switch {
+				case popVerdict == auth.PoPNoPriorToken:
+					legacyBypass = true
+				case popVerdict == auth.PoPReject && auth.ActiveTokenIsLegacy(tenantID, deviceID, hostname):
+					legacyBypass = true
+				}
 			}
 			switch {
 			case popVerdict == auth.PoPAcceptCurrent || popVerdict == auth.PoPAcceptGraceRotationAck || popVerdict == auth.PoPAcceptGraceCrashRecovery || legacyBypass:

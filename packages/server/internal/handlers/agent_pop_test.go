@@ -395,6 +395,78 @@ func TestReRegister_LegacyBypassRefusedAfterCutoff(t *testing.T) {
 	r2.Body.Close()
 }
 
+// TestReRegister_LegacyBypassOnPoPReject covers the realistic upgrade
+// path Codex flagged: a pre-Codex-#6 agent has an active agent_tokens
+// row (previous_token_hash IS NULL), the operator deploys the new
+// binary, the agent restarts with a fresh-generated bearer and either
+// no persisted token or a stale persisted token. VerifyAgentPoP
+// returns PoPReject (the active row exists but presented PoP doesn't
+// match). Without this branch, every restarted legacy endpoint would
+// 409 forever.
+func TestReRegister_LegacyBypassOnPoPReject(t *testing.T) {
+	app := popTestEnv(t)
+	t1 := strings.Repeat("a", 40)
+
+	r1 := registerOnce(t, app, t1, "", "host-pop-legacy-reject", "aa:bb:cc:dd:ee:08")
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("first register expected 200, got %d", r1.StatusCode)
+	}
+	deviceID := deviceIDFor(t, r1)
+
+	// First registration produces an agent_tokens row with
+	// previous_token_hash IS NULL — that's how the discriminator
+	// in ActiveTokenIsLegacy identifies pre-Codex-#6 rows.
+	var hasPrior bool
+	if err := db.DB.QueryRow(
+		`SELECT previous_token_hash IS NOT NULL FROM agent_tokens WHERE device_id = ? AND (superseded_at IS NULL OR superseded_at = 0)`,
+		deviceID,
+	).Scan(&hasPrior); err != nil {
+		t.Fatalf("read prior: %v", err)
+	}
+	if hasPrior {
+		t.Fatal("first register should leave previous_token_hash NULL")
+	}
+
+	// Upgraded agent re-registers with a NEW bearer and a wrong
+	// X-Existing-Agent-Token (simulating either a stale persisted
+	// token from before upgrade or a generated value the agent had
+	// no way to know matched the DB row). VerifyAgentPoP → PoPReject.
+	// ActiveTokenIsLegacy → true. IsLegacyAgentEligibleForBypass →
+	// true. Bypass fires once → 200.
+	t2 := strings.Repeat("b", 40)
+	wrongExisting := strings.Repeat("x", 40)
+	r2 := registerOnce(t, app, t2, wrongExisting, "host-pop-legacy-reject", "aa:bb:cc:dd:ee:08")
+	if r2.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(r2.Body)
+		t.Fatalf("legacy bypass on PoPReject expected 200, got %d body=%s", r2.StatusCode, string(body))
+	}
+	r2.Body.Close()
+
+	time.Sleep(100 * time.Millisecond)
+	var bypassRows int
+	if err := db.DB.QueryRow(
+		`SELECT COUNT(*) FROM audit_logs WHERE action = 'legacy_agent_pop_bypass' AND resource_id = ?`,
+		deviceID,
+	).Scan(&bypassRows); err != nil {
+		t.Fatalf("audit count: %v", err)
+	}
+	if bypassRows < 1 {
+		t.Errorf("expected legacy_agent_pop_bypass audit row, got %d", bypassRows)
+	}
+
+	// Second re-register with another wrong PoP MUST 409 — the
+	// bypass latch is consumed and the active row is now a Codex-#6
+	// row (previous_token_hash carries t1's hash).
+	t3 := strings.Repeat("c", 40)
+	stillWrong := strings.Repeat("y", 40)
+	r3 := registerOnce(t, app, t3, stillWrong, "host-pop-legacy-reject", "aa:bb:cc:dd:ee:08")
+	if r3.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(r3.Body)
+		t.Fatalf("second register after bypass expected 409, got %d body=%s", r3.StatusCode, string(body))
+	}
+	r3.Body.Close()
+}
+
 // TestConflictWebhookRateLimit: 10 conflicts on the same device
 // within 1 hour fire exactly 1 webhook + 10 audit rows.
 func TestConflictWebhookRateLimit(t *testing.T) {

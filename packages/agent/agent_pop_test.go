@@ -272,3 +272,57 @@ func TestAgent_RotationFailsAtomicallyOnPersistError(t *testing.T) {
 		t.Errorf("seed state file overwritten: got %q want %q", persisted.APIToken, seed.APIToken)
 	}
 }
+
+// TestAgent_DiscardsPersistedStateOnIdentityMismatch covers the
+// Codex #6 P2 fix at packages/agent/main.go:146: the golden-image
+// case where one installed agent gets cloned to many VMs. The
+// persisted token is bound to (hostname, MAC) at save time; if
+// either has changed when the agent next boots, the token is
+// discarded and the clone re-registers fresh.
+//
+// We can't change the live os.Hostname() / MAC at test time, so we
+// seed the state file with deliberately-wrong fingerprint values
+// and assert NewAgent ignores the persisted token+device_id.
+func TestAgent_DiscardsPersistedStateOnIdentityMismatch(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "agent-state.json")
+	seed := agentState{
+		DeviceID:          "device-clone-source",
+		Hostname:          "clone-source-host",
+		APIToken:          "golden-image-bearer-1234567890abcd",
+		PersistedHostname: "different-host-than-current",
+		PersistedMAC:      "ff:ff:ff:ff:ff:ff",
+	}
+	body, _ := json.Marshal(seed)
+	if err := os.WriteFile(statePath, body, 0600); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	t.Setenv("VAPOR_AGENT_STATE_FILE_OVERRIDE", statePath)
+	t.Setenv("VAPOR_ROTATE_TOKEN", "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device_id":"device-clone-source","status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	agent, err := NewAgent(srv.URL, 47991, "")
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+
+	// The persisted token MUST be discarded because the fingerprint
+	// doesn't match this host. The agent generated a fresh token
+	// instead, so apiToken should be non-empty and != the seed.
+	if agent.apiToken == seed.APIToken {
+		t.Errorf("agent kept the cloned-image bearer; expected discard. got %q", agent.apiToken)
+	}
+	if agent.apiToken == "" {
+		t.Errorf("agent ended up with no token at all; should have generated a fresh one")
+	}
+	// device_id should also be discarded — a cloned image must
+	// re-register fresh, not inherit the source's identity row.
+	if agent.deviceID == seed.DeviceID {
+		t.Errorf("agent inherited cloned-image device_id %q; expected fresh registration", agent.deviceID)
+	}
+}

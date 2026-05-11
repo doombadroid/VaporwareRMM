@@ -139,8 +139,29 @@ func NewAgent(serverURL string, port int, apiToken string) (*Agent, error) {
 	if err != nil {
 		hostname = "unknown"
 	}
+	mac := currentMACAddress()
 
 	persisted := loadAgentState()
+	// Identity binding: if the persisted state belongs to a different
+	// host (e.g., a VM cloned from a golden image after the agent was
+	// installed), discard the persisted bearer + device_id. Re-using
+	// either would cause every clone to fight over one agent_tokens
+	// row on the server, with 401/online flapping as each clone
+	// re-registers and supersedes the previous. The compare runs only
+	// when both halves of the persisted fingerprint are present so a
+	// state file written by an older agent (no fingerprint) keeps
+	// working — that pre-existing fleet has already been deployed.
+	if persisted.PersistedHostname != "" && persisted.PersistedMAC != "" {
+		if persisted.PersistedHostname != hostname || persisted.PersistedMAC != mac {
+			slog.Warn("persisted agent state belongs to a different host (likely cloned image); discarding token and re-registering fresh",
+				"persisted_hostname", persisted.PersistedHostname,
+				"current_hostname", hostname,
+				"persisted_mac", persisted.PersistedMAC,
+				"current_mac", mac)
+			persisted = agentState{}
+		}
+	}
+
 	if apiToken == "" {
 		apiToken = persisted.APIToken
 	}
@@ -574,7 +595,13 @@ func (a *Agent) registerWithServer() error {
 		deviceID = a.deviceID
 	}
 
-	if err := saveAgentState(agentState{DeviceID: deviceID, Hostname: a.hostname, APIToken: newToken}); err != nil {
+	if err := saveAgentState(agentState{
+		DeviceID:          deviceID,
+		Hostname:          a.hostname,
+		APIToken:          newToken,
+		PersistedHostname: a.hostname,
+		PersistedMAC:      currentMACAddress(),
+	}); err != nil {
 		slog.Error("could not persist rotated agent state; keeping previous in-memory bearer so the rotation can be retried", "error", err)
 		return fmt.Errorf("persist agent state after register: %w", err)
 	}
@@ -1338,10 +1365,37 @@ func agentStateFile() string {
 // fleet-grade Russian roulette — the new token never matched
 // previous_token_hash on the server row, so the server's PoP gate
 // would reject every restart as a take-over attempt.
+//
+// PersistedHostname and PersistedMAC capture the host identity at the
+// time of save. NewAgent compares them to the live values and
+// discards the persisted token on mismatch — the golden-image
+// scenario where one installed agent gets cloned to many VMs would
+// otherwise have every clone fighting over a single bearer.
 type agentState struct {
-	DeviceID string `json:"device_id"`
-	Hostname string `json:"hostname"`
-	APIToken string `json:"api_token,omitempty"`
+	DeviceID         string `json:"device_id"`
+	Hostname         string `json:"hostname"`
+	APIToken         string `json:"api_token,omitempty"`
+	PersistedHostname string `json:"persisted_hostname,omitempty"`
+	PersistedMAC     string `json:"persisted_mac,omitempty"`
+}
+
+// currentMACAddress returns the first non-empty hardware address
+// reported by the OS. Used at agent boot to compare against the
+// PersistedMAC stamped on the state file. Returns "" if no interface
+// reports a MAC (extremely unusual; treat as "no MAC fingerprint
+// available" rather than failing — the persisted-MAC check is one
+// half of the identity binding, hostname is the other).
+func currentMACAddress() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if len(iface.HardwareAddr) > 0 {
+			return iface.HardwareAddr.String()
+		}
+	}
+	return ""
 }
 
 // loadDeviceID reads a previously registered device ID from disk.
@@ -1373,7 +1427,13 @@ func loadAgentState() agentState {
 // call sites that care about persistence use saveAgentState directly.
 func saveDeviceID(deviceID, hostname string) {
 	prev := loadAgentState()
-	if err := saveAgentState(agentState{DeviceID: deviceID, Hostname: hostname, APIToken: prev.APIToken}); err != nil {
+	if err := saveAgentState(agentState{
+		DeviceID:          deviceID,
+		Hostname:          hostname,
+		APIToken:          prev.APIToken,
+		PersistedHostname: hostname,
+		PersistedMAC:      currentMACAddress(),
+	}); err != nil {
 		slog.Warn("could not save device id", "error", err)
 	}
 }

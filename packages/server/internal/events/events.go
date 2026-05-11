@@ -154,13 +154,33 @@ func AuditLog(userID, action, resourceType, resourceID, details, ipAddress strin
 	AuditLogTenant("default", userID, action, resourceType, resourceID, details, ipAddress)
 }
 
+// asyncOpsWG tracks every fire-and-forget goroutine spawned by this
+// package so tests can drain them before closing the DB. Production
+// code never blocks on it; the WaitGroup is purely a test-time aid
+// against the test-pollution race where a prior test's audit /
+// webhook goroutine writes to a global db.DB that a later test has
+// already reassigned.
+var asyncOpsWG sync.WaitGroup
+
+// WaitAsyncOpsForTests blocks until every audit/webhook goroutine
+// spawned by this package has returned. Production code never calls
+// this. Test cleanup calls it before closing the test DB so the
+// pending writes complete against the connection they intended.
+func WaitAsyncOpsForTests() {
+	asyncOpsWG.Wait()
+}
+
 // AuditLogTenant records an admin action scoped to a tenant. Fires the
 // chained insert from a background goroutine so handler latency
 // doesn't depend on the chain lock; the goroutine itself is
 // synchronous-on-the-mutex (auditChainMu) so concurrent callers see a
 // well-defined chain.
 func AuditLogTenant(tenantID, userID, action, resourceType, resourceID, details, ipAddress string) {
-	go AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, details, ipAddress)
+	asyncOpsWG.Add(1)
+	go func() {
+		defer asyncOpsWG.Done()
+		AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, details, ipAddress)
+	}()
 }
 
 // AuditLogTenantSync is the synchronous variant. Tests use it directly
@@ -199,10 +219,282 @@ func AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, deta
 	}
 }
 
+// conflictWebhookBucket tracks per-(tenant, device) conflict bursts.
+// windowStart is the Unix timestamp of the first fire in the current
+// 1-hour window; count is the number of conflicts (fired AND
+// suppressed) inside that window.
+//
+// Used only when Redis is not configured. With Redis configured, the
+// per-(tenant, device) counter lives in Redis (see
+// redis.IncrementConflictWebhook) so the limit holds across server
+// instances. The in-memory map is the degraded-mode fallback so the
+// limit is never silently disabled on a Redis outage.
+type conflictWebhookBucket struct {
+	windowStart int64
+	count       int
+}
+
+const (
+	conflictWebhookWindowSeconds int64 = 3600
+	// conflictWebhookBucketMax bounds the degraded-mode in-memory
+	// fallback map so a long-running attack against many synthetic
+	// device IDs can't OOM the server. Sized so a real fleet of
+	// 100k endpoints under attack still fits without refusing new
+	// entries; above that we refuse and log instead of growing.
+	conflictWebhookBucketMax = 100_000
+)
+
+var (
+	conflictWebhookMu      sync.Mutex
+	conflictWebhookBuckets = make(map[string]*conflictWebhookBucket)
+)
+
+// PruneConflictWebhookBuckets removes degraded-mode buckets whose
+// windows have expired (i.e., windowStart + window < now). Called
+// every conflictWebhookPruneInterval by a package-level goroutine
+// (StartConflictWebhookBucketPruner) and on every entry that would
+// push the map past conflictWebhookBucketMax (defensive: ensures the
+// prune happens immediately rather than waiting up to 15 minutes).
+//
+// Exported for direct testing without spinning up the pruner
+// goroutine. Production code does not call this; the pruner does.
+func PruneConflictWebhookBuckets(nowUnix int64) int {
+	conflictWebhookMu.Lock()
+	defer conflictWebhookMu.Unlock()
+	removed := 0
+	for k, b := range conflictWebhookBuckets {
+		if b.windowStart == 0 || nowUnix-b.windowStart >= conflictWebhookWindowSeconds {
+			delete(conflictWebhookBuckets, k)
+			removed++
+		}
+	}
+	return removed
+}
+
+// conflictWebhookPruneInterval is how often the background goroutine
+// sweeps the degraded-mode bucket map. 15 minutes balances staleness
+// (entries linger at most window+15min) against wasted wakeups on
+// idle deployments.
+const conflictWebhookPruneInterval = 15 * time.Minute
+
+var (
+	conflictWebhookPrunerOnce sync.Once
+	conflictWebhookPrunerStop = make(chan struct{})
+)
+
+// StartConflictWebhookBucketPruner spawns the background pruner.
+// Safe to call multiple times; only the first call starts the
+// goroutine. Production wires this in main; tests usually drive
+// PruneConflictWebhookBuckets directly to avoid relying on a
+// real-time ticker.
+func StartConflictWebhookBucketPruner() {
+	conflictWebhookPrunerOnce.Do(func() {
+		go func() {
+			t := time.NewTicker(conflictWebhookPruneInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					PruneConflictWebhookBuckets(time.Now().Unix())
+				case <-conflictWebhookPrunerStop:
+					return
+				}
+			}
+		}()
+	})
+}
+
+// conflictWebhookLimiter is the indirection seam tests use to verify
+// the Redis path without standing up a real Redis. Production code
+// hits redisIncrementConflictWebhook which delegates to the redis
+// package.
+var conflictWebhookLimiter = redisIncrementConflictWebhook
+
+func redisIncrementConflictWebhook(tenantID, deviceID string, window time.Duration) (int64, bool) {
+	return redis.IncrementConflictWebhook(tenantID, deviceID, window)
+}
+
+// SetConflictWebhookLimiterForTests swaps the Redis call for a fake.
+// Pass nil to restore the production path. Production code never
+// calls this.
+func SetConflictWebhookLimiterForTests(f func(tenantID, deviceID string, window time.Duration) (int64, bool)) {
+	if f == nil {
+		conflictWebhookLimiter = redisIncrementConflictWebhook
+		return
+	}
+	conflictWebhookLimiter = f
+}
+
+// TriggerRegistrationConflictWebhook fires the
+// device.registration_conflict webhook for the given device, subject
+// to the Codex #6 spec's per-device rate limit (1 webhook per device
+// per hour). The rate limit lives in Redis when configured so the
+// 1/device/hour cap holds across server instances; on Redis outage or
+// when Redis is not configured, the limiter falls back to the
+// in-memory bucket map with a one-time warn so operators know they're
+// in degraded (per-process) mode.
+//
+// Audit logs are NOT written here — the registration handler logs
+// every conflict unconditionally. This function only governs whether
+// the external webhook delivery fires.
+func TriggerRegistrationConflictWebhook(tenantID, deviceID, claimedHostname, claimedMAC, sourceIP string) {
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	now := time.Now().Unix()
+
+	window := time.Duration(conflictWebhookWindowSeconds) * time.Second
+	fire := false
+	var fireCount int64
+
+	if count, ok := conflictWebhookLimiter(tenantID, deviceID, window); ok {
+		// Redis path: count is the post-INCR value. count==1 means
+		// this is the first conflict in the current window; >1 means
+		// a prior server-instance already fired and we suppress.
+		fireCount = count
+		fire = count == 1
+	} else {
+		// Degraded mode: Redis is unavailable. Fall back to the
+		// per-process in-memory map so the rate limit is not
+		// silently disabled. Emit a one-shot warn (rate-limited
+		// against the same map) so operators see it without
+		// flooding logs.
+		warnDegradedConflictLimiter(tenantID, deviceID, now)
+		key := tenantID + "|" + deviceID
+		conflictWebhookMu.Lock()
+		bucket, ok := conflictWebhookBuckets[key]
+		if !ok {
+			// Defense-in-depth: cap the map at
+			// conflictWebhookBucketMax entries. If we're at the cap,
+			// try to prune expired entries inline before refusing.
+			// This converts a potential OOM during a high-cardinality
+			// attack into a noisy degraded-mode response.
+			if len(conflictWebhookBuckets) >= conflictWebhookBucketMax {
+				// Inline prune attempt under the lock we already hold.
+				for k, b := range conflictWebhookBuckets {
+					if b.windowStart == 0 || now-b.windowStart >= conflictWebhookWindowSeconds {
+						delete(conflictWebhookBuckets, k)
+					}
+				}
+			}
+			if len(conflictWebhookBuckets) >= conflictWebhookBucketMax {
+				conflictWebhookMu.Unlock()
+				slog.Warn("conflict webhook in-memory bucket map at cap; refusing new entry (rate limit becomes per-process best-effort for this device)",
+					"tenant_id", tenantID, "device_id", deviceID, "cap", conflictWebhookBucketMax)
+				// Fire the webhook this time and skip the rate
+				// limit — being noisy is preferable to being silent.
+				fire = true
+				fireCount = 1
+				goto afterLimiter
+			}
+			bucket = &conflictWebhookBucket{}
+			conflictWebhookBuckets[key] = bucket
+		}
+		if bucket.windowStart == 0 || now-bucket.windowStart >= conflictWebhookWindowSeconds {
+			bucket.windowStart = now
+			bucket.count = 1
+			fire = true
+		} else {
+			bucket.count++
+		}
+		fireCount = int64(bucket.count)
+		conflictWebhookMu.Unlock()
+	afterLimiter:
+	}
+
+	if !fire {
+		return
+	}
+	TriggerWebhooks(tenantID, "device.registration_conflict", map[string]interface{}{
+		"device_id":                   deviceID,
+		"tenant_id":                   tenantID,
+		"attempt_count_within_window": fireCount,
+		"claimed_hostname":            claimedHostname,
+		"claimed_mac":                 claimedMAC,
+		"source_ip":                   sourceIP,
+		"window_seconds":              conflictWebhookWindowSeconds,
+		"timestamp":                   now,
+	})
+}
+
+// conflictWebhookDegradedWarn tracks the last time we logged the
+// degraded-mode warning, per (tenant, device), so a Redis outage
+// during a burst doesn't flood logs.
+var (
+	conflictWebhookDegradedWarnMu sync.Mutex
+	conflictWebhookDegradedWarnAt = make(map[string]int64)
+)
+
+func warnDegradedConflictLimiter(tenantID, deviceID string, now int64) {
+	key := tenantID + "|" + deviceID
+	conflictWebhookDegradedWarnMu.Lock()
+	last := conflictWebhookDegradedWarnAt[key]
+	if now-last < conflictWebhookWindowSeconds {
+		conflictWebhookDegradedWarnMu.Unlock()
+		return
+	}
+	conflictWebhookDegradedWarnAt[key] = now
+	conflictWebhookDegradedWarnMu.Unlock()
+	slog.Warn("conflict webhook rate limit running in per-process degraded mode (Redis unavailable)",
+		"tenant_id", tenantID, "device_id", deviceID)
+}
+
+// ResetRegistrationConflictWebhookBucketsForTests clears the
+// per-device webhook rate-limit state so tests can run in isolation.
+// Production code never calls this.
+func ResetRegistrationConflictWebhookBucketsForTests() {
+	conflictWebhookMu.Lock()
+	conflictWebhookBuckets = make(map[string]*conflictWebhookBucket)
+	conflictWebhookMu.Unlock()
+}
+
+// AdvanceConflictWebhookWindowStartForTests rewinds a bucket's
+// windowStart to simulate the passage of time. Production code never
+// calls this.
+func AdvanceConflictWebhookWindowStartForTests(tenantID, deviceID string, deltaSeconds int64) {
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	key := tenantID + "|" + deviceID
+	conflictWebhookMu.Lock()
+	if bucket, ok := conflictWebhookBuckets[key]; ok {
+		bucket.windowStart -= deltaSeconds
+	}
+	conflictWebhookMu.Unlock()
+}
+
+// Webhook outbound is gated by the SSRF helpers in httputil. Tests
+// that need to deliver to a 127.0.0.1 httptest server swap these
+// out for permissive variants; production never touches them. The
+// pointers are concurrency-safe to swap before the test sends any
+// request because no concurrent webhook is in flight at that point.
+var (
+	webhookHostValidator = httputil.RejectPrivateHost
+	webhookOutboundClient = httputil.SafeOutboundClient
+)
+
+// SetWebhookOutboundForTests swaps both SSRF guards with permissive
+// variants so a 127.0.0.1 httptest destination is reachable. Pass
+// nil to restore the production defaults.
+func SetWebhookOutboundForTests(validator func(string) error, client func(time.Duration) *http.Client) {
+	if validator == nil {
+		webhookHostValidator = httputil.RejectPrivateHost
+	} else {
+		webhookHostValidator = validator
+	}
+	if client == nil {
+		webhookOutboundClient = httputil.SafeOutboundClient
+	} else {
+		webhookOutboundClient = client
+	}
+}
+
 // TriggerWebhooks fires webhooks subscribed in the given tenant for the named event.
 // Pass tenantID="" to fan out across all tenants (system events).
 func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
+	asyncOpsWG.Add(1)
 	go func() {
+		defer asyncOpsWG.Done()
 		var rows *sql.Rows
 		var err error
 		if tenantID == "" {
@@ -233,7 +525,7 @@ func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
 			// when the webhook row was created, but DNS rebinding lets a
 			// public hostname resolve to a private IP minutes later. The
 			// SafeOutboundClient also blocks redirect-based bypasses.
-			if err := httputil.RejectPrivateHost(urlStr); err != nil {
+			if err := webhookHostValidator(urlStr); err != nil {
 				slog.Warn("webhook destination blocked by SSRF guard", "webhook_id", id, "error", err)
 				continue
 			}
@@ -247,7 +539,7 @@ func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
 				req.Header.Set("X-VaporRMM-Signature", hex.EncodeToString(sig.Sum(nil)))
 			}
 
-			resp, err := httputil.SafeOutboundClient(10 * time.Second).Do(req)
+			resp, err := webhookOutboundClient(10 * time.Second).Do(req)
 			if err != nil {
 				slog.Warn("webhook delivery failed", "webhook_id", id, "error", err)
 				continue
@@ -259,7 +551,11 @@ func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
 		}
 	}()
 
-	go TriggerEmailAlerts(tenantID, event, payload)
+	asyncOpsWG.Add(1)
+	go func() {
+		defer asyncOpsWG.Done()
+		TriggerEmailAlerts(tenantID, event, payload)
+	}()
 }
 
 // TriggerEmailAlerts loads SMTP settings and alert rules for the given tenant

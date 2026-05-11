@@ -102,6 +102,20 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		agentVersion, _ := regInfo["agent_version"].(string)
 		osClass := sysfeatures.ClassifyOS(osName)
 
+		// Codex #6: on the re-registration branch we require the caller
+		// to prove possession of the device's currently-bound agent
+		// token (or the previous one inside the 60s rotation grace
+		// window). Without that gate, anyone holding the tenant's
+		// REGISTRATION_SECRET could take over any device by guessing
+		// its hostname+MAC. The header is plaintext; the comparison
+		// hashes before comparing so a timing oracle on the row's
+		// previous_token_hash can't leak the prior secret. Header on
+		// FIRST registration is ignored — the no-prior-token path is
+		// the legitimate first-INSERT case (and, on a hostname-match
+		// where the device row has lost every token, the
+		// legacy-bypass case wired up in a later commit).
+		existingAgentToken := strings.TrimPrefix(c.Get("X-Existing-Agent-Token"), "Bearer ")
+
 		// Re-registration check + INSERT runs under db.DedupMu so a
 		// concurrent dedup pass can't race with this critical section.
 		// Without the lock, the dedup migration could be midway
@@ -118,15 +132,106 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		).Scan(&existingID)
 		var deviceID string
 		var registered bool
+		var popVerdict auth.PoPVerdict = auth.PoPNoPriorToken
 		switch {
 		case err == nil && existingID != "":
 			deviceID = existingID
-			if _, err := db.DB.Exec(
-				`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
-				localIP, osName, osVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
-			); err != nil {
+			popVerdict = auth.VerifyAgentPoP(tenantID, deviceID, hostname, existingAgentToken)
+			// One-time legacy bypass: an agent registered before this
+			// commit has no persisted token to present. The check fires
+			// when (a) the device has not consumed its bypass yet AND
+			// (b) VAPOR_REFUSE_LEGACY_BYPASS_AFTER (if set) has not
+			// passed AND one of:
+			//   - PoPNoPriorToken (no active token row at all), or
+			//   - PoPReject + active token row is a pre-Codex-#6 row
+			//     (previous_token_hash IS NULL). This is the realistic
+			//     upgrade path: legacy agent has an active row but the
+			//     freshly-installed binary either generated a new
+			//     bearer or never persisted the old one, so the PoP it
+			//     presents doesn't match. Without this branch every
+			//     restarted legacy endpoint would 409 forever.
+			// PoPReject against a Codex-#6-era row (previous_token_hash
+			// IS NOT NULL) is NOT eligible — that's the take-over
+			// attempt the PoP gate was built to stop.
+			// Decide eligibility first, then atomically claim the
+			// one-time latch. The latch claim and the eligibility
+			// check are split because:
+			//   1) auth.IsLegacyAgentEligibleForBypass owns the
+			//      env-cutoff check, which is process-level state
+			//      that doesn't belong in an SQL predicate.
+			//   2) auth.ActiveTokenIsLegacy reads a stable
+			//      post-migration value (is_legacy_pre_codex_6 on
+			//      the active row).
+			//   3) auth.AcquireLegacyBypass is the atomic write that
+			//      serializes concurrent claimants — exactly one
+			//      caller flips legacy_pop_bypass_used from 0 to 1
+			//      and gets true; everyone else gets false.
+			legacyBypassEligible := false
+			if auth.IsLegacyAgentEligibleForBypass(deviceID) {
+				switch {
+				case popVerdict == auth.PoPNoPriorToken:
+					legacyBypassEligible = true
+				case popVerdict == auth.PoPReject && auth.ActiveTokenIsLegacy(tenantID, deviceID, hostname):
+					legacyBypassEligible = true
+				}
+			}
+			legacyBypass := false
+			if legacyBypassEligible {
+				claimed, err := auth.AcquireLegacyBypass(deviceID)
+				if err != nil {
+					slog.Warn("could not acquire legacy bypass latch", "device_id", deviceID, "error", err)
+				}
+				legacyBypass = claimed
+			}
+			switch {
+			case popVerdict == auth.PoPAcceptCurrent || popVerdict == auth.PoPAcceptGraceRotationAck || popVerdict == auth.PoPAcceptGraceCrashRecovery || legacyBypass:
+				// PoP satisfied (current/grace) OR one-time legacy
+				// bypass. UPDATE the device row and proceed to token
+				// rotation. legacy_pop_bypass_used was already flipped
+				// to 1 atomically inside AcquireLegacyBypass.
+				if _, err := db.DB.Exec(
+					`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
+					localIP, osName, osVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
+				); err != nil {
+					db.DedupMu.Unlock()
+					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
+				}
+				if popVerdict == auth.PoPAcceptGraceRotationAck || popVerdict == auth.PoPAcceptGraceCrashRecovery {
+					events.AuditLogTenant(tenantID, "system", "device.register.pop_grace", "device", deviceID,
+						fmt.Sprintf("grace_window_pop_accept verdict=%s hostname=%s ip=%s", popVerdict.String(), hostname, c.IP()),
+						c.IP())
+				}
+				if legacyBypass {
+					// WARN level intentionally — the bypass is a known
+					// trust-on-first-use carve-out for pre-Codex-#6
+					// agents and operators should be able to see it
+					// happen in the log without grepping at debug
+					// verbosity.
+					slog.Warn("legacy agent pre-Codex-#6 pop bypass consumed", "device_id", deviceID, "hostname", hostname, "ip", c.IP())
+					events.AuditLogTenant(tenantID, "system", "legacy_agent_pop_bypass", "device", deviceID,
+						fmt.Sprintf("legacy_agent_pop_bypass hostname=%s ip=%s", hostname, c.IP()),
+						c.IP())
+				}
+			default:
+				// PoP rejected. The dedup lock is released before the
+				// audit/webhook hooks fire — they don't touch the
+				// devices/agent_tokens critical section and we want
+				// concurrent legitimate re-registers to proceed.
 				db.DedupMu.Unlock()
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
+				events.AuditLogTenant(tenantID, "system", "device.register.pop_rejected", "device", deviceID,
+					fmt.Sprintf("pop_rejected verdict=%s claimed_hostname=%s claimed_mac=%s ip=%s",
+						popVerdict.String(), hostname, macAddr, c.IP()),
+					c.IP())
+				// Webhook fires at most once per device per hour; the
+				// audit row above is unconditional. Bucket count
+				// accumulates between fires so the next fire's
+				// payload reflects the full burst.
+				events.TriggerRegistrationConflictWebhook(tenantID, deviceID, hostname, macAddr, c.IP())
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+					"error":   "Device exists; proof-of-possession required",
+					"message": "This hostname is already registered. Re-registration requires presenting the current agent token in the X-Existing-Agent-Token header. If the agent has lost its token, an administrator must remove the device first.",
+					"code":    409,
+				})
 			}
 		default:
 			deviceID = uuid.New().String()

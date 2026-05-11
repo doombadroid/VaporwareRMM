@@ -87,6 +87,61 @@ func TestAgentBinaryHasNoHardcodedSunshineCreds(t *testing.T) {
 	}
 }
 
+// TestAgentSourceHasNoHardcodedSunshinePassword catches the same
+// class of bug as TestAgentBinaryHasNoHardcodedSunshineCreds but at
+// the source level: the binary test passes today because Go
+// materializes JSON literals at runtime, so hard-coded password
+// fields inside json.Marshal calls don't appear as contiguous
+// strings in the linked binary. A reviewer reading the source can
+// still see "password": "vaporrmm" and the next person to wire that
+// dead route back in regresses Codex #2.
+//
+// Verification pass after commit 3eafb89 found exactly this in
+// sunshine_pair.go (handlePairSunshine, submitSunshinePIN,
+// retrySubmitWithLegacyAuth). sunshine_pair.go was deleted; this
+// test makes the deletion permanent.
+func TestAgentSourceHasNoHardcodedSunshinePassword(t *testing.T) {
+	forbidden := []string{
+		`"password":"vaporrmm"`,
+		`"password": "vaporrmm"`,
+		`vaporrmm:vaporrmm`,
+	}
+	root := "."
+	var offenders []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		// The test file itself names the forbidden literals so it can
+		// assert on them. Skip it.
+		if filepath.Base(path) == "main_test.go" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, needle := range forbidden {
+			if bytes.Contains(data, []byte(needle)) {
+				offenders = append(offenders, path+" contains "+needle)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	for _, o := range offenders {
+		t.Errorf("Codex #2 source regression: %s", o)
+	}
+}
+
 // TestAgentMetricsStillBearerGated is the verification step from the
 // Codex #1 scope: every other route on the agent's listener stays
 // bearer-gated. /metrics is the only remaining route after the run

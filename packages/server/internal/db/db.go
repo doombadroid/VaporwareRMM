@@ -1122,6 +1122,91 @@ func RunMigrations(dialect string) error {
 			// 401-flapping during rotation.
 			SQL: `ALTER TABLE agent_tokens ADD COLUMN superseded_at INTEGER NOT NULL DEFAULT 0;`,
 		},
+		// Codex #6: re-registration hijack fix. The current re-register
+		// handler matches an existing device by (tenant_id, hostname,
+		// mac_address) — all client-controlled — and silently rotates
+		// its token. Anyone holding REGISTRATION_SECRET can take over
+		// any device by claiming its hostname+MAC. The fix requires the
+		// caller to prove possession of either the active token or the
+		// recently-rotated previous token (60s grace window for
+		// in-flight heartbeats and benign rotation races).
+		//
+		// Migrations 045-048 each carry one DDL statement so the
+		// runner's "tolerate duplicate column" branch can never mask a
+		// partial failure of one statement inside a bundle. Previously
+		// a single migration 045 bundled four ALTER/CREATE statements
+		// in one Exec; if a later statement failed after an earlier
+		// one succeeded, the version was still recorded as applied and
+		// the remaining DDL would be silently skipped forever.
+		{
+			Version: "045",
+			Name:    "agent_tokens_add_previous_token_hash",
+			// Holds the hash of the immediately-prior token for the
+			// active row. Single-step memory, not a chain (proposal-
+			// locked). Backs the PoP grace window.
+			SQL: `ALTER TABLE agent_tokens ADD COLUMN previous_token_hash TEXT;`,
+		},
+		{
+			Version: "046",
+			Name:    "agent_tokens_add_previous_token_rotated_at",
+			// Unix timestamp of when previous_token_hash was rotated
+			// off. The grace-window PoP check compares (now - this) to
+			// AgentPoPGraceWindow.
+			SQL: `ALTER TABLE agent_tokens ADD COLUMN previous_token_rotated_at INTEGER;`,
+		},
+		{
+			Version: "047",
+			Name:    "devices_add_legacy_pop_bypass_used",
+			// One-time latch per device for the pre-Codex-#6 migration
+			// bypass. Agents built before this commit do not carry a
+			// persisted token to present; the bypass lets each device
+			// re-register exactly once, after which the device is on
+			// the standard PoP track for every subsequent re-register.
+			SQL: `ALTER TABLE devices ADD COLUMN legacy_pop_bypass_used INTEGER NOT NULL DEFAULT 0;`,
+		},
+		{
+			Version: "048",
+			Name:    "agent_tokens_active_device_index",
+			// Speeds up the per-(tenant, device, hostname) active-row
+			// lookup that runs on every re-register PoP check and on
+			// every agent token rotation.
+			SQL: `CREATE INDEX IF NOT EXISTS idx_agent_tokens_active_device ON agent_tokens(tenant_id, device_id, hostname, superseded_at);`,
+		},
+		{
+			Version: "049",
+			Name:    "agent_tokens_add_is_legacy_pre_codex_6",
+			// Explicit pre-Codex-#6 discriminator. The first PR-review
+			// pass used `previous_token_hash IS NULL` to detect legacy
+			// rows, but Codex's second pass pointed out that brand-new
+			// Codex-#6 rows also have NULL there (until first rotation),
+			// so a fresh registration would still qualify for the
+			// one-time bypass — re-opening a fleet-wide hijack primitive
+			// on every newly-enrolled device. Replace the inferred
+			// discriminator with an explicit column.
+			//
+			// Migration 049 adds the column (default 0 for both
+			// existing and new rows, courtesy of the NOT NULL DEFAULT
+			// clause). Migration 050 then flips the rows that existed
+			// BEFORE Codex #6 landed to 1, marking them as legacy.
+			// New INSERTs (which only happen AFTER the migration runs
+			// at server startup) get the default 0.
+			SQL: `ALTER TABLE agent_tokens ADD COLUMN is_legacy_pre_codex_6 INTEGER NOT NULL DEFAULT 0;`,
+		},
+		{
+			Version: "050",
+			Name:    "agent_tokens_mark_existing_as_legacy",
+			// One-time data migration: every row that already exists
+			// at upgrade time is, by definition, a pre-Codex-#6 row.
+			// The migration runner records this version after exec, so
+			// it cannot run a second time — even if 050 reruns on a
+			// crashed-restart scenario, the WHERE clause makes it
+			// idempotent.
+			//
+			// Servers booting cleanly with no pre-existing rows
+			// (greenfield deployments) get an UPDATE that affects 0
+			// rows. That's fine — there were no legacy agents to mark.
+			SQL: `UPDATE agent_tokens SET is_legacy_pre_codex_6 = 1 WHERE is_legacy_pre_codex_6 = 0;`,
+		},
 	}
 
 	for _, m := range migrations {

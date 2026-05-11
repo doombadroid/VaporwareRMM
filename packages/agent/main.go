@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -123,15 +124,61 @@ const patchInstallTimeout = 30 * time.Minute
 // admin role equals root on every endpoint" and that fact belongs in
 // every conversation about RBAC, not in a regexp here.
 
-// NewAgent creates an Agent, generating a random API token if none is provided.
+// NewAgent creates an Agent. Token-source precedence is:
+//   1. apiToken argument (typically from VAPOR_AGENT_TOKEN env)
+//   2. persisted state file's APIToken (continuity across restarts)
+//   3. freshly generated random token (first-run case)
+//
+// Step 2 is the Codex #6 addition: a restart that loses continuity
+// to the server's previous_token_hash forces operator intervention
+// per the new PoP gate, so we persist the bearer and re-use it on
+// every restart. The token never leaves the host except inside the
+// Authorization / X-Existing-Agent-Token headers over TLS.
 func NewAgent(serverURL string, port int, apiToken string) (*Agent, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
+	machine := machineID()
+
+	persisted := loadAgentState()
+	// Identity binding: if the persisted state belongs to a different
+	// host (e.g., a VM cloned from a golden image after the agent was
+	// installed), discard the persisted bearer + device_id. Re-using
+	// either would cause every clone to fight over one agent_tokens
+	// row on the server, with 401/online flapping as each clone
+	// re-registers and supersedes the previous.
+	//
+	// Discriminator is the OS-level machine-id (/etc/machine-id on
+	// Linux, IOPlatformUUID on macOS, MachineGuid on Windows). MAC
+	// was tried first and discarded — on every host running Tailscale
+	// (which is every endpoint in this product), the first interface
+	// reported by net.Interfaces() can vary across boots between the
+	// real NIC and tailscale0. Legitimate agents would discard their
+	// tokens on every restart.
+	//
+	// Compare runs only when both halves of the persisted fingerprint
+	// are present so a state file written by an older agent (no
+	// fingerprint) keeps working — that pre-existing fleet has
+	// already been deployed and re-installing the agent to repopulate
+	// the fingerprint is operator-controlled.
+	if persisted.PersistedHostname != "" && persisted.PersistedMachineID != "" && machine != "" {
+		if persisted.PersistedHostname != hostname || persisted.PersistedMachineID != machine {
+			slog.Warn("persisted agent state belongs to a different host (likely cloned image); discarding token and re-registering fresh",
+				"persisted_hostname", persisted.PersistedHostname,
+				"current_hostname", hostname,
+				"persisted_machine_id", persisted.PersistedMachineID,
+				"current_machine_id", machine)
+			persisted = agentState{}
+		}
+	}
+
+	if apiToken == "" {
+		apiToken = persisted.APIToken
+	}
 	if apiToken == "" {
 		apiToken = generateToken()
-		slog.Info("No VAPOR_AGENT_TOKEN set. Generated ephemeral token (not logged for security)")
+		slog.Info("no VAPOR_AGENT_TOKEN and no persisted token; generated a fresh ephemeral token (not logged for security)")
 	}
 
 	// Load branding from server
@@ -154,16 +201,13 @@ func NewAgent(serverURL string, port int, apiToken string) (*Agent, error) {
 		}
 	}
 
-	// Restore device ID from previous run if available
-	persistedDeviceID := loadDeviceID()
-
 	return &Agent{
 		serverURL:    serverURL,
 		port:         port,
 		hostname:     hostname,
 		apiToken:     apiToken,
-		deviceID:     persistedDeviceID,
-		registered:   persistedDeviceID != "",
+		deviceID:     persisted.DeviceID,
+		registered:   persisted.DeviceID != "",
 		appName:      appName,
 		companyName:  companyName,
 		iconURL:      iconURL,
@@ -471,6 +515,21 @@ func (a *Agent) connectTailscale() {
 }
 
 // registerWithServer registers this agent with the central server.
+//
+// Codex #6: re-registers must present proof-of-possession of the
+// current agent token. We send the persisted token in the
+// X-Existing-Agent-Token header. The Authorization header carries
+// the bearer the server will bind to the device on success; under
+// VAPOR_ROTATE_TOKEN=1 this is a freshly-generated rotation
+// candidate (the persisted token stays in X-Existing-Agent-Token
+// to satisfy PoP), otherwise it is the same persisted token (a
+// no-op re-register at the token layer).
+//
+// 409 response = server rejected PoP. We do NOT silently retry —
+// the only way out is operator intervention (admin-side device
+// removal or recovery flow). Silent retry would either burn
+// rate-limit budget on a doomed loop or, worse, hide the
+// rejection from the operator log.
 func (a *Agent) registerWithServer() error {
 	regInfo := a.getRegistrationInfo()
 	data, err := json.Marshal(regInfo)
@@ -478,12 +537,26 @@ func (a *Agent) registerWithServer() error {
 		return fmt.Errorf("marshal registration info: %w", err)
 	}
 
+	priorToken := a.apiToken
+	newToken := a.apiToken
+	rotating := os.Getenv("VAPOR_ROTATE_TOKEN") == "1"
+	if rotating {
+		newToken = generateToken()
+	}
+
 	req, err := http.NewRequest(http.MethodPost, a.serverURL+"/agent/register", bytes.NewBuffer(data))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.apiToken)
+	req.Header.Set("Authorization", "Bearer "+newToken)
+	// X-Existing-Agent-Token is the prior bearer the server stored
+	// for this device. On first-time install priorToken is whatever
+	// got generated/loaded; the server's PoP check returns
+	// PoPNoPriorToken for a fresh device row and lets the INSERT
+	// proceed. Sending it unconditionally simplifies the agent
+	// state machine and is harmless on first run.
+	req.Header.Set("X-Existing-Agent-Token", priorToken)
 	if regSecret := os.Getenv("REGISTRATION_SECRET"); regSecret != "" {
 		req.Header.Set("X-Registration-Secret", regSecret)
 	}
@@ -494,6 +567,14 @@ func (a *Agent) registerWithServer() error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusConflict {
+		// PoP rejected. Surface the response body to the operator
+		// log — the server's error message contains the recovery
+		// instruction (admin-side device removal). No retry loop.
+		body, _ := io.ReadAll(resp.Body)
+		slog.Error("re-registration rejected (409); operator action required", "body", string(body))
+		return fmt.Errorf("registration rejected by PoP gate: %s", strings.TrimSpace(string(body)))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("registration failed with status: %d", resp.StatusCode)
 	}
@@ -503,14 +584,44 @@ func (a *Agent) registerWithServer() error {
 		slog.Warn("could not decode register response", "error", err)
 	}
 
-	if deviceID, ok := result["device_id"].(string); ok {
-		a.deviceID = deviceID
-		a.registered = true
-		slog.Info("agent registered", "device_id", deviceID)
-		saveDeviceID(deviceID, a.hostname)
-	} else {
+	// Server accepted the new token. Persist it BEFORE updating the
+	// in-memory bearer so a crash between the two — or a local write
+	// failure now — doesn't leave us with a bearer the server knows
+	// about but the next restart can't find. On persist failure we
+	// MUST NOT mutate a.apiToken: the server has already accepted
+	// the new token, but we'll keep using the old one until the
+	// rotation can be retried, which is safer than running with a
+	// bearer that we'll lose on restart.
+	deviceID, _ := result["device_id"].(string)
+	if deviceID == "" {
 		slog.Warn("no device_id in registration response")
+		if !rotating {
+			// First registration without a device_id from the server
+			// is a bug; nothing useful to persist. Don't mutate
+			// in-memory state.
+			return fmt.Errorf("registration succeeded but no device_id in response")
+		}
+		// Rotation re-register without a device_id echo: persist
+		// against the existing device_id.
+		deviceID = a.deviceID
 	}
+
+	if err := saveAgentState(agentState{
+		DeviceID:           deviceID,
+		Hostname:           a.hostname,
+		APIToken:           newToken,
+		PersistedHostname:  a.hostname,
+		PersistedMAC:       currentMACAddress(),
+		PersistedMachineID: machineID(),
+	}); err != nil {
+		slog.Error("could not persist rotated agent state; keeping previous in-memory bearer so the rotation can be retried", "error", err)
+		return fmt.Errorf("persist agent state after register: %w", err)
+	}
+
+	a.apiToken = newToken
+	a.deviceID = deviceID
+	a.registered = true
+	slog.Info("agent registered", "device_id", deviceID, "rotated", rotating)
 
 	return nil
 }
@@ -1237,8 +1348,16 @@ func (a *Agent) SetDeviceID(id string) {
 	slog.Info("agent registered", "device_id", id)
 }
 
-// agentStateFile returns the path to the agent state file.
+// agentStateFile returns the path to the agent state file. Tests
+// redirect this via VAPOR_AGENT_STATE_FILE_OVERRIDE; the production
+// binary never reads that env var (the agent doesn't ship docs that
+// mention it), and setting it in production would mean the operator
+// is opting into a non-default state path on purpose — which is
+// fine, the agent simply reads/writes wherever they point it.
 func agentStateFile() string {
+	if override := os.Getenv("VAPOR_AGENT_STATE_FILE_OVERRIDE"); override != "" {
+		return override
+	}
 	if runtime.GOOS == "windows" {
 		appData := os.Getenv("APPDATA")
 		if appData == "" {
@@ -1250,40 +1369,242 @@ func agentStateFile() string {
 	return "/etc/vaporrmm/agent-state.json"
 }
 
+// agentState is what we persist between runs so the agent can prove
+// continuity of identity to the server. Codex #6 added APIToken to
+// this struct: the bearer the agent uses on protected routes is also
+// the proof-of-possession value we present on re-register, and
+// regenerating a fresh token on every restart used to be silent
+// fleet-grade Russian roulette — the new token never matched
+// previous_token_hash on the server row, so the server's PoP gate
+// would reject every restart as a take-over attempt.
+//
+// PersistedHostname and PersistedMachineID capture the host identity
+// at the time of save. NewAgent compares them to the live values and
+// discards the persisted token on mismatch — the golden-image
+// scenario where one installed agent gets cloned to many VMs would
+// otherwise have every clone fighting over a single bearer.
+//
+// PersistedMAC was the first-pass discriminator but was unreliable on
+// any host running Tailscale (every endpoint in this product): the
+// first interface returned by net.Interfaces() varies across boots
+// when there's both a real NIC and a tailscale0 interface, so
+// legitimate agents would discard their tokens and trip the PoP gate
+// on every restart. Retained on the struct for backwards-compatible
+// reads of older state files but no longer used for the clone check.
 type agentState struct {
-	DeviceID string `json:"device_id"`
-	Hostname string `json:"hostname"`
+	DeviceID         string `json:"device_id"`
+	Hostname         string `json:"hostname"`
+	APIToken         string `json:"api_token,omitempty"`
+	PersistedHostname string `json:"persisted_hostname,omitempty"`
+	PersistedMAC     string `json:"persisted_mac,omitempty"`
+	PersistedMachineID string `json:"persisted_machine_id,omitempty"`
+}
+
+// currentMACAddress returns the first non-empty hardware address
+// reported by the OS. RETAINED for getRegistrationInfo only, which
+// reports MAC to the server for inventory display. Do NOT use it for
+// identity binding — every endpoint in this product runs Tailscale,
+// so net.Interfaces() returns at least two interfaces (real NIC +
+// tailscale0) and ordering is not stable across boots or interface
+// reconfiguration. The clone-detection path uses machineID() instead.
+func currentMACAddress() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if len(iface.HardwareAddr) > 0 {
+			return iface.HardwareAddr.String()
+		}
+	}
+	return ""
+}
+
+// machineIDOverride lets tests inject a deterministic machine-id
+// without poking at /etc/machine-id or the registry. nil in
+// production. The override returns ("", false) to fall through to
+// the real lookup; ("id", true) returns "id" as the machine-id.
+var machineIDOverride func() (string, bool)
+
+// machineID returns a stable per-host identifier that survives MAC
+// changes, interface reordering, and Tailscale flapping. Used as the
+// discriminator for the clone-detection check in NewAgent.
+//
+// Per-platform source of truth:
+//   - Linux: /etc/machine-id, then /var/lib/dbus/machine-id (systemd
+//     and dbus respectively). Both are 32-char hex strings stable for
+//     the install lifetime.
+//   - macOS: IOPlatformUUID from ioreg. Stable for the machine
+//     identity; survives reinstalls of the OS on the same hardware.
+//   - Windows: HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid.
+//     Stable per Windows install.
+//
+// Returns "" if no source is readable. Callers treat "" as "no
+// identity fingerprint available" — the clone check is skipped
+// (fail-open in that direction is safer than discarding a valid
+// token on an unreadable machine-id).
+func machineID() string {
+	if machineIDOverride != nil {
+		if id, ok := machineIDOverride(); ok {
+			return id
+		}
+	}
+	switch runtime.GOOS {
+	case "linux":
+		if data, err := os.ReadFile("/etc/machine-id"); err == nil {
+			if s := strings.TrimSpace(string(data)); s != "" {
+				return s
+			}
+		}
+		if data, err := os.ReadFile("/var/lib/dbus/machine-id"); err == nil {
+			if s := strings.TrimSpace(string(data)); s != "" {
+				return s
+			}
+		}
+	case "darwin":
+		out, err := exec.Command("ioreg", "-d2", "-c", "IOPlatformExpertDevice").Output()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				if !strings.Contains(line, "IOPlatformUUID") {
+					continue
+				}
+				parts := strings.Split(line, `"`)
+				if len(parts) >= 4 {
+					if s := strings.TrimSpace(parts[3]); s != "" {
+						return s
+					}
+				}
+			}
+		}
+	case "windows":
+		out, err := exec.Command("reg", "query",
+			`HKLM\SOFTWARE\Microsoft\Cryptography`, "/v", "MachineGuid").Output()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				if !strings.Contains(line, "MachineGuid") {
+					continue
+				}
+				fields := strings.Fields(line)
+				if len(fields) >= 3 {
+					if s := strings.TrimSpace(fields[len(fields)-1]); s != "" {
+						return s
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // loadDeviceID reads a previously registered device ID from disk.
 func loadDeviceID() string {
+	return loadAgentState().DeviceID
+}
+
+// loadAgentState reads the full persisted state — device ID,
+// hostname, and the persisted bearer token used as proof-of-
+// possession on subsequent re-registers. Returns a zero-value
+// state on any error; the caller treats missing fields as "no
+// prior state, generate a fresh one".
+func loadAgentState() agentState {
 	data, err := os.ReadFile(agentStateFile())
 	if err != nil {
-		return ""
+		return agentState{}
 	}
 	var state agentState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return ""
+		return agentState{}
 	}
-	return state.DeviceID
+	return state
 }
 
-// saveDeviceID persists the device ID to disk so it survives restarts.
+// saveDeviceID is a Codex-#6-era shim: keep the old call sites
+// compiling while the canonical save path becomes saveAgentState.
+// Reads the existing APIToken so the rewrite doesn't accidentally
+// blank out a persisted bearer. Errors are warned but not returned;
+// call sites that care about persistence use saveAgentState directly.
 func saveDeviceID(deviceID, hostname string) {
-	state := agentState{DeviceID: deviceID, Hostname: hostname}
+	prev := loadAgentState()
+	if err := saveAgentState(agentState{
+		DeviceID:           deviceID,
+		Hostname:           hostname,
+		APIToken:           prev.APIToken,
+		PersistedHostname:  hostname,
+		PersistedMAC:       currentMACAddress(),
+		PersistedMachineID: machineID(),
+	}); err != nil {
+		slog.Warn("could not save device id", "error", err)
+	}
+}
+
+// saveAgentState writes the full state atomically: marshal → write to
+// a temp file in the same directory → fsync → rename over the target.
+// Returns an error on any step so the caller can refuse to update the
+// in-memory bearer when persistence fails (Codex #6 P2 fix: prevents
+// a transient local write failure from converting into a device
+// lockout after the next restart).
+//
+// Permissions 0600 because the file contains the bearer.
+func saveAgentState(state agentState) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		slog.Warn("could not marshal agent state", "error", err)
-		return
+		return fmt.Errorf("marshal agent state: %w", err)
 	}
 	path := agentStateFile()
-	dir := path[:strings.LastIndexAny(path, "/\\")]
+	sepIdx := strings.LastIndexAny(path, "/\\")
+	if sepIdx == -1 {
+		// VAPOR_AGENT_STATE_FILE_OVERRIDE was set to a bare filename
+		// with no directory separator. Refuse explicitly instead of
+		// slicing path[:-1] (which would panic). An operator setting
+		// the override should be giving us a full path; silently
+		// dropping the file into CWD is too easy to misconfigure
+		// (the CWD changes between systemd, launchd, sc.exe, and
+		// dev runs).
+		return fmt.Errorf("VAPOR_AGENT_STATE_FILE_OVERRIDE must contain a directory separator: got %q", path)
+	}
+	dir := path[:sepIdx]
 	if dir != "" {
-		_ = os.MkdirAll(dir, 0750)
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return fmt.Errorf("mkdir agent state dir: %w", err)
+		}
 	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		slog.Warn("could not save agent state", "error", err)
+
+	// Write into a sibling temp file, fsync, then rename over the
+	// target. Rename is atomic on POSIX within the same filesystem;
+	// fsync guards against a power loss between rename and durable
+	// commit of the file contents.
+	tmp, err := os.CreateTemp(dir, ".agent-state.tmp.*")
+	if err != nil {
+		return fmt.Errorf("create temp agent state: %w", err)
 	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = os.Remove(tmpPath)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write temp agent state: %w", err)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("chmod temp agent state: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("fsync temp agent state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close temp agent state: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return fmt.Errorf("rename agent state: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

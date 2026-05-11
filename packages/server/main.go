@@ -188,6 +188,15 @@ func main() {
 	defer redis.Close()
 
 	events.StartWSRedisSubscriber()
+	events.StartConflictWebhookBucketPruner()
+
+	// Validate VAPOR_REFUSE_LEGACY_BYPASS_AFTER before boot. A
+	// malformed value would otherwise silently keep the Codex-#6
+	// migration bypass enabled past the operator's intended cutoff.
+	if _, _, err := auth.ParseLegacyBypassCutoff(); err != nil {
+		slog.Error("invalid VAPOR_REFUSE_LEGACY_BYPASS_AFTER; refusing to boot — fix the env var or unset it", "error", err)
+		os.Exit(1)
+	}
 
 	auth.LoadAgentTokens()
 	auth.CreateDefaultAdmin()

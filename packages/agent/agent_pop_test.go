@@ -274,23 +274,24 @@ func TestAgent_RotationFailsAtomicallyOnPersistError(t *testing.T) {
 }
 
 // TestAgent_DiscardsPersistedStateOnIdentityMismatch covers the
-// Codex #6 P2 fix at packages/agent/main.go:146: the golden-image
-// case where one installed agent gets cloned to many VMs. The
-// persisted token is bound to (hostname, MAC) at save time; if
-// either has changed when the agent next boots, the token is
-// discarded and the clone re-registers fresh.
+// machine-id-bound clone-detection check. A VM cloned from a golden
+// image inherits the source's state file (and thus its bearer), but
+// the OS-level machine-id is regenerated on first boot of the clone
+// (Linux: cloud-init / systemd-firstboot rewrites /etc/machine-id;
+// macOS / Windows: per-install UUIDs differ). The agent compares
+// persisted machine-id against current; on mismatch it discards the
+// token + device_id and re-registers fresh.
 //
-// We can't change the live os.Hostname() / MAC at test time, so we
-// seed the state file with deliberately-wrong fingerprint values
-// and assert NewAgent ignores the persisted token+device_id.
+// We override machineID() at test time so the test is deterministic
+// across CI runners that have their own real /etc/machine-id.
 func TestAgent_DiscardsPersistedStateOnIdentityMismatch(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "agent-state.json")
 	seed := agentState{
-		DeviceID:          "device-clone-source",
-		Hostname:          "clone-source-host",
-		APIToken:          "golden-image-bearer-1234567890abcd",
-		PersistedHostname: "different-host-than-current",
-		PersistedMAC:      "ff:ff:ff:ff:ff:ff",
+		DeviceID:           "device-clone-source",
+		Hostname:           "clone-source-host",
+		APIToken:           "golden-image-bearer-1234567890abcd",
+		PersistedHostname:  "clone-source-host",
+		PersistedMachineID: "source-machine-id-aaaa-1111",
 	}
 	body, _ := json.Marshal(seed)
 	if err := os.WriteFile(statePath, body, 0600); err != nil {
@@ -298,6 +299,10 @@ func TestAgent_DiscardsPersistedStateOnIdentityMismatch(t *testing.T) {
 	}
 	t.Setenv("VAPOR_AGENT_STATE_FILE_OVERRIDE", statePath)
 	t.Setenv("VAPOR_ROTATE_TOKEN", "")
+
+	// Pretend this host has a different machine-id from the seed.
+	machineIDOverride = func() (string, bool) { return "current-machine-id-bbbb-2222", true }
+	t.Cleanup(func() { machineIDOverride = nil })
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
@@ -311,18 +316,80 @@ func TestAgent_DiscardsPersistedStateOnIdentityMismatch(t *testing.T) {
 		t.Fatalf("NewAgent: %v", err)
 	}
 
-	// The persisted token MUST be discarded because the fingerprint
-	// doesn't match this host. The agent generated a fresh token
-	// instead, so apiToken should be non-empty and != the seed.
+	// The persisted token MUST be discarded because the machine-id
+	// fingerprint doesn't match this host. The agent generated a
+	// fresh token instead.
 	if agent.apiToken == seed.APIToken {
 		t.Errorf("agent kept the cloned-image bearer; expected discard. got %q", agent.apiToken)
 	}
 	if agent.apiToken == "" {
 		t.Errorf("agent ended up with no token at all; should have generated a fresh one")
 	}
-	// device_id should also be discarded — a cloned image must
-	// re-register fresh, not inherit the source's identity row.
 	if agent.deviceID == seed.DeviceID {
 		t.Errorf("agent inherited cloned-image device_id %q; expected fresh registration", agent.deviceID)
+	}
+}
+
+// TestAgent_StableAcrossInterfaceReordering is the second-pass
+// Codex regression: the previous discriminator was the first
+// non-empty MAC reported by net.Interfaces(). On a host running
+// Tailscale (every endpoint in this product), tailscale0 + the real
+// NIC reorder unpredictably across boots, so the previous code would
+// discard a perfectly valid token on every restart, trip the PoP
+// gate, and require operator intervention to recover.
+//
+// With machine-id-based identity, the same physical host keeps its
+// token regardless of which interface enumerates first.
+func TestAgent_StableAcrossInterfaceReordering(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "agent-state.json")
+	seed := agentState{
+		DeviceID:           "device-stable-1",
+		Hostname:           "stable-host",
+		APIToken:           "stable-bearer-keep-this-1234567890",
+		PersistedHostname:  "stable-host",
+		PersistedMachineID: "stable-machine-id-1111-aaaa",
+		// PersistedMAC deliberately set to a value the live system
+		// will not match — this proves machine-id binding is what
+		// holds, not MAC.
+		PersistedMAC: "ff:ff:ff:ff:ff:ff",
+	}
+	body, _ := json.Marshal(seed)
+	if err := os.WriteFile(statePath, body, 0600); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	t.Setenv("VAPOR_AGENT_STATE_FILE_OVERRIDE", statePath)
+	t.Setenv("VAPOR_ROTATE_TOKEN", "")
+
+	// os.Hostname() returns the test host's real hostname. Override
+	// it via the agent's own load path by setting PersistedHostname
+	// equal to whatever os.Hostname() returns now — done by reading
+	// it before seeding.
+	hostname, _ := os.Hostname()
+	seed.PersistedHostname = hostname
+	body, _ = json.Marshal(seed)
+	if err := os.WriteFile(statePath, body, 0600); err != nil {
+		t.Fatalf("re-seed state: %v", err)
+	}
+
+	machineIDOverride = func() (string, bool) { return seed.PersistedMachineID, true }
+	t.Cleanup(func() { machineIDOverride = nil })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device_id":"device-stable-1","status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	agent, err := NewAgent(srv.URL, 47991, "")
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+
+	if agent.apiToken != seed.APIToken {
+		t.Errorf("agent discarded valid token despite matching machine-id+hostname; got %q want %q", agent.apiToken, seed.APIToken)
+	}
+	if agent.deviceID != seed.DeviceID {
+		t.Errorf("agent discarded device_id despite matching machine-id+hostname; got %q want %q", agent.deviceID, seed.DeviceID)
 	}
 }

@@ -139,7 +139,7 @@ func NewAgent(serverURL string, port int, apiToken string) (*Agent, error) {
 	if err != nil {
 		hostname = "unknown"
 	}
-	mac := currentMACAddress()
+	machine := machineID()
 
 	persisted := loadAgentState()
 	// Identity binding: if the persisted state belongs to a different
@@ -147,17 +147,28 @@ func NewAgent(serverURL string, port int, apiToken string) (*Agent, error) {
 	// installed), discard the persisted bearer + device_id. Re-using
 	// either would cause every clone to fight over one agent_tokens
 	// row on the server, with 401/online flapping as each clone
-	// re-registers and supersedes the previous. The compare runs only
-	// when both halves of the persisted fingerprint are present so a
-	// state file written by an older agent (no fingerprint) keeps
-	// working — that pre-existing fleet has already been deployed.
-	if persisted.PersistedHostname != "" && persisted.PersistedMAC != "" {
-		if persisted.PersistedHostname != hostname || persisted.PersistedMAC != mac {
+	// re-registers and supersedes the previous.
+	//
+	// Discriminator is the OS-level machine-id (/etc/machine-id on
+	// Linux, IOPlatformUUID on macOS, MachineGuid on Windows). MAC
+	// was tried first and discarded — on every host running Tailscale
+	// (which is every endpoint in this product), the first interface
+	// reported by net.Interfaces() can vary across boots between the
+	// real NIC and tailscale0. Legitimate agents would discard their
+	// tokens on every restart.
+	//
+	// Compare runs only when both halves of the persisted fingerprint
+	// are present so a state file written by an older agent (no
+	// fingerprint) keeps working — that pre-existing fleet has
+	// already been deployed and re-installing the agent to repopulate
+	// the fingerprint is operator-controlled.
+	if persisted.PersistedHostname != "" && persisted.PersistedMachineID != "" && machine != "" {
+		if persisted.PersistedHostname != hostname || persisted.PersistedMachineID != machine {
 			slog.Warn("persisted agent state belongs to a different host (likely cloned image); discarding token and re-registering fresh",
 				"persisted_hostname", persisted.PersistedHostname,
 				"current_hostname", hostname,
-				"persisted_mac", persisted.PersistedMAC,
-				"current_mac", mac)
+				"persisted_machine_id", persisted.PersistedMachineID,
+				"current_machine_id", machine)
 			persisted = agentState{}
 		}
 	}
@@ -596,11 +607,12 @@ func (a *Agent) registerWithServer() error {
 	}
 
 	if err := saveAgentState(agentState{
-		DeviceID:          deviceID,
-		Hostname:          a.hostname,
-		APIToken:          newToken,
-		PersistedHostname: a.hostname,
-		PersistedMAC:      currentMACAddress(),
+		DeviceID:           deviceID,
+		Hostname:           a.hostname,
+		APIToken:           newToken,
+		PersistedHostname:  a.hostname,
+		PersistedMAC:       currentMACAddress(),
+		PersistedMachineID: machineID(),
 	}); err != nil {
 		slog.Error("could not persist rotated agent state; keeping previous in-memory bearer so the rotation can be retried", "error", err)
 		return fmt.Errorf("persist agent state after register: %w", err)
@@ -1366,25 +1378,35 @@ func agentStateFile() string {
 // previous_token_hash on the server row, so the server's PoP gate
 // would reject every restart as a take-over attempt.
 //
-// PersistedHostname and PersistedMAC capture the host identity at the
-// time of save. NewAgent compares them to the live values and
+// PersistedHostname and PersistedMachineID capture the host identity
+// at the time of save. NewAgent compares them to the live values and
 // discards the persisted token on mismatch — the golden-image
 // scenario where one installed agent gets cloned to many VMs would
 // otherwise have every clone fighting over a single bearer.
+//
+// PersistedMAC was the first-pass discriminator but was unreliable on
+// any host running Tailscale (every endpoint in this product): the
+// first interface returned by net.Interfaces() varies across boots
+// when there's both a real NIC and a tailscale0 interface, so
+// legitimate agents would discard their tokens and trip the PoP gate
+// on every restart. Retained on the struct for backwards-compatible
+// reads of older state files but no longer used for the clone check.
 type agentState struct {
 	DeviceID         string `json:"device_id"`
 	Hostname         string `json:"hostname"`
 	APIToken         string `json:"api_token,omitempty"`
 	PersistedHostname string `json:"persisted_hostname,omitempty"`
 	PersistedMAC     string `json:"persisted_mac,omitempty"`
+	PersistedMachineID string `json:"persisted_machine_id,omitempty"`
 }
 
 // currentMACAddress returns the first non-empty hardware address
-// reported by the OS. Used at agent boot to compare against the
-// PersistedMAC stamped on the state file. Returns "" if no interface
-// reports a MAC (extremely unusual; treat as "no MAC fingerprint
-// available" rather than failing — the persisted-MAC check is one
-// half of the identity binding, hostname is the other).
+// reported by the OS. RETAINED for getRegistrationInfo only, which
+// reports MAC to the server for inventory display. Do NOT use it for
+// identity binding — every endpoint in this product runs Tailscale,
+// so net.Interfaces() returns at least two interfaces (real NIC +
+// tailscale0) and ordering is not stable across boots or interface
+// reconfiguration. The clone-detection path uses machineID() instead.
 func currentMACAddress() string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -1393,6 +1415,82 @@ func currentMACAddress() string {
 	for _, iface := range ifaces {
 		if len(iface.HardwareAddr) > 0 {
 			return iface.HardwareAddr.String()
+		}
+	}
+	return ""
+}
+
+// machineIDOverride lets tests inject a deterministic machine-id
+// without poking at /etc/machine-id or the registry. nil in
+// production. The override returns ("", false) to fall through to
+// the real lookup; ("id", true) returns "id" as the machine-id.
+var machineIDOverride func() (string, bool)
+
+// machineID returns a stable per-host identifier that survives MAC
+// changes, interface reordering, and Tailscale flapping. Used as the
+// discriminator for the clone-detection check in NewAgent.
+//
+// Per-platform source of truth:
+//   - Linux: /etc/machine-id, then /var/lib/dbus/machine-id (systemd
+//     and dbus respectively). Both are 32-char hex strings stable for
+//     the install lifetime.
+//   - macOS: IOPlatformUUID from ioreg. Stable for the machine
+//     identity; survives reinstalls of the OS on the same hardware.
+//   - Windows: HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid.
+//     Stable per Windows install.
+//
+// Returns "" if no source is readable. Callers treat "" as "no
+// identity fingerprint available" — the clone check is skipped
+// (fail-open in that direction is safer than discarding a valid
+// token on an unreadable machine-id).
+func machineID() string {
+	if machineIDOverride != nil {
+		if id, ok := machineIDOverride(); ok {
+			return id
+		}
+	}
+	switch runtime.GOOS {
+	case "linux":
+		if data, err := os.ReadFile("/etc/machine-id"); err == nil {
+			if s := strings.TrimSpace(string(data)); s != "" {
+				return s
+			}
+		}
+		if data, err := os.ReadFile("/var/lib/dbus/machine-id"); err == nil {
+			if s := strings.TrimSpace(string(data)); s != "" {
+				return s
+			}
+		}
+	case "darwin":
+		out, err := exec.Command("ioreg", "-d2", "-c", "IOPlatformExpertDevice").Output()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				if !strings.Contains(line, "IOPlatformUUID") {
+					continue
+				}
+				parts := strings.Split(line, `"`)
+				if len(parts) >= 4 {
+					if s := strings.TrimSpace(parts[3]); s != "" {
+						return s
+					}
+				}
+			}
+		}
+	case "windows":
+		out, err := exec.Command("reg", "query",
+			`HKLM\SOFTWARE\Microsoft\Cryptography`, "/v", "MachineGuid").Output()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				if !strings.Contains(line, "MachineGuid") {
+					continue
+				}
+				fields := strings.Fields(line)
+				if len(fields) >= 3 {
+					if s := strings.TrimSpace(fields[len(fields)-1]); s != "" {
+						return s
+					}
+				}
+			}
 		}
 	}
 	return ""
@@ -1428,11 +1526,12 @@ func loadAgentState() agentState {
 func saveDeviceID(deviceID, hostname string) {
 	prev := loadAgentState()
 	if err := saveAgentState(agentState{
-		DeviceID:          deviceID,
-		Hostname:          hostname,
-		APIToken:          prev.APIToken,
-		PersistedHostname: hostname,
-		PersistedMAC:      currentMACAddress(),
+		DeviceID:           deviceID,
+		Hostname:           hostname,
+		APIToken:           prev.APIToken,
+		PersistedHostname:  hostname,
+		PersistedMAC:       currentMACAddress(),
+		PersistedMachineID: machineID(),
 	}); err != nil {
 		slog.Warn("could not save device id", "error", err)
 	}

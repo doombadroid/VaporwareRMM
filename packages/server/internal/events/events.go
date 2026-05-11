@@ -288,6 +288,32 @@ func AdvanceConflictWebhookWindowStartForTests(tenantID, deviceID string, deltaS
 	conflictWebhookMu.Unlock()
 }
 
+// Webhook outbound is gated by the SSRF helpers in httputil. Tests
+// that need to deliver to a 127.0.0.1 httptest server swap these
+// out for permissive variants; production never touches them. The
+// pointers are concurrency-safe to swap before the test sends any
+// request because no concurrent webhook is in flight at that point.
+var (
+	webhookHostValidator = httputil.RejectPrivateHost
+	webhookOutboundClient = httputil.SafeOutboundClient
+)
+
+// SetWebhookOutboundForTests swaps both SSRF guards with permissive
+// variants so a 127.0.0.1 httptest destination is reachable. Pass
+// nil to restore the production defaults.
+func SetWebhookOutboundForTests(validator func(string) error, client func(time.Duration) *http.Client) {
+	if validator == nil {
+		webhookHostValidator = httputil.RejectPrivateHost
+	} else {
+		webhookHostValidator = validator
+	}
+	if client == nil {
+		webhookOutboundClient = httputil.SafeOutboundClient
+	} else {
+		webhookOutboundClient = client
+	}
+}
+
 // TriggerWebhooks fires webhooks subscribed in the given tenant for the named event.
 // Pass tenantID="" to fan out across all tenants (system events).
 func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
@@ -322,7 +348,7 @@ func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
 			// when the webhook row was created, but DNS rebinding lets a
 			// public hostname resolve to a private IP minutes later. The
 			// SafeOutboundClient also blocks redirect-based bypasses.
-			if err := httputil.RejectPrivateHost(urlStr); err != nil {
+			if err := webhookHostValidator(urlStr); err != nil {
 				slog.Warn("webhook destination blocked by SSRF guard", "webhook_id", id, "error", err)
 				continue
 			}
@@ -336,7 +362,7 @@ func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {
 				req.Header.Set("X-VaporRMM-Signature", hex.EncodeToString(sig.Sum(nil)))
 			}
 
-			resp, err := httputil.SafeOutboundClient(10 * time.Second).Do(req)
+			resp, err := webhookOutboundClient(10 * time.Second).Do(req)
 			if err != nil {
 				slog.Warn("webhook delivery failed", "webhook_id", id, "error", err)
 				continue

@@ -1294,8 +1294,16 @@ func (a *Agent) SetDeviceID(id string) {
 	slog.Info("agent registered", "device_id", id)
 }
 
-// agentStateFile returns the path to the agent state file.
+// agentStateFile returns the path to the agent state file. Tests
+// redirect this via VAPOR_AGENT_STATE_FILE_OVERRIDE; the production
+// binary never reads that env var (the agent doesn't ship docs that
+// mention it), and setting it in production would mean the operator
+// is opting into a non-default state path on purpose — which is
+// fine, the agent simply reads/writes wherever they point it.
 func agentStateFile() string {
+	if override := os.Getenv("VAPOR_AGENT_STATE_FILE_OVERRIDE"); override != "" {
+		return override
+	}
 	if runtime.GOOS == "windows" {
 		appData := os.Getenv("APPDATA")
 		if appData == "" {

@@ -44,6 +44,16 @@ var (
 	rateLimitMu    sync.RWMutex
 )
 
+// ResetRateLimitStoreForTests clears the per-IP rate-limit map so a
+// test that fires many requests against the same handler from the
+// httptest client doesn't get hit by the prior test's accumulated
+// budget. Production code never calls this.
+func ResetRateLimitStoreForTests() {
+	rateLimitMu.Lock()
+	rateLimitStore = make(map[string]*rateLimitEntry)
+	rateLimitMu.Unlock()
+}
+
 func init() {
 	// Background pruner for the in-memory rate-limit map. Without this the
 	// map grows unbounded as unique IPs hit the server (months of uptime

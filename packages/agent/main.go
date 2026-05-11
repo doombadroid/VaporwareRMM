@@ -553,21 +553,36 @@ func (a *Agent) registerWithServer() error {
 	}
 
 	// Server accepted the new token. Persist it BEFORE updating the
-	// in-memory bearer so a crash between the two doesn't leave us
-	// with a different token than the server has on record.
-	a.apiToken = newToken
-	if deviceID, ok := result["device_id"].(string); ok {
-		a.deviceID = deviceID
-		a.registered = true
-		slog.Info("agent registered", "device_id", deviceID, "rotated", rotating)
-		saveAgentState(agentState{DeviceID: deviceID, Hostname: a.hostname, APIToken: newToken})
-	} else {
+	// in-memory bearer so a crash between the two — or a local write
+	// failure now — doesn't leave us with a bearer the server knows
+	// about but the next restart can't find. On persist failure we
+	// MUST NOT mutate a.apiToken: the server has already accepted
+	// the new token, but we'll keep using the old one until the
+	// rotation can be retried, which is safer than running with a
+	// bearer that we'll lose on restart.
+	deviceID, _ := result["device_id"].(string)
+	if deviceID == "" {
 		slog.Warn("no device_id in registration response")
-		// Still persist the token if it changed — server has it now.
-		if rotating {
-			saveAgentState(agentState{DeviceID: a.deviceID, Hostname: a.hostname, APIToken: newToken})
+		if !rotating {
+			// First registration without a device_id from the server
+			// is a bug; nothing useful to persist. Don't mutate
+			// in-memory state.
+			return fmt.Errorf("registration succeeded but no device_id in response")
 		}
+		// Rotation re-register without a device_id echo: persist
+		// against the existing device_id.
+		deviceID = a.deviceID
 	}
+
+	if err := saveAgentState(agentState{DeviceID: deviceID, Hostname: a.hostname, APIToken: newToken}); err != nil {
+		slog.Error("could not persist rotated agent state; keeping previous in-memory bearer so the rotation can be retried", "error", err)
+		return fmt.Errorf("persist agent state after register: %w", err)
+	}
+
+	a.apiToken = newToken
+	a.deviceID = deviceID
+	a.registered = true
+	slog.Info("agent registered", "device_id", deviceID, "rotated", rotating)
 
 	return nil
 }
@@ -1354,30 +1369,72 @@ func loadAgentState() agentState {
 // saveDeviceID is a Codex-#6-era shim: keep the old call sites
 // compiling while the canonical save path becomes saveAgentState.
 // Reads the existing APIToken so the rewrite doesn't accidentally
-// blank out a persisted bearer.
+// blank out a persisted bearer. Errors are warned but not returned;
+// call sites that care about persistence use saveAgentState directly.
 func saveDeviceID(deviceID, hostname string) {
 	prev := loadAgentState()
-	saveAgentState(agentState{DeviceID: deviceID, Hostname: hostname, APIToken: prev.APIToken})
+	if err := saveAgentState(agentState{DeviceID: deviceID, Hostname: hostname, APIToken: prev.APIToken}); err != nil {
+		slog.Warn("could not save device id", "error", err)
+	}
 }
 
-// saveAgentState writes the full state atomically (best effort —
-// os.WriteFile is the same single-syscall write the prior code used;
-// we don't pretend to fsync). Permissions 0600 because the file
-// contains the bearer.
-func saveAgentState(state agentState) {
+// saveAgentState writes the full state atomically: marshal → write to
+// a temp file in the same directory → fsync → rename over the target.
+// Returns an error on any step so the caller can refuse to update the
+// in-memory bearer when persistence fails (Codex #6 P2 fix: prevents
+// a transient local write failure from converting into a device
+// lockout after the next restart).
+//
+// Permissions 0600 because the file contains the bearer.
+func saveAgentState(state agentState) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		slog.Warn("could not marshal agent state", "error", err)
-		return
+		return fmt.Errorf("marshal agent state: %w", err)
 	}
 	path := agentStateFile()
 	dir := path[:strings.LastIndexAny(path, "/\\")]
 	if dir != "" {
-		_ = os.MkdirAll(dir, 0750)
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return fmt.Errorf("mkdir agent state dir: %w", err)
+		}
 	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		slog.Warn("could not save agent state", "error", err)
+
+	// Write into a sibling temp file, fsync, then rename over the
+	// target. Rename is atomic on POSIX within the same filesystem;
+	// fsync guards against a power loss between rename and durable
+	// commit of the file contents.
+	tmp, err := os.CreateTemp(dir, ".agent-state.tmp.*")
+	if err != nil {
+		return fmt.Errorf("create temp agent state: %w", err)
 	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = os.Remove(tmpPath)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("write temp agent state: %w", err)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("chmod temp agent state: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("fsync temp agent state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close temp agent state: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return fmt.Errorf("rename agent state: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

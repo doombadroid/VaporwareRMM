@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -184,5 +185,90 @@ func TestAgent_HandlesRotationAck(t *testing.T) {
 	}
 	if gotPoP != newToken {
 		t.Errorf("restart PoP header: want %q, got %q", newToken, gotPoP)
+	}
+}
+
+// TestAgent_RotationFailsAtomicallyOnPersistError covers the Codex
+// #6 P2 fix at packages/agent/main.go:558: the server has accepted
+// the new bearer, but saveAgentState fails (e.g., disk-full,
+// unwritable state path). The agent must NOT update its in-memory
+// bearer; otherwise the process runs with a token only the server
+// knows about, and the next restart boots with the stale persisted
+// token and gets PoP-rejected on re-register, lockout follows.
+//
+// We force the persist failure by pointing
+// VAPOR_AGENT_STATE_FILE_OVERRIDE at a path inside a read-only
+// directory so MkdirAll succeeds (idempotent) but the temp-file
+// create / rename fails.
+func TestAgent_RotationFailsAtomicallyOnPersistError(t *testing.T) {
+	// Seed a valid state file at a different path so NewAgent can
+	// read its persisted token; we'll then redirect the SAVE path to
+	// a read-only directory.
+	seedPath := filepath.Join(t.TempDir(), "agent-state.json")
+	seed := agentState{
+		DeviceID: "device-pop-persist-fail",
+		Hostname: "agent-host-persist-fail",
+		APIToken: "persisted-bearer-stays-this-1234567890",
+	}
+	body, _ := json.Marshal(seed)
+	if err := os.WriteFile(seedPath, body, 0600); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	t.Setenv("VAPOR_AGENT_STATE_FILE_OVERRIDE", seedPath)
+	t.Setenv("VAPOR_ROTATE_TOKEN", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"device_id":"device-pop-persist-fail","status":"refreshed"}`))
+	}))
+	defer srv.Close()
+
+	agent, err := NewAgent(srv.URL, 47991, "")
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+	if agent.apiToken != seed.APIToken {
+		t.Fatalf("NewAgent should load persisted token, got %q", agent.apiToken)
+	}
+
+	// Redirect the save path to a read-only directory so the rename
+	// inside saveAgentState fails. We keep the read path the same so
+	// the agent already holds its persisted state in memory.
+	roDir := filepath.Join(t.TempDir(), "readonly")
+	if err := os.Mkdir(roDir, 0500); err != nil {
+		t.Fatalf("mkdir readonly: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restore permissions so t.TempDir cleanup can rm -r the dir.
+		_ = os.Chmod(roDir, 0700)
+	})
+	t.Setenv("VAPOR_AGENT_STATE_FILE_OVERRIDE", filepath.Join(roDir, "agent-state.json"))
+
+	err = agent.registerWithServer()
+	if err == nil {
+		t.Fatal("expected registerWithServer to error when persist fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "persist") {
+		t.Errorf("error should mention persist failure, got: %v", err)
+	}
+
+	// In-memory token MUST still be the persisted one — the
+	// rotation was rolled back because the new token wasn't durable.
+	if agent.apiToken != seed.APIToken {
+		t.Errorf("in-memory token mutated despite persist failure: got %q want %q", agent.apiToken, seed.APIToken)
+	}
+
+	// And the original state file is intact.
+	raw, err := os.ReadFile(seedPath)
+	if err != nil {
+		t.Fatalf("read seed state file: %v", err)
+	}
+	var persisted agentState
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("decode state file: %v", err)
+	}
+	if persisted.APIToken != seed.APIToken {
+		t.Errorf("seed state file overwritten: got %q want %q", persisted.APIToken, seed.APIToken)
 	}
 }

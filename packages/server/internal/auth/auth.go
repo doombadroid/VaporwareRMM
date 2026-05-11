@@ -968,21 +968,54 @@ func subtleConstantTimeEqual(a, b string) bool {
 	return diff == 0
 }
 
+// ParseLegacyBypassCutoff reads VAPOR_REFUSE_LEGACY_BYPASS_AFTER and
+// validates it parses as RFC3339. Called once at server startup so a
+// misconfigured value aborts boot rather than silently weakening the
+// PoP rollout controls.
+//
+// Returns:
+//   - (zero, false, nil): env var unset; bypass remains enabled until
+//     the operator decides to set it.
+//   - (t, true, nil): valid RFC3339 timestamp; bypass disabled after t.
+//   - (zero, false, err): env var set but malformed; server MUST refuse
+//     to boot.
+//
+// Fail-closed at runtime: IsLegacyAgentEligibleForBypass also re-reads
+// the env var (so operators can flip the cutoff without a restart) and
+// treats a malformed value as "cutoff elapsed" (bypass denied). The
+// startup gate makes the malformed case impossible to reach in a clean
+// deployment; the runtime gate handles the case where the operator
+// edits the env var live and typos it.
+func ParseLegacyBypassCutoff() (time.Time, bool, error) {
+	cutoff := os.Getenv("VAPOR_REFUSE_LEGACY_BYPASS_AFTER")
+	if cutoff == "" {
+		return time.Time{}, false, nil
+	}
+	t, err := time.Parse(time.RFC3339, cutoff)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("VAPOR_REFUSE_LEGACY_BYPASS_AFTER=%q did not parse as RFC3339: %w", cutoff, err)
+	}
+	return t, true, nil
+}
+
 // IsLegacyAgentEligibleForBypass returns true if the device has not
 // yet consumed its one-time pre-Codex-#6 bypass and the operator has
 // not set VAPOR_REFUSE_LEGACY_BYPASS_AFTER to a past timestamp.
 // Reading the env var on each call is cheap (it's a single Getenv)
 // and means the operator can flip the cutoff without restarting.
+//
+// A malformed VAPOR_REFUSE_LEGACY_BYPASS_AFTER at runtime denies the
+// bypass (fail-closed). The startup gate (ParseLegacyBypassCutoff,
+// called from server main) prevents the server from booting with a
+// malformed value in the first place.
 func IsLegacyAgentEligibleForBypass(deviceID string) bool {
-	cutoff := os.Getenv("VAPOR_REFUSE_LEGACY_BYPASS_AFTER")
-	if cutoff != "" {
-		if t, err := time.Parse(time.RFC3339, cutoff); err == nil {
-			if time.Now().After(t) {
-				return false
-			}
-		} else {
-			slog.Warn("VAPOR_REFUSE_LEGACY_BYPASS_AFTER did not parse as RFC3339; treating as unset", "value", cutoff, "error", err)
-		}
+	t, isSet, err := ParseLegacyBypassCutoff()
+	if err != nil {
+		slog.Error("VAPOR_REFUSE_LEGACY_BYPASS_AFTER malformed at runtime; denying bypass (fail-closed)", "error", err)
+		return false
+	}
+	if isSet && time.Now().After(t) {
+		return false
 	}
 	var used int
 	if err := db.DB.QueryRow(`SELECT COALESCE(legacy_pop_bypass_used, 0) FROM devices WHERE id = ?`, deviceID).Scan(&used); err != nil {

@@ -217,3 +217,56 @@ func TestValidatePasswordStrength(t *testing.T) {
 		})
 	}
 }
+
+// TestEnv_RefuseLegacyBypassMalformed covers the Codex #6 P2 fix at
+// auth.go:985. A malformed VAPOR_REFUSE_LEGACY_BYPASS_AFTER must
+// fail the startup parse so the server refuses to boot, rather than
+// silently treating it as unset (which would keep the migration
+// bypass enabled past the operator's intended cutoff).
+func TestEnv_RefuseLegacyBypassMalformed(t *testing.T) {
+	cases := []struct {
+		name   string
+		value  string
+		isSet  bool
+		errSub string
+	}{
+		{name: "unset", value: "", isSet: false},
+		{name: "valid_rfc3339", value: "2026-12-31T00:00:00Z", isSet: true},
+		{name: "garbage", value: "not-an-rfc3339-date", errSub: "did not parse"},
+		{name: "near_miss_date_only", value: "2026-12-31", errSub: "did not parse"},
+		{name: "near_miss_no_tz", value: "2026-12-31T00:00:00", errSub: "did not parse"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.value == "" {
+				os.Unsetenv("VAPOR_REFUSE_LEGACY_BYPASS_AFTER")
+			} else {
+				os.Setenv("VAPOR_REFUSE_LEGACY_BYPASS_AFTER", tc.value)
+			}
+			t.Cleanup(func() { os.Unsetenv("VAPOR_REFUSE_LEGACY_BYPASS_AFTER") })
+
+			parsed, isSet, err := ParseLegacyBypassCutoff()
+			if tc.errSub != "" {
+				if err == nil {
+					t.Fatalf("expected error for malformed value %q, got nil", tc.value)
+				}
+				if !strings.Contains(err.Error(), tc.errSub) {
+					t.Errorf("error %q should contain %q", err, tc.errSub)
+				}
+				if isSet {
+					t.Errorf("isSet should be false on parse error, got true")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for value %q: %v", tc.value, err)
+			}
+			if isSet != tc.isSet {
+				t.Errorf("isSet=%v want %v", isSet, tc.isSet)
+			}
+			if tc.isSet && parsed.IsZero() {
+				t.Errorf("isSet=true but parsed time is zero")
+			}
+		})
+	}
+}

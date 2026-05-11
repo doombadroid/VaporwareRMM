@@ -772,3 +772,94 @@ func TestConflictWebhookRateLimitDistributed(t *testing.T) {
 		t.Errorf("expected Redis key webhook_ratelimit:registration_conflict:default:* but saw %v", keys)
 	}
 }
+
+// TestConflictWebhookRateLimitFixedWindow is the Codex second-pass
+// regression: the previous EXPIRE-on-every-call pattern turned the
+// 1/device/hour cap into a sliding window. Under sustained conflict
+// traffic, the key never expired and the webhook stayed suppressed
+// indefinitely. The fix uses EXPIRE ... NX so the TTL is set only on
+// the first increment in a window. After the hour elapses the key
+// expires, the next increment resets it, and another webhook fires.
+//
+// Uses miniredis.FastForward to advance the limiter's clock without
+// real-time waits.
+func TestConflictWebhookRateLimitFixedWindow(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("miniredis: %v", err)
+	}
+	defer mr.Close()
+	prev := redis.Client
+	redis.Client = goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() {
+		_ = redis.Client.Close()
+		redis.Client = prev
+	})
+
+	app := popTestEnv(t)
+	events.SetWebhookOutboundForTests(func(string) error { return nil }, permissiveOutboundClient)
+	t.Cleanup(func() { events.SetWebhookOutboundForTests(nil, nil) })
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-VaporRMM-Event") == "device.registration_conflict" {
+			hits.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	now := time.Now().Unix()
+	if _, err := db.DB.Exec(
+		`INSERT INTO webhooks (id, url, secret, events, enabled, tenant_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"webhook-pop-fixed-window", srv.URL, "", "device.registration_conflict", 1, "default", now,
+	); err != nil {
+		t.Fatalf("seed webhook: %v", err)
+	}
+
+	t1 := strings.Repeat("a", 40)
+	r1 := registerOnce(t, app, t1, "", "host-pop-fixed", "aa:bb:cc:dd:ee:0c")
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("first register expected 200, got %d", r1.StatusCode)
+	}
+	wrong := strings.Repeat("z", 40)
+
+	// Six conflicts inside hour 1, FastForward by 10 minutes between
+	// each so the limiter sees a full hour of traffic. EXPIRE ... NX
+	// must NOT reset the TTL on increments 2-6; the key must expire
+	// at +60min from the first increment.
+	for i := 0; i < 6; i++ {
+		bearer := fmt.Sprintf("%040d", i)
+		rr := registerOnce(t, app, bearer, wrong, "host-pop-fixed", "aa:bb:cc:dd:ee:0c")
+		if rr.StatusCode != http.StatusConflict {
+			t.Fatalf("conflict #%d hour 1 expected 409, got %d", i, rr.StatusCode)
+		}
+		rr.Body.Close()
+		mr.FastForward(10 * time.Minute)
+		auth.ResetRateLimitStoreForTests()
+	}
+	events.WaitAsyncOpsForTests()
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 webhook in hour 1, got %d (sliding window would suppress, fixed window fires once)", got)
+	}
+
+	// Advance another 5 minutes to push past +60min from the first
+	// increment. Key expires; next INCR starts a fresh window.
+	mr.FastForward(5 * time.Minute)
+	auth.ResetRateLimitStoreForTests()
+
+	// Six more conflicts inside hour 2, same FastForward cadence.
+	for i := 0; i < 6; i++ {
+		bearer := fmt.Sprintf("%040d", 100+i)
+		rr := registerOnce(t, app, bearer, wrong, "host-pop-fixed", "aa:bb:cc:dd:ee:0c")
+		if rr.StatusCode != http.StatusConflict {
+			t.Fatalf("conflict #%d hour 2 expected 409, got %d", i, rr.StatusCode)
+		}
+		rr.Body.Close()
+		mr.FastForward(10 * time.Minute)
+		auth.ResetRateLimitStoreForTests()
+	}
+	events.WaitAsyncOpsForTests()
+	if got := hits.Load(); got != 2 {
+		t.Errorf("expected exactly 2 webhook fires across two hours, got %d", got)
+	}
+}

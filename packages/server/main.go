@@ -188,6 +188,7 @@ func main() {
 	defer redis.Close()
 
 	events.StartWSRedisSubscriber()
+	events.StartConflictWebhookBucketPruner()
 
 	// Validate VAPOR_REFUSE_LEGACY_BYPASS_AFTER before boot. A
 	// malformed value would otherwise silently keep the Codex-#6

@@ -234,12 +234,75 @@ type conflictWebhookBucket struct {
 	count       int
 }
 
-const conflictWebhookWindowSeconds int64 = 3600
+const (
+	conflictWebhookWindowSeconds int64 = 3600
+	// conflictWebhookBucketMax bounds the degraded-mode in-memory
+	// fallback map so a long-running attack against many synthetic
+	// device IDs can't OOM the server. Sized so a real fleet of
+	// 100k endpoints under attack still fits without refusing new
+	// entries; above that we refuse and log instead of growing.
+	conflictWebhookBucketMax = 100_000
+)
 
 var (
 	conflictWebhookMu      sync.Mutex
 	conflictWebhookBuckets = make(map[string]*conflictWebhookBucket)
 )
+
+// PruneConflictWebhookBuckets removes degraded-mode buckets whose
+// windows have expired (i.e., windowStart + window < now). Called
+// every conflictWebhookPruneInterval by a package-level goroutine
+// (StartConflictWebhookBucketPruner) and on every entry that would
+// push the map past conflictWebhookBucketMax (defensive: ensures the
+// prune happens immediately rather than waiting up to 15 minutes).
+//
+// Exported for direct testing without spinning up the pruner
+// goroutine. Production code does not call this; the pruner does.
+func PruneConflictWebhookBuckets(nowUnix int64) int {
+	conflictWebhookMu.Lock()
+	defer conflictWebhookMu.Unlock()
+	removed := 0
+	for k, b := range conflictWebhookBuckets {
+		if b.windowStart == 0 || nowUnix-b.windowStart >= conflictWebhookWindowSeconds {
+			delete(conflictWebhookBuckets, k)
+			removed++
+		}
+	}
+	return removed
+}
+
+// conflictWebhookPruneInterval is how often the background goroutine
+// sweeps the degraded-mode bucket map. 15 minutes balances staleness
+// (entries linger at most window+15min) against wasted wakeups on
+// idle deployments.
+const conflictWebhookPruneInterval = 15 * time.Minute
+
+var (
+	conflictWebhookPrunerOnce sync.Once
+	conflictWebhookPrunerStop = make(chan struct{})
+)
+
+// StartConflictWebhookBucketPruner spawns the background pruner.
+// Safe to call multiple times; only the first call starts the
+// goroutine. Production wires this in main; tests usually drive
+// PruneConflictWebhookBuckets directly to avoid relying on a
+// real-time ticker.
+func StartConflictWebhookBucketPruner() {
+	conflictWebhookPrunerOnce.Do(func() {
+		go func() {
+			t := time.NewTicker(conflictWebhookPruneInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					PruneConflictWebhookBuckets(time.Now().Unix())
+				case <-conflictWebhookPrunerStop:
+					return
+				}
+			}
+		}()
+	})
+}
 
 // conflictWebhookLimiter is the indirection seam tests use to verify
 // the Redis path without standing up a real Redis. Production code
@@ -301,6 +364,29 @@ func TriggerRegistrationConflictWebhook(tenantID, deviceID, claimedHostname, cla
 		conflictWebhookMu.Lock()
 		bucket, ok := conflictWebhookBuckets[key]
 		if !ok {
+			// Defense-in-depth: cap the map at
+			// conflictWebhookBucketMax entries. If we're at the cap,
+			// try to prune expired entries inline before refusing.
+			// This converts a potential OOM during a high-cardinality
+			// attack into a noisy degraded-mode response.
+			if len(conflictWebhookBuckets) >= conflictWebhookBucketMax {
+				// Inline prune attempt under the lock we already hold.
+				for k, b := range conflictWebhookBuckets {
+					if b.windowStart == 0 || now-b.windowStart >= conflictWebhookWindowSeconds {
+						delete(conflictWebhookBuckets, k)
+					}
+				}
+			}
+			if len(conflictWebhookBuckets) >= conflictWebhookBucketMax {
+				conflictWebhookMu.Unlock()
+				slog.Warn("conflict webhook in-memory bucket map at cap; refusing new entry (rate limit becomes per-process best-effort for this device)",
+					"tenant_id", tenantID, "device_id", deviceID, "cap", conflictWebhookBucketMax)
+				// Fire the webhook this time and skip the rate
+				// limit — being noisy is preferable to being silent.
+				fire = true
+				fireCount = 1
+				goto afterLimiter
+			}
 			bucket = &conflictWebhookBucket{}
 			conflictWebhookBuckets[key] = bucket
 		}
@@ -313,6 +399,7 @@ func TriggerRegistrationConflictWebhook(tenantID, deviceID, claimedHostname, cla
 		}
 		fireCount = int64(bucket.count)
 		conflictWebhookMu.Unlock()
+	afterLimiter:
 	}
 
 	if !fire {

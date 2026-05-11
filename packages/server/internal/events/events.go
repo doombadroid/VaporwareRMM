@@ -199,6 +199,95 @@ func AuditLogTenantSync(tenantID, userID, action, resourceType, resourceID, deta
 	}
 }
 
+// conflictWebhookBucket tracks per-(tenant, device) conflict bursts.
+// windowStart is the Unix timestamp of the first fire in the current
+// 1-hour window; count is the number of conflicts (fired AND
+// suppressed) inside that window.
+type conflictWebhookBucket struct {
+	windowStart int64
+	count       int
+}
+
+const conflictWebhookWindowSeconds int64 = 3600
+
+var (
+	conflictWebhookMu      sync.Mutex
+	conflictWebhookBuckets = make(map[string]*conflictWebhookBucket)
+)
+
+// TriggerRegistrationConflictWebhook fires the
+// device.registration_conflict webhook for the given device, subject
+// to the Codex #6 spec's per-device rate limit (1 webhook per device
+// per hour). Every call increments the bucket count regardless of
+// whether the webhook actually fires, so the next webhook to fire
+// can report attempt_count_within_window accurately.
+//
+// Audit logs are NOT written here — the registration handler logs
+// every conflict unconditionally. This function only governs whether
+// the external webhook delivery fires.
+func TriggerRegistrationConflictWebhook(tenantID, deviceID, claimedHostname, claimedMAC, sourceIP string) {
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	now := time.Now().Unix()
+	key := tenantID + "|" + deviceID
+
+	conflictWebhookMu.Lock()
+	bucket, ok := conflictWebhookBuckets[key]
+	if !ok {
+		bucket = &conflictWebhookBucket{}
+		conflictWebhookBuckets[key] = bucket
+	}
+	fire := false
+	if bucket.windowStart == 0 || now-bucket.windowStart >= conflictWebhookWindowSeconds {
+		bucket.windowStart = now
+		bucket.count = 1
+		fire = true
+	} else {
+		bucket.count++
+	}
+	fireCount := bucket.count
+	conflictWebhookMu.Unlock()
+
+	if !fire {
+		return
+	}
+	TriggerWebhooks(tenantID, "device.registration_conflict", map[string]interface{}{
+		"device_id":                   deviceID,
+		"tenant_id":                   tenantID,
+		"attempt_count_within_window": fireCount,
+		"claimed_hostname":            claimedHostname,
+		"claimed_mac":                 claimedMAC,
+		"source_ip":                   sourceIP,
+		"window_seconds":              conflictWebhookWindowSeconds,
+		"timestamp":                   now,
+	})
+}
+
+// ResetRegistrationConflictWebhookBucketsForTests clears the
+// per-device webhook rate-limit state so tests can run in isolation.
+// Production code never calls this.
+func ResetRegistrationConflictWebhookBucketsForTests() {
+	conflictWebhookMu.Lock()
+	conflictWebhookBuckets = make(map[string]*conflictWebhookBucket)
+	conflictWebhookMu.Unlock()
+}
+
+// AdvanceConflictWebhookWindowStartForTests rewinds a bucket's
+// windowStart to simulate the passage of time. Production code never
+// calls this.
+func AdvanceConflictWebhookWindowStartForTests(tenantID, deviceID string, deltaSeconds int64) {
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	key := tenantID + "|" + deviceID
+	conflictWebhookMu.Lock()
+	if bucket, ok := conflictWebhookBuckets[key]; ok {
+		bucket.windowStart -= deltaSeconds
+	}
+	conflictWebhookMu.Unlock()
+}
+
 // TriggerWebhooks fires webhooks subscribed in the given tenant for the named event.
 // Pass tenantID="" to fan out across all tenants (system events).
 func TriggerWebhooks(tenantID, event string, payload map[string]interface{}) {

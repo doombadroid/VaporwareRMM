@@ -166,6 +166,11 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 					fmt.Sprintf("pop_rejected verdict=%s claimed_hostname=%s claimed_mac=%s ip=%s",
 						popVerdict.String(), hostname, macAddr, c.IP()),
 					c.IP())
+				// Webhook fires at most once per device per hour; the
+				// audit row above is unconditional. Bucket count
+				// accumulates between fires so the next fire's
+				// payload reflects the full burst.
+				events.TriggerRegistrationConflictWebhook(tenantID, deviceID, hostname, macAddr, c.IP())
 				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 					"error":   "Device exists; proof-of-possession required",
 					"message": "This hostname is already registered. Re-registration requires presenting the current agent token in the X-Existing-Agent-Token header. If the agent has lost its token, an administrator must remove the device first.",

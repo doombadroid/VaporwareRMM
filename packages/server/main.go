@@ -412,6 +412,7 @@ func main() {
 
 	// Admin routes
 	handlers.RegisterAdminRoutes(api)
+	handlers.RegisterTailscaleRoutes(api)
 
 	// Ticket routes
 	handlers.RegisterTicketRoutes(api, cfg)

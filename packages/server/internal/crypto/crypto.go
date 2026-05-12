@@ -58,6 +58,24 @@ func MustBeEnabled() error {
 	return errors.New("crypto: SECRETS_ENCRYPTION_KEY is required for this operation")
 }
 
+// SetKeyForTests loads a base64-encoded 32-byte key into the package
+// AFTER init() has already run. Test-only — production callers should
+// set SECRETS_ENCRYPTION_KEY in the environment before the binary starts.
+// The init() path is the production codepath; this helper is the only way
+// to put encryption into the "enabled" state from inside a test process
+// because init() runs at package import (which is before any test code).
+func SetKeyForTests(keyB64 string) error {
+	key, err := base64.StdEncoding.DecodeString(keyB64)
+	if err != nil {
+		return fmt.Errorf("crypto: SetKeyForTests: invalid base64: %w", err)
+	}
+	if len(key) != 32 {
+		return fmt.Errorf("crypto: SetKeyForTests: key must be 32 bytes, got %d", len(key))
+	}
+	encKey = key
+	return nil
+}
+
 // Encrypt encrypts plaintext with AES-256-GCM.
 // Returns plaintext unchanged when no key is configured or input is empty.
 func Encrypt(plaintext string) (string, error) {

@@ -9,6 +9,8 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,7 +35,12 @@ import (
 )
 
 const (
-	DefaultServerURL       = "http://localhost:8080"
+	// DefaultServerURL was the agent's fallback for a missing
+	// VAPOR_SERVER_URL. Removed in favor of an explicit error from
+	// resolveServerURL — a production agent that defaults to
+	// localhost masks env-loading bugs and produces 401 storms
+	// against itself instead of a clear "no server configured"
+	// message. Kept as a documentation comment for the rationale.
 	DefaultAgentPort       = 47991
 	DefaultSunshinePort    = 47990
 	HeartbeatInterval      = 30 * time.Second
@@ -1661,18 +1668,54 @@ func agentEnvFilePath() string {
 	return "/etc/vaporrmm/agent.env"
 }
 
+// resolveServerURL applies the documented precedence:
+//
+//	1. --server-url command-line flag (highest)
+//	2. VAPOR_SERVER_URL environment variable
+//	3. error (no silent localhost fallback)
+//
+// The "silent localhost" fallback was the wrong default for a
+// production agent: when the env file failed to load (the OpenRC
+// service file bug fixed in be1c37c, or any future env-loading
+// regression), the agent quietly tried to talk to itself on
+// 127.0.0.1:8080 and produced confused 401/connection-refused
+// errors instead of a clear "no server URL configured" message.
+//
+// Returns the trimmed URL on success, or an error with operator-
+// readable guidance.
+func resolveServerURL(flagURL, envURL string) (string, error) {
+	trim := func(s string) string {
+		return strings.TrimSuffix(strings.TrimSpace(s), "/")
+	}
+	if v := trim(flagURL); v != "" {
+		return v, nil
+	}
+	if v := trim(envURL); v != "" {
+		return v, nil
+	}
+	return "", errors.New("no server URL configured: pass --server-url=<https://server> or set VAPOR_SERVER_URL")
+}
+
 func main() {
 	// Bootstrap env vars from a config file BEFORE reading anything else.
 	// This is the Windows-service workaround and a useful fallback elsewhere.
 	loadEnvFile(agentEnvFilePath())
 
-	serverURL := os.Getenv("VAPOR_SERVER_URL")
-	if serverURL == "" {
-		serverURL = DefaultServerURL
+	// Command-line flags. Defined here (not at package scope) so each
+	// main() invocation — and the test that exercises this path — gets
+	// a fresh FlagSet without colliding with the global flag.CommandLine
+	// or with any other test in the package.
+	fs := flag.NewFlagSet("vaporrmm-agent", flag.ExitOnError)
+	flagServerURL := fs.String("server-url", "", "server base URL (overrides VAPOR_SERVER_URL)")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		os.Exit(2)
 	}
 
-	// Trim trailing slash for consistency
-	serverURL = strings.TrimSuffix(serverURL, "/")
+	serverURL, err := resolveServerURL(*flagServerURL, os.Getenv("VAPOR_SERVER_URL"))
+	if err != nil {
+		slog.Error(err.Error())
+		os.Exit(2)
+	}
 
 	// Refuse to send the bearer token in plaintext when the server URL
 	// points at a non-loopback host. Operators who explicitly want HTTP

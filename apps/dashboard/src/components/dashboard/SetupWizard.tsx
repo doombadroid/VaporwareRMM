@@ -16,6 +16,7 @@ import {
 import { toast } from 'sonner'
 import { branding as brandingApi, type BrandingConfig } from '@/lib/api'
 import { useBranding } from '@/components/BrandingProvider'
+import { brandAppNameError, slugifyAppName } from '@/lib/utils'
 
 interface SetupWizardProps {
   open: boolean
@@ -28,6 +29,14 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
   const [localBranding, setLocalBranding] = useState<BrandingConfig>(branding)
   const [saving, setSaving] = useState(false)
   const [copied, setCopied] = useState(false)
+  // appNameTouched stays false until the user types directly into
+  // the Internal Identifier field. While false, Company Name edits
+  // auto-fill the identifier via slugifyAppName so the common case
+  // (operator types their real company name once) ends with a valid
+  // slug without them ever touching the technical field. Clearing
+  // the identifier resets the flag so they can re-engage the sync.
+  const [appNameTouched, setAppNameTouched] = useState(false)
+  const appNameError = brandAppNameError(localBranding.app_name)
   // Origin set in effect so SSR doesn't bake a stale build-time API URL into
   // the install command. window.location.origin is whatever the operator's
   // dashboard is actually reachable at — that's what the curl command needs.
@@ -54,6 +63,10 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
   // Returns true on success so callers (next()) don't advance the step on a
   // save failure (e.g. non-admin user without branding write permission).
   const handleSaveBranding = async (): Promise<boolean> => {
+    if (appNameError) {
+      toast.error(`Internal identifier: ${appNameError}`)
+      return false
+    }
     setSaving(true)
     try {
       await brandingApi.update(localBranding)
@@ -65,6 +78,29 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
       return false
     } finally {
       setSaving(false)
+    }
+  }
+
+  const onCompanyNameChange = (value: string) => {
+    setLocalBranding((prev) => {
+      const next = { ...prev, company_name: value }
+      if (!appNameTouched) {
+        const slug = slugifyAppName(value)
+        if (slug) next.app_name = slug
+      }
+      return next
+    })
+  }
+
+  const onAppNameChange = (value: string) => {
+    setLocalBranding((prev) => ({ ...prev, app_name: value }))
+    if (value === '') {
+      // Re-engage the company→app_name auto-sync. Treating a cleared
+      // field as "give me the default again" matches what users
+      // actually mean when they wipe an identifier they don't like.
+      setAppNameTouched(false)
+    } else {
+      setAppNameTouched(true)
     }
   }
 
@@ -168,25 +204,53 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
               </p>
 
               <div>
-                <label className="block text-sm font-medium text-white/60 mb-1">App Name</label>
-                <input
-                  type="text"
-                  value={localBranding.app_name}
-                  onChange={(e) => setLocalBranding({ ...localBranding, app_name: e.target.value })}
-                  className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-cyan-500/40"
-                  placeholder="vaporRMM"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-white/60 mb-1">Company Name</label>
+                <label className="block text-sm font-medium text-white mb-1">
+                  Company name
+                </label>
                 <input
                   type="text"
                   value={localBranding.company_name}
-                  onChange={(e) => setLocalBranding({ ...localBranding, company_name: e.target.value })}
+                  onChange={(e) => onCompanyNameChange(e.target.value)}
                   className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-cyan-500/40"
-                  placeholder="Your Company"
+                  placeholder="Smith & Jones IT"
                 />
+                <p className="mt-1 text-xs text-white/40">
+                  Shown to clients in the dashboard, install scripts, and
+                  agent installer header.
+                </p>
+              </div>
+
+              <div className="opacity-90">
+                <label className="block text-xs font-medium text-white/50 mb-1">
+                  Internal identifier
+                </label>
+                <input
+                  type="text"
+                  value={localBranding.app_name}
+                  onChange={(e) => onAppNameChange(e.target.value)}
+                  className={`w-full bg-white/[0.02] border rounded-lg px-3 py-1.5 text-xs font-mono text-white/80 placeholder:text-white/20 focus:outline-none ${
+                    appNameError
+                      ? 'border-rose-500/50 focus:border-rose-400/70'
+                      : 'border-white/[0.06] focus:border-cyan-500/30'
+                  }`}
+                  placeholder="auto-generated from company name"
+                  aria-invalid={appNameError ? 'true' : 'false'}
+                  aria-describedby="app-name-help app-name-error"
+                />
+                <p id="app-name-help" className="mt-1 text-[11px] text-white/30 leading-snug">
+                  Used for the systemd service name and file paths.
+                  Letters, numbers, dashes, underscores only.
+                  Auto-generated from company name if left blank.
+                </p>
+                {appNameError && (
+                  <p
+                    id="app-name-error"
+                    className="mt-1 text-[11px] text-rose-400 leading-snug"
+                    role="alert"
+                  >
+                    {appNameError}
+                  </p>
+                )}
               </div>
 
               <div>
@@ -316,7 +380,11 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
           </Button>
 
           {step < steps.length - 1 ? (
-            <Button onClick={next} disabled={saving} className="text-sm bg-cyan-600 hover:bg-cyan-500 text-white">
+            <Button
+              onClick={next}
+              disabled={saving || (step === 1 && !!appNameError)}
+              className="text-sm bg-cyan-600 hover:bg-cyan-500 text-white"
+            >
               {saving ? 'Saving...' : 'Next'}
               <ChevronRight className="w-4 h-4 ml-1" />
             </Button>

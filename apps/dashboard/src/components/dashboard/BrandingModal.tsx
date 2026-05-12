@@ -1,10 +1,12 @@
 'use client'
 
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { X } from 'lucide-react'
 import { toast } from 'sonner'
 import { branding as brandingApi } from '@/lib/api'
 import type { BrandingConfig } from '@/lib/api'
+import { brandAppNameError, slugifyAppName } from '@/lib/utils'
 
 interface BrandingModalProps {
   open: boolean
@@ -19,13 +21,38 @@ export default function BrandingModal({
   branding,
   onBrandingChange,
 }: BrandingModalProps) {
+  // appNameTouched: true once the user types into the Internal
+  // Identifier field directly. While false, edits to Company Name
+  // auto-fill app_name with the slugified value. Clearing the field
+  // resets to false so the auto-sync re-engages.
+  const [appNameTouched, setAppNameTouched] = useState(false)
+  const appNameError = brandAppNameError(branding.app_name)
+
   const handleSave = async () => {
+    if (appNameError) {
+      toast.error(`Internal identifier: ${appNameError}`)
+      return
+    }
     try {
       await brandingApi.update(branding)
       onClose()
     } catch {
       toast.error('Failed to save branding')
     }
+  }
+
+  const onCompanyNameChange = (value: string) => {
+    const next: BrandingConfig = { ...branding, company_name: value }
+    if (!appNameTouched) {
+      const slug = slugifyAppName(value)
+      if (slug) next.app_name = slug
+    }
+    onBrandingChange(next)
+  }
+
+  const onAppNameChange = (value: string) => {
+    onBrandingChange({ ...branding, app_name: value })
+    setAppNameTouched(value !== '')
   }
 
   if (!open) return null
@@ -57,32 +84,55 @@ export default function BrandingModal({
         </div>
         <div className="p-6 space-y-4">
           <div>
-            <label className="block text-sm font-medium text-white/60 mb-1">
-              App Name
-            </label>
-            <input
-              type="text"
-              value={branding.app_name}
-              onChange={(e) =>
-                onBrandingChange({ ...branding, app_name: e.target.value })
-              }
-              className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-cyan-500/40"
-              placeholder="vaporRMM"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-white/60 mb-1">
-              Company Name
+            <label className="block text-sm font-medium text-white mb-1">
+              Company name
             </label>
             <input
               type="text"
               value={branding.company_name}
-              onChange={(e) =>
-                onBrandingChange({ ...branding, company_name: e.target.value })
-              }
+              onChange={(e) => onCompanyNameChange(e.target.value)}
               className="w-full bg-white/[0.04] border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-cyan-500/40"
-              placeholder="Your Company"
+              placeholder="Smith & Jones IT"
             />
+            <p className="mt-1 text-xs text-white/40">
+              Shown to clients in the dashboard, install scripts, and
+              agent installer header.
+            </p>
+          </div>
+          <div className="opacity-90">
+            <label className="block text-xs font-medium text-white/50 mb-1">
+              Internal identifier
+            </label>
+            <input
+              type="text"
+              value={branding.app_name}
+              onChange={(e) => onAppNameChange(e.target.value)}
+              className={`w-full bg-white/[0.02] border rounded-lg px-3 py-1.5 text-xs font-mono text-white/80 placeholder:text-white/20 focus:outline-none ${
+                appNameError
+                  ? 'border-rose-500/50 focus:border-rose-400/70'
+                  : 'border-white/[0.06] focus:border-cyan-500/30'
+              }`}
+              placeholder="auto-generated from company name"
+              aria-invalid={appNameError ? 'true' : 'false'}
+              aria-describedby="bm-app-name-help bm-app-name-error"
+            />
+            <p
+              id="bm-app-name-help"
+              className="mt-1 text-[11px] text-white/30 leading-snug"
+            >
+              Used for the systemd service name and file paths.
+              Letters, numbers, dashes, underscores only.
+              Auto-generated from company name if left blank.
+            </p>
+            {appNameError && (
+              <p
+                id="bm-app-name-error"
+                className="mt-1 text-[11px] text-rose-400 leading-snug"
+                role="alert"
+              >
+                {appNameError}
+              </p>
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium text-white/60 mb-1">
@@ -173,6 +223,7 @@ export default function BrandingModal({
           </Button>
           <Button
             onClick={handleSave}
+            disabled={!!appNameError}
             style={{ backgroundColor: branding.primary_color }}
             className="text-black font-medium"
           >

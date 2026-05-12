@@ -24,6 +24,23 @@ export function brandAppNameError(value: string): string {
   return ""
 }
 
+// formatBytes turns a byte count into a human-readable string with
+// one decimal place. Picks the right unit between MB / GB / TB; falls
+// through to "B" for values under 1 MB and to "—" (em-dash) for
+// zero / null / undefined. The em-dash is more conventional than
+// "N/A" for missing-data table cells and less alarming for the
+// common case where a device hasn't reported yet.
+export function formatBytes(n?: number | null): string {
+  if (!n || n <= 0) return "—"
+  const TB = 1e12
+  const GB = 1e9
+  const MB = 1e6
+  if (n >= TB) return `${(n / TB).toFixed(1)} TB`
+  if (n >= GB) return `${(n / GB).toFixed(1)} GB`
+  if (n >= MB) return `${(n / MB).toFixed(1)} MB`
+  return `${n} B`
+}
+
 // formatOSVersion picks the most operationally useful version string
 // for display: kernel_version (uname -r on Linux, kernel build on
 // Windows, Darwin version on macOS) when present, otherwise

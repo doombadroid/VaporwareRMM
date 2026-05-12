@@ -14,7 +14,7 @@ import {
   type SoftwareEntry,
   type HardwareInfo,
 } from '@/lib/api'
-import { formatOSVersion } from '@/lib/utils'
+import { formatBytes, formatOSVersion } from '@/lib/utils'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
 import { PageHeader, Section, EmptyState } from '@/components/ui/page'
@@ -33,10 +33,10 @@ function StatRow({ label, value }: { label: string; value: string | number }) {
   )
 }
 
-function fmtBytes(n?: number): string {
-  if (!n) return 'N/A'
-  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`
-}
+// fmtBytes is a thin wrapper around the shared formatBytes helper
+// so existing call sites keep their familiar name. New code should
+// import formatBytes directly from @/lib/utils.
+const fmtBytes = formatBytes
 
 export default function DeviceDetailPage() {
   const params = useParams()
@@ -163,13 +163,13 @@ export default function DeviceDetailPage() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-lg overflow-hidden">
             <div className="bg-[#030308] px-4 py-4">
               <p className="text-[10.5px] uppercase tracking-[0.14em] text-white/40 font-medium mb-2">System</p>
-              <StatRow label="IP" value={device.ip_address || 'N/A'} />
-              <StatRow label="MAC" value={device.mac_address || 'N/A'} />
-              <StatRow label="Agent" value={device.agent_version || 'N/A'} />
+              <StatRow label="IP" value={device.ip_address || '—'} />
+              <StatRow label="MAC" value={device.mac_address || '—'} />
+              <StatRow label="Agent" value={device.agent_version || '—'} />
             </div>
             <div className="bg-[#030308] px-4 py-4">
               <p className="text-[10.5px] uppercase tracking-[0.14em] text-white/40 font-medium mb-2">Resources</p>
-              <StatRow label="CPU" value={device.cpu || 'N/A'} />
+              <StatRow label="CPU" value={device.cpu || '—'} />
               <StatRow label="Memory" value={fmtBytes(device.memory)} />
               <StatRow label="Disk" value={fmtBytes(device.disk_size)} />
             </div>
@@ -254,12 +254,12 @@ export default function DeviceDetailPage() {
               <Section title="Hardware" className="mb-0">
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-px bg-white/[0.06] border border-white/[0.06] rounded-lg overflow-hidden">
                   {[
-                    ['CPU', hardware.cpu_model || 'N/A'],
-                    ['Cores', String(hardware.cpu_cores || 'N/A')],
-                    ['RAM', fmtBytes(hardware.ram_bytes)],
-                    ['Disk', hardware.disk_total_bytes ? `${(hardware.disk_total_bytes / 1024 / 1024 / 1024).toFixed(0)} GB` : 'N/A'],
-                    ['Platform', `${hardware.platform || ''} ${hardware.platform_version || ''}`.trim() || 'N/A'],
-                    ['Kernel', hardware.kernel_version || 'N/A'],
+                    ['CPU', hardware.cpu_model || '—'],
+                    ['Cores', String(hardware.cpu_cores || '—')],
+                    ['RAM', formatBytes(hardware.ram_bytes)],
+                    ['Disk', formatBytes(hardware.disk_total_bytes)],
+                    ['Platform', `${hardware.platform || ''} ${hardware.platform_version || ''}`.trim() || '—'],
+                    ['Kernel', hardware.kernel_version || '—'],
                   ].map(([label, value]) => (
                     <div key={label} className="bg-[#030308] px-4 py-3">
                       <p className="text-[10.5px] uppercase tracking-[0.14em] text-white/40">{label}</p>

@@ -5,7 +5,7 @@
    ▲ Next.js 15.5.18
 
    Creating an optimized production build ...
- ✓ Compiled successfully in 3.9s
+ ✓ Compiled successfully in 3.3s
    Linting and checking validity of types ...
 
 ./src/app/admin/ai/page.tsx
@@ -58,7 +58,7 @@
 89:57  Warning: Unexpected any. Specify a different type.  @typescript-eslint/no-explicit-any
 
 ./src/lib/api.ts
-1075:39  Warning: Unexpected any. Specify a different type.  @typescript-eslint/no-explicit-any
+1076:39  Warning: Unexpected any. Specify a different type.  @typescript-eslint/no-explicit-any
 
 info  - Need to disable some ESLint rules? Learn more here: https://nextjs.org/docs/app/api-reference/config/eslint#disabling-rules
    Collecting page data ...
@@ -71,36 +71,36 @@ info  - Need to disable some ESLint rules? Learn more here: https://nextjs.org/d
    Collecting build traces ...
 
 Route (app)                                 Size  First Load JS
-┌ ○ /                                     118 kB         277 kB
+┌ ○ /                                     118 kB         278 kB
 ├ ○ /_not-found                            998 B         104 kB
-├ ○ /admin/ai                            8.79 kB         166 kB
-├ ○ /admin/ai/cost                       1.99 kB         159 kB
-├ ○ /admin/alert-rules                   2.64 kB         162 kB
-├ ○ /admin/audit                         4.35 kB         161 kB
+├ ○ /admin/ai                            8.93 kB         166 kB
+├ ○ /admin/ai/cost                       2.15 kB         159 kB
+├ ○ /admin/alert-rules                   2.64 kB         163 kB
+├ ○ /admin/audit                         4.51 kB         161 kB
 ├ ○ /admin/cert-monitors                 2.81 kB         163 kB
-├ ○ /admin/compliance                    4.08 kB         161 kB
-├ ○ /admin/customers                     2.67 kB         162 kB
+├ ○ /admin/compliance                    4.25 kB         161 kB
+├ ○ /admin/customers                     2.67 kB         163 kB
 ├ ○ /admin/groups                        2.95 kB         163 kB
-├ ○ /admin/logs                          3.06 kB         160 kB
+├ ○ /admin/logs                          3.22 kB         160 kB
 ├ ○ /admin/maintenance                   2.51 kB         162 kB
-├ ○ /admin/neighbors                        4 kB         161 kB
-├ ○ /admin/policies                         3 kB         160 kB
+├ ○ /admin/neighbors                     4.16 kB         161 kB
+├ ○ /admin/policies                      3.15 kB         160 kB
 ├ ○ /admin/reports                       2.98 kB         163 kB
 ├ ○ /admin/snmp                          2.34 kB         162 kB
-├ ○ /admin/software                      2.94 kB         160 kB
+├ ○ /admin/software                       3.1 kB         160 kB
 ├ ○ /admin/sso                           2.57 kB         162 kB
 ├ ○ /admin/tenants                       5.35 kB         155 kB
 ├ ○ /admin/webhooks                      2.79 kB         163 kB
-├ ○ /agents                              4.59 kB         161 kB
-├ ○ /alerts                              4.16 kB         161 kB
-├ ƒ /devices/[id]                        5.48 kB         162 kB
+├ ○ /agents                              4.76 kB         162 kB
+├ ○ /alerts                              4.33 kB         161 kB
+├ ƒ /devices/[id]                        5.61 kB         162 kB
 ├ ○ /forgot-password                     1.29 kB         142 kB
 ├ ○ /login                               1.54 kB         142 kB
 ├ ○ /network                             4.06 kB         154 kB
-├ ○ /patches                             4.25 kB         161 kB
+├ ○ /patches                             4.42 kB         161 kB
 ├ ○ /portal                              3.73 kB         151 kB
-├ ○ /portal/login                        2.66 kB         144 kB
-├ ƒ /portal/tickets/[id]                 4.21 kB         148 kB
+├ ○ /portal/login                        2.83 kB         144 kB
+├ ƒ /portal/tickets/[id]                 4.37 kB         149 kB
 ├ ○ /settings                            5.28 kB         165 kB
 ├ ○ /tickets                             2.66 kB         163 kB
 └ ƒ /tickets/[id]                         4.4 kB         164 kB

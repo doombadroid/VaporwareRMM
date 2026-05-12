@@ -7,6 +7,29 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
+function formatBytes(n) {
+  if (!n || n <= 0) return "—"
+  const TB = 1e12
+  const GB = 1e9
+  const MB = 1e6
+  if (n >= TB) return `${(n / TB).toFixed(1)} TB`
+  if (n >= GB) return `${(n / GB).toFixed(1)} GB`
+  if (n >= MB) return `${(n / MB).toFixed(1)} MB`
+  return `${n} B`
+}
+
+test('formatBytes picks unit and renders em-dash for zero/null', () => {
+  assert.equal(formatBytes(0), '—')
+  assert.equal(formatBytes(null), '—')
+  assert.equal(formatBytes(undefined), '—')
+  assert.equal(formatBytes(-1), '—')
+  assert.equal(formatBytes(500), '500 B')
+  assert.equal(formatBytes(1_500_000), '1.5 MB')
+  assert.equal(formatBytes(8_589_934_592), '8.6 GB')           // 8 GB RAM
+  assert.equal(formatBytes(137_438_953_472), '137.4 GB')       // 128 GB RAM (real device)
+  assert.equal(formatBytes(2_199_023_255_552), '2.2 TB')       // 2 TB disk (real device)
+})
+
 const BRAND_APP_NAME_REGEX = /^[A-Za-z0-9._-]{1,64}$/
 
 function brandAppNameError(value) {

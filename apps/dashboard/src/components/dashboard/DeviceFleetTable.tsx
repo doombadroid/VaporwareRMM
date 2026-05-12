@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import { formatTimeAgo } from '@/lib/dashboard-utils'
 import type { Device } from '@/lib/api'
-import { formatOSVersion } from '@/lib/utils'
+import { formatBytes, formatOSVersion } from '@/lib/utils'
 
 interface DeviceFleetTableProps {
   devices: Device[]
@@ -232,27 +232,19 @@ export default function DeviceFleetTable({
                   </div>
                 </td>
                 <td className="py-3">
-                  <div className="flex items-center gap-2">
-                    <div className="w-16 bg-white/[0.06] rounded-full h-1.5">
-                      <div
-                        className={`h-1.5 rounded-full ${
-                          (device.memory || 0) > 80
-                            ? 'bg-rose-400'
-                            : 'bg-violet-400'
-                        }`}
-                        style={{ width: `${device.memory || 0}%` }}
-                      />
-                    </div>
-                    <span
-                      className={`text-xs font-mono ${
-                        (device.memory || 0) > 80
-                          ? 'text-rose-400'
-                          : 'text-white/50'
-                      }`}
-                    >
-                      {device.memory || 0}%
-                    </span>
-                  </div>
+                  {/*
+                    device.memory is the total RAM bytes reported by
+                    the agent. Earlier code treated it as a 0-100
+                    percent and drew a usage bar — but the schema
+                    column is total bytes, not percent, so the bar
+                    was always saturated for any host with > 80 GB
+                    RAM. Render the absolute value instead;
+                    real-time usage percent lives in metrics_history
+                    and is exposed elsewhere.
+                  */}
+                  <span className="text-xs font-mono text-white/55">
+                    {formatBytes(device.memory)}
+                  </span>
                 </td>
                 <td className="py-3 text-xs text-white/30 font-mono">
                   {formatTimeAgo(device.last_seen)}

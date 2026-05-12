@@ -292,8 +292,8 @@ function CheckRow({ label, state, error }: { label: string; state: CheckState; e
 function ByoPanel() {
   return (
     <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 text-xs text-white/55 leading-relaxed">
-      The install script will continue to accept <code className="text-white/80">TAILSCALE_AUTH_KEY</code> from the operator's
-      environment variables, same as today. VaporwareRMM doesn't manage the Tailscale connection in this mode.
+      The install script will continue to accept <code className="text-white/80">TAILSCALE_AUTH_KEY</code> from the operator&apos;s
+      environment variables, same as today. VaporwareRMM doesn&apos;t manage the Tailscale connection in this mode.
       Generate auth keys at{' '}
       <a
         href="https://login.tailscale.com/admin/settings/keys"

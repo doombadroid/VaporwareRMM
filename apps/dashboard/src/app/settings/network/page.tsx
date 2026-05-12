@@ -223,7 +223,7 @@ export default function NetworkSettingsPage() {
               .
             </li>
             <li>
-              v1 cross-tenant isolation is enforced by Tailscale ACLs you author in Tailscale's
+              v1 cross-tenant isolation is enforced by Tailscale ACLs you author in Tailscale&apos;s
               admin console. See <code className="text-white/70">docs/tailscale-acl-recipe.md</code> for a paste-ready starting config.
             </li>
           </ul>

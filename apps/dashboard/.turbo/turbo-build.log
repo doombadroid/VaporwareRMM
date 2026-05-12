@@ -5,7 +5,7 @@
    ▲ Next.js 15.5.18
 
    Creating an optimized production build ...
- ✓ Compiled successfully in 3.3s
+ ✓ Compiled successfully in 2.4s
    Linting and checking validity of types ...
 
 ./src/app/admin/ai/page.tsx
@@ -62,16 +62,16 @@
 
 info  - Need to disable some ESLint rules? Learn more here: https://nextjs.org/docs/app/api-reference/config/eslint#disabling-rules
    Collecting page data ...
-   Generating static pages (0/32) ...
-   Generating static pages (8/32) 
-   Generating static pages (16/32) 
-   Generating static pages (24/32) 
- ✓ Generating static pages (32/32)
+   Generating static pages (0/33) ...
+   Generating static pages (8/33) 
+   Generating static pages (16/33) 
+   Generating static pages (24/33) 
+ ✓ Generating static pages (33/33)
    Finalizing page optimization ...
    Collecting build traces ...
 
 Route (app)                                 Size  First Load JS
-┌ ○ /                                     118 kB         278 kB
+┌ ○ /                                     118 kB         281 kB
 ├ ○ /_not-found                            998 B         104 kB
 ├ ○ /admin/ai                            8.93 kB         166 kB
 ├ ○ /admin/ai/cost                       2.15 kB         159 kB
@@ -101,8 +101,9 @@ Route (app)                                 Size  First Load JS
 ├ ○ /portal                              3.73 kB         151 kB
 ├ ○ /portal/login                        2.83 kB         144 kB
 ├ ƒ /portal/tickets/[id]                 4.37 kB         149 kB
-├ ○ /settings                            5.28 kB         165 kB
-├ ○ /tickets                             2.66 kB         163 kB
+├ ○ /settings                            5.49 kB         165 kB
+├ ○ /settings/network                    3.19 kB         167 kB
+├ ○ /tickets                             3.24 kB         163 kB
 └ ƒ /tickets/[id]                         4.4 kB         164 kB
 + First Load JS shared by all             103 kB
   ├ chunks/18-03f9ad6f3ded61b6.js        46.7 kB

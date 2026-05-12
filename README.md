@@ -215,6 +215,49 @@ Open `https://localhost` in a browser. Log in as `admin@vaporrmm.local` with the
 2. Settings → Security → enable TOTP, save the 8 backup codes somewhere safe
 3. `make test-postgres` against your live DB to verify migrations applied cleanly
 4. Run a backup → restore drill ([docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md))
+5. Setup wizard → Network step → connect Tailscale (see below). Without it, agent + Sunshine traffic rides the public internet and Sunshine remote desktop cannot work safely.
+
+### 6. Tailscale (recommended)
+
+The agent and Sunshine remote-desktop traffic ride a private Tailscale mesh
+when configured. v1 puts every managed endpoint on a single tailnet with
+per-tenant device tagging — cross-tenant isolation is enforced via Tailscale
+ACLs you author (see `docs/tailscale-acl-recipe.md` for a paste-ready
+starting config). Future versions add hard per-tenant tailnets
+([#19](https://github.com/doombadroid/VaporwareRMM/issues/19)) and BYO
+per-tenant credentials
+([#20](https://github.com/doombadroid/VaporwareRMM/issues/20)).
+
+What the setup wizard does:
+
+1. Operator picks **Connect Tailscale account** (recommended).
+2. Operator creates an OAuth client at
+   [tailscale.com/admin/settings/oauth](https://login.tailscale.com/admin/settings/oauth)
+   with the `auth_keys` (write) and `devices` (read) scopes.
+3. Wizard runs three checks: authentication, auth-key minting scope,
+   device list scope. Each surfaces a specific error with a "Fix this"
+   link if a scope is missing.
+4. Credentials encrypted at rest via SECRETS_ENCRYPTION_KEY (the same
+   AES-GCM key used for SMTP / OIDC / AI provider secrets).
+5. Tenant admins see a read-only **Network: Tailscale (connected to X)**
+   indicator on Settings → General. Only super-admins can manage the
+   credential.
+
+Why OAuth client (not a personal access token): the OAuth client surface
+in Tailscale lets you scope the credential to exactly the two permissions
+VaporwareRMM needs. PATs carry the full power of a user account and are
+the wrong shape for a server-to-server integration.
+
+Required scopes (mirror these when creating the OAuth client):
+  - `auth_keys` (write) — the server mints short-lived per-install
+    auth keys via Tailscale's API. Without this, agents can't be
+    enrolled from the dashboard.
+  - `devices` (read) — Settings → Network shows the device table.
+
+If you can't or won't use Tailscale, the install script's
+`TAILSCALE_AUTH_KEY` env-var passthrough still works (wizard → BYO
+mode). And `--no-tailscale` skips the integration entirely, though
+Sunshine remote desktop won't be usable without it.
 
 ---
 

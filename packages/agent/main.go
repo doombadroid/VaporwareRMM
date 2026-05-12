@@ -1171,6 +1171,12 @@ func (a *Agent) getRegistrationInfo() map[string]interface{} {
 	// Windows: kernel build number, macOS: Darwin version).
 	// Dashboard prefers kernel_version for display, falls back to
 	// os_version when kernel_version is missing (older agents).
+	// Field names match the devices table columns directly so the
+	// server's register/heartbeat handlers can store them without a
+	// translation layer. Earlier versions sent memory as "ram" and
+	// disk as "storage"; the server never read those keys, so both
+	// columns silently stayed NULL on every device. Renamed here
+	// to memory / disk_size to match the schema.
 	return map[string]interface{}{
 		"hostname":       a.hostname,
 		"os":             hostInfo.OS,
@@ -1180,8 +1186,8 @@ func (a *Agent) getRegistrationInfo() map[string]interface{} {
 		"local_ips":      localIPs,
 		"mac_address":    macAddr,
 		"cpu":            getCPUName(cpuInfo),
-		"ram":            memInfo.Total,
-		"storage":        diskInfo.Total,
+		"memory":         memInfo.Total,
+		"disk_size":      diskInfo.Total,
 		"uptime":         hostInfo.Uptime,
 		"agent_version":  "1.0.0",
 		"agent_port":     a.port,
@@ -1340,17 +1346,33 @@ func (a *Agent) getStatus() map[string]interface{} {
 	// Check Tailscale status
 	tailscaleStatus := a.checkTailscaleStatus()
 
+	// Absolute totals (memory bytes, disk bytes, kernel version) are
+	// also included on every heartbeat so a device that registered
+	// before kernel_version/memory wiring landed still self-heals on
+	// the next heartbeat. The percentage fields stay separate — they
+	// drive the metrics_history time-series and live on a different
+	// table.
+	var memTotal, diskTotal uint64
+	if memInfo != nil {
+		memTotal = memInfo.Total
+	}
+	if diskInfo != nil {
+		diskTotal = diskInfo.Total
+	}
 	return map[string]interface{}{
-		"device_id":    deviceID,
-		"hostname":     a.hostname,
-		"status":       "online",
-		"cpu_usage":    cpuPct,
-		"memory_usage": memPct,
-		"disk_usage":   diskPct,
-		"last_seen":    time.Now(),
-		"uptime":       hostInfo.Uptime,
-		"sunshine":     sunshineStatus,
-		"tailscale":    tailscaleStatus,
+		"device_id":      deviceID,
+		"hostname":       a.hostname,
+		"status":         "online",
+		"cpu_usage":      cpuPct,
+		"memory_usage":   memPct,
+		"disk_usage":     diskPct,
+		"memory":         memTotal,
+		"disk_size":      diskTotal,
+		"kernel_version": hostInfo.KernelVersion,
+		"last_seen":      time.Now(),
+		"uptime":         hostInfo.Uptime,
+		"sunshine":       sunshineStatus,
+		"tailscale":      tailscaleStatus,
 	}
 }
 

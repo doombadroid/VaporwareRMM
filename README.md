@@ -246,8 +246,17 @@ Server on `:8080`, dashboard on `:3000`. The dashboard expects the server's CORS
 
 ```bash
 # Linux / macOS
+# Tailscale is default-installed and connected to your tailnet so the
+# agent's listener + Sunshine remote-desktop traffic ride a private
+# network instead of sitting on the public internet. Get an auth key
+# from https://login.tailscale.com/admin/settings/keys (one-off,
+# reusable, or ephemeral — operator's call).
 curl -fsSL https://rmm.yourdomain.com/api/branding/agent-install?format=script \
-  | sudo REGISTRATION_SECRET='vrt_xxxxx' bash -s -- --server https://rmm.yourdomain.com
+  | sudo REGISTRATION_SECRET='vrt_xxxxx' bash -s -- \
+      --server https://rmm.yourdomain.com \
+      --tailscale-auth-key=tskey-auth-XXXXXXXX
+# To opt out of Tailscale (NOT recommended for fleets using Sunshine —
+# Sunshine has no built-in auth on its listener), pass --no-tailscale.
 ```
 
 ```powershell

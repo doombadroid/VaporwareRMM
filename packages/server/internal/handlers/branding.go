@@ -294,10 +294,19 @@ func generateInstallScript(appName, companyName, iconURL, serverURL string) stri
 # Server: %s
 #
 # One-line install:
-#   curl -fsSL %s/api/branding/agent-install?format=script | sudo bash -s -- --server %s
+#   curl -fsSL %s/api/branding/agent-install?format=script | sudo bash -s -- --server %s --tailscale-auth-key tskey-auth-XXXX
 #
-# With Sunshine + Tailscale:
-#   curl -fsSL %s/api/branding/agent-install?format=script | sudo bash -s -- --server %s --install-sunshine --install-tailscale --tailscale-auth-key YOUR_KEY
+# Tailscale is installed by default. The agent + Sunshine remote-desktop
+# traffic moves over a private tailnet so Sunshine's auth-less listener
+# never sits on the public internet. To opt out (e.g., your endpoints
+# are already on a private network), pass --no-tailscale. Generate an
+# auth key at https://login.tailscale.com/admin/settings/keys.
+#
+# With Sunshine and an explicit auth key:
+#   curl -fsSL %s/api/branding/agent-install?format=script | sudo bash -s -- --server %s --install-sunshine --tailscale-auth-key tskey-auth-XXXX
+#
+# Opting out of Tailscale (NOT RECOMMENDED for fleets that use Sunshine):
+#   curl -fsSL %s/api/branding/agent-install?format=script | sudo bash -s -- --server %s --no-tailscale
 #
 set -euo pipefail
 
@@ -312,10 +321,17 @@ ENV_FILE="${CONFIG_DIR}/agent.env"
 # REGISTRATION_SECRET may be passed in env (preferred) or via --registration-secret
 : "${REGISTRATION_SECRET:=}"
 
+# TAILSCALE_AUTH_KEY may be passed in env (preferred for CI / fleet
+# provisioning where the key is a secret) or via --tailscale-auth-key.
+: "${TAILSCALE_AUTH_KEY:=}"
+
 # Optional extras
 INSTALL_SUNSHINE=""
-INSTALL_TAILSCALE=""
-TAILSCALE_AUTH_KEY=""
+# Tailscale is default-on. --no-tailscale flips this to "" before
+# the install path runs. --install-tailscale remains accepted but
+# is a no-op (the explicit name was the prior surface; preserve it
+# so existing operator scripts don't break).
+INSTALL_TAILSCALE="1"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -329,7 +345,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --install-tailscale)
+      # Already default; flag preserved for backwards compatibility.
       INSTALL_TAILSCALE="1"
+      shift
+      ;;
+    --no-tailscale)
+      INSTALL_TAILSCALE=""
       shift
       ;;
     --tailscale-auth-key)
@@ -350,6 +371,57 @@ echo "========================================"
 echo "  Installing $APP_NAME agent"
 echo "  Server: $SERVER_URL"
 echo "========================================"
+
+# ============================================================
+# Install Tailscale (default on; opt out with --no-tailscale)
+# ============================================================
+# Runs BEFORE the agent install so a missing/invalid auth key
+# fails the script before any state is written. Tailscale gives the
+# agent + Sunshine traffic a private tailnet so Sunshine's auth-less
+# listener never sits on the public internet.
+if [ -n "$INSTALL_TAILSCALE" ]; then
+  echo ""
+  echo "--- Installing Tailscale ---"
+  if [ -z "$TAILSCALE_AUTH_KEY" ]; then
+    echo ""
+    echo "ERROR: Tailscale is enabled by default but no auth key was provided."
+    echo "Get one from https://login.tailscale.com/admin/settings/keys and pass it via:"
+    echo "  --tailscale-auth-key=tskey-auth-XXXXX"
+    echo "or set the TAILSCALE_AUTH_KEY environment variable before running this script."
+    echo ""
+    echo "To skip Tailscale entirely (NOT RECOMMENDED if you plan to use Sunshine"
+    echo "remote desktop — the listener has no built-in auth), rerun with --no-tailscale."
+    exit 1
+  fi
+  if command -v tailscale &> /dev/null; then
+    echo "Tailscale already installed; skipping package install."
+  else
+    echo "Running Tailscale install script..."
+    if ! curl -fsSL https://tailscale.com/install.sh | sh; then
+      echo ""
+      echo "ERROR: Tailscale install script failed."
+      echo "Install manually from https://tailscale.com/download then re-run this script with --no-tailscale,"
+      echo "or re-run after the manual install completes."
+      exit 1
+    fi
+  fi
+  TAILSCALE_HOSTNAME="${APP_NAME,,}-$(hostname)"
+  echo "Bringing tailnet up as ${TAILSCALE_HOSTNAME} (auth-key length: ${#TAILSCALE_AUTH_KEY})..."
+  if ! tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="$TAILSCALE_HOSTNAME" --accept-routes --accept-dns=false; then
+    echo ""
+    echo "ERROR: tailscale up failed."
+    echo "Check the daemon: sudo tailscale status"
+    echo "Common causes: expired/used auth-key, ACL refused the tag, restrictive firewall."
+    exit 1
+  fi
+  if ! tailscale status >/dev/null 2>&1; then
+    echo ""
+    echo "ERROR: tailscale status exited non-zero after 'tailscale up'."
+    echo "The tailnet is not in a usable state. Inspect manually before re-running."
+    exit 1
+  fi
+  echo "Tailscale connected."
+fi
 
 # Detect OS/ARCH
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -447,29 +519,9 @@ if [ -n "$INSTALL_SUNSHINE" ]; then
   fi
 fi
 
-# ============================
-# Install Tailscale (optional)
-# ============================
-if [ -n "$INSTALL_TAILSCALE" ]; then
-  echo ""
-  echo "--- Installing Tailscale ---"
-  if command -v tailscale &> /dev/null; then
-    echo "Tailscale already installed, skipping."
-  else
-    echo "Running Tailscale install script..."
-    curl -fsSL https://tailscale.com/install.sh | sh 2>/dev/null || {
-      echo "WARNING: Tailscale install script failed. Install manually from https://tailscale.com/download"
-    }
-  fi
-
-  # Auto-connect if auth key provided
-  if [ -n "$TAILSCALE_AUTH_KEY" ] && command -v tailscale &> /dev/null; then
-    echo "Connecting Tailscale with provided auth key..."
-    tailscale up --authkey "$TAILSCALE_AUTH_KEY" --accept-routes 2>/dev/null || {
-      echo "WARNING: Tailscale up failed. You may need to run: sudo tailscale up --authkey $TAILSCALE_AUTH_KEY"
-    }
-  fi
-fi
+# Tailscale install moved to the top of the script so a missing
+# auth key fails before any state is written. See the
+# # Install Tailscale section above the OS-detect block.
 
 # Create config directory
 mkdir -p "$CONFIG_DIR"
@@ -629,5 +681,5 @@ elif [ "$INIT_SYSTEM" = "openrc" ]; then
   echo "Check status:  rc-service $SERVICE_NAME status"
   echo "View logs:     tail -f /var/log/${SERVICE_NAME}.log"
 fi
-`, companyName, companyName, serverURL, serverURL, serverURL, serverURL, serverURL, appName, serverURL, iconURL)
+`, companyName, companyName, serverURL, serverURL, serverURL, serverURL, serverURL, serverURL, serverURL, appName, serverURL, iconURL)
 }

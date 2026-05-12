@@ -188,6 +188,97 @@ func TestGenerateInstallScript_AmpersandIsSafe(t *testing.T) {
 	}
 }
 
+// TestGenerateInstallScript_TailscaleDefaultEnabled verifies the
+// generated install script flips INSTALL_TAILSCALE on by default
+// (rather than requiring --install-tailscale) and that the
+// Tailscale install section runs BEFORE the agent download so a
+// missing auth key fails before any state is written.
+func TestGenerateInstallScript_TailscaleDefaultEnabled(t *testing.T) {
+	s := generateInstallScript("vaporrmm", "Default Co", "https://example.com/icon.png", "https://rmm.example.com")
+	bashSyntaxCheck(t, s)
+
+	if !strings.Contains(s, `INSTALL_TAILSCALE="1"`) {
+		t.Error("install script must default INSTALL_TAILSCALE to \"1\"")
+	}
+	// The Tailscale-required auth-key error message must appear
+	// (so when no key is provided, the script aborts early).
+	if !strings.Contains(s, "Tailscale is enabled by default but no auth key was provided") {
+		t.Error("script missing the Tailscale-auth-key-required error message")
+	}
+	// Tailscale install must precede the agent download. Use the
+	// first occurrence of each marker to assert order.
+	tsIdx := strings.Index(s, "--- Installing Tailscale ---")
+	dlIdx := strings.Index(s, "Downloading pre-built agent binary")
+	if tsIdx == -1 || dlIdx == -1 {
+		t.Fatalf("expected both markers in script (tsIdx=%d dlIdx=%d)", tsIdx, dlIdx)
+	}
+	if tsIdx > dlIdx {
+		t.Errorf("Tailscale install (offset %d) must run BEFORE agent download (offset %d) so auth-key failures abort early", tsIdx, dlIdx)
+	}
+	// tailscale up must include --hostname / --accept-routes /
+	// --accept-dns=false; the last one keeps managed endpoints'
+	// DNS from being hijacked by the tailnet's MagicDNS.
+	for _, want := range []string{`--authkey="$TAILSCALE_AUTH_KEY"`, `--hostname="$TAILSCALE_HOSTNAME"`, `--accept-routes`, `--accept-dns=false`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("tailscale up call missing flag %q", want)
+		}
+	}
+}
+
+// TestGenerateInstallScript_NoTailscaleOptOut verifies the
+// --no-tailscale flag flips INSTALL_TAILSCALE to empty, and the
+// generated script's argument-handling block carries the new
+// flag.
+func TestGenerateInstallScript_NoTailscaleOptOut(t *testing.T) {
+	s := generateInstallScript("vaporrmm", "Optout Co", "https://example.com/icon.png", "https://rmm.example.com")
+	bashSyntaxCheck(t, s)
+
+	// The case arm in the argument parser must clear
+	// INSTALL_TAILSCALE.
+	if !strings.Contains(s, "--no-tailscale)") {
+		t.Error("script missing the --no-tailscale case arm")
+	}
+	// The arm sets INSTALL_TAILSCALE="" so the Tailscale section
+	// is skipped on this branch.
+	noTSBlock := s[strings.Index(s, "--no-tailscale)"):]
+	if !strings.Contains(noTSBlock[:200], `INSTALL_TAILSCALE=""`) {
+		t.Errorf("--no-tailscale arm should clear INSTALL_TAILSCALE; got first 200 chars after marker:\n%s", noTSBlock[:200])
+	}
+
+	// Simulate operator passing --no-tailscale by running bash with
+	// the script + flag, and assert the Tailscale-auth-key error
+	// does NOT fire. Use `set -n` would skip execution; instead
+	// dry-run with a runtime stub: write the script to disk, prefix
+	// with a stub that aborts before the install proper, but lets
+	// arg-parsing run.
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash not available: %v", err)
+	}
+	tmp := filepath.Join(t.TempDir(), "install.sh")
+	// Replace the rest of the script (everything past arg-parsing)
+	// with `echo "INSTALL_TAILSCALE=$INSTALL_TAILSCALE"; exit 0` so
+	// we observe the post-parse value without actually running an
+	// install. Locate the "echo \"==\"" banner that starts the real
+	// install and truncate there.
+	cutMarker := "echo \"========================================\"\necho \"  Installing $APP_NAME agent\""
+	cut := strings.Index(s, cutMarker)
+	if cut == -1 {
+		t.Fatalf("could not find banner marker to truncate script")
+	}
+	stub := s[:cut] + "echo \"INSTALL_TAILSCALE=$INSTALL_TAILSCALE\"\nexit 0\n"
+	if err := os.WriteFile(tmp, []byte(stub), 0700); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	out, err := exec.Command(bash, tmp, "--no-tailscale").CombinedOutput()
+	if err != nil {
+		t.Fatalf("stub run failed: %v\noutput=%s", err, string(out))
+	}
+	if !strings.Contains(string(out), "INSTALL_TAILSCALE=\n") && !strings.HasSuffix(strings.TrimSpace(string(out)), "INSTALL_TAILSCALE=") {
+		t.Errorf("--no-tailscale did not clear INSTALL_TAILSCALE; bash output: %q", string(out))
+	}
+}
+
 // TestDownloadAgent_LinuxAmd64Succeeds verifies the /download path
 // serves the bundled agent binary when the file is present. Skipped
 // locally because the path /opt/agents/linux-amd64 only exists

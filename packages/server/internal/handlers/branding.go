@@ -3,6 +3,7 @@ package handlers
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 
@@ -193,12 +194,27 @@ func getBrandingAndServerURL(c *fiber.Ctx) (models.BrandingConfig, string) {
 		bc = models.BrandingConfig{AppName: "vaporRMM", IconURL: "", CompanyName: "Vaporware RMM", PrimaryColor: "#3b82f6"}
 	}
 
-	host := c.Hostname()
-	// Only append port if Hostname doesn't already contain one and Port is valid server port
-	if port := c.Port(); port != "" && !strings.Contains(host, ":") {
-		host = host + ":" + port
+	// Prefer the operator-configured public URL. This is the URL
+	// agents and operators actually reach, which may differ from the
+	// request's apparent host (reverse proxy, request via tailnet,
+	// SNI != Host header).
+	//
+	// The previous implementation appended c.Port() to c.Hostname()
+	// — in Fiber, c.Port() is the CLIENT's source TCP port on the
+	// inbound connection, NOT the server's listening port or the
+	// public port. Every request's source port is a different
+	// ephemeral integer, so the generated install URL looked like
+	// "https://rmm.example.com:57202" and the curl that ran it 404'd
+	// because nothing was listening there. PUBLIC_URL is the only
+	// correct answer for "what URL should an external client use to
+	// reach this server?".
+	if publicURL := strings.TrimRight(os.Getenv("PUBLIC_URL"), "/"); publicURL != "" {
+		return bc, publicURL
 	}
-	serverURL := fmt.Sprintf("%s://%s", c.Protocol(), host)
+
+	// Fallback: derive from request. Used only in dev / test where
+	// PUBLIC_URL isn't configured. No port append.
+	serverURL := fmt.Sprintf("%s://%s", c.Protocol(), c.Hostname())
 	return bc, serverURL
 }
 

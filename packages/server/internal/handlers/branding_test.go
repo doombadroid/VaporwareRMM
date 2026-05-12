@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -80,6 +81,99 @@ func getBranding(t *testing.T, app *fiber.App) (int, map[string]interface{}) {
 		t.Fatalf("decode GET body: %v body=%s", err, string(raw))
 	}
 	return resp.StatusCode, out
+}
+
+// TestGetServerURL_PrefersPublicURL: when PUBLIC_URL is set, the
+// install-script generator must use it verbatim and ignore whatever
+// the request reports for hostname/port. Locks in the fix for the
+// "c.Port() returned the client's ephemeral source port" bug —
+// before the fix the generated URL looked like
+// "https://rmm.example.com:57202" and every install failed because
+// nothing was listening on that port.
+func TestGetServerURL_PrefersPublicURL(t *testing.T) {
+	app := brandingTestEnv(t)
+	t.Setenv("PUBLIC_URL", "https://rmm.tcitsys.com")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/branding/install-links", nil)
+	// Force the request to look like it came in via a different
+	// hostname AND with a source-port that would have been appended
+	// under the old buggy code.
+	req.Host = "internal-proxy.local:8443"
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"server_url":"https://rmm.tcitsys.com"`) {
+		t.Errorf("server_url should be the PUBLIC_URL verbatim; got body:\n%s", string(body))
+	}
+	if strings.Contains(string(body), "internal-proxy.local") {
+		t.Errorf("server_url leaked the inbound Host header; got body:\n%s", string(body))
+	}
+	// No port should appear in the server_url field — neither the
+	// client's source port nor any other.
+	if idx := strings.Index(string(body), `"server_url":"`); idx >= 0 {
+		tail := string(body)[idx+len(`"server_url":"`):]
+		if end := strings.Index(tail, `"`); end > 0 {
+			urlField := tail[:end]
+			// Strip scheme so the colon there doesn't count.
+			afterScheme := strings.TrimPrefix(strings.TrimPrefix(urlField, "https://"), "http://")
+			if strings.Contains(afterScheme, ":") {
+				t.Errorf("server_url contains a port after scheme: %q", urlField)
+			}
+		}
+	}
+}
+
+// TestGetServerURL_TrimsTrailingSlash: operators sometimes set
+// PUBLIC_URL with a trailing slash. The previous request-derived
+// path produced clean URLs; the env-var path must too, otherwise
+// rendered URLs become "https://example.com//api/..." and the
+// install script's curl 404s.
+func TestGetServerURL_TrimsTrailingSlash(t *testing.T) {
+	app := brandingTestEnv(t)
+	t.Setenv("PUBLIC_URL", "https://rmm.example.com/")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/branding/install-links", nil)
+	resp, _ := app.Test(req, -1)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"server_url":"https://rmm.example.com"`) {
+		t.Errorf("server_url should have trailing slash trimmed; got:\n%s", string(body))
+	}
+	if strings.Contains(string(body), "rmm.example.com//") {
+		t.Errorf("server_url contains double-slash; got:\n%s", string(body))
+	}
+}
+
+// TestGetServerURL_FallsBackToRequestHost: with PUBLIC_URL unset,
+// the function falls back to the request's host (dev / test path).
+// The fallback MUST NOT append c.Port() — that was the original
+// bug — so the URL is the bare scheme://host with no port suffix.
+func TestGetServerURL_FallsBackToRequestHost(t *testing.T) {
+	app := brandingTestEnv(t)
+	os.Unsetenv("PUBLIC_URL")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/branding/install-links", nil)
+	req.Host = "localhost"
+	resp, _ := app.Test(req, -1)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"server_url":"http://localhost"`) {
+		t.Errorf("fallback server_url should be http://localhost (no port); got:\n%s", string(body))
+	}
+	// The bug-class assertion: even if the test client picks an
+	// ephemeral source port, the response MUST NOT carry a
+	// ":<digits>" suffix on the URL.
+	if matched := regexpMatchAny(string(body), `"server_url":"https?://[^/"]+:\d+`); matched {
+		t.Errorf("fallback server_url appended a port; got:\n%s", string(body))
+	}
+}
+
+func regexpMatchAny(haystack, pattern string) bool {
+	re := regexp.MustCompile(pattern)
+	return re.MatchString(haystack)
 }
 
 // TestBranding_CompanyNameWithAmpersand asserts that real customer

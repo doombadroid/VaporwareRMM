@@ -101,6 +101,12 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		macAddr, _ := regInfo["mac_address"].(string)
 		cpuModel, _ := regInfo["cpu"].(string)
 		agentVersion, _ := regInfo["agent_version"].(string)
+		// JSON unmarshal into interface{} hands numbers back as
+		// float64. 130 GB (1.4e11) and 2 TB (2e12) are both well
+		// inside float64's 53-bit integer range, so the round-trip
+		// is exact for any realistic endpoint.
+		memoryBytes, _ := regInfo["memory"].(float64)
+		diskBytes, _ := regInfo["disk_size"].(float64)
 		osClass := sysfeatures.ClassifyOS(osName)
 
 		// Codex #6: on the re-registration branch we require the caller
@@ -191,8 +197,8 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 				// rotation. legacy_pop_bypass_used was already flipped
 				// to 1 atomically inside AcquireLegacyBypass.
 				if _, err := db.DB.Exec(
-					`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, kernel_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
-					localIP, osName, osVersion, kernelVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
+					`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, kernel_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, memory = ?, disk_size = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
+					localIP, osName, osVersion, kernelVersion, agentVersion, now, cpuModel, int64(memoryBytes), int64(diskBytes), localIP, osClass, deviceID,
 				); err != nil {
 					db.DedupMu.Unlock()
 					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
@@ -237,9 +243,9 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		default:
 			deviceID = uuid.New().String()
 			if _, err := db.DB.Exec(
-				`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version, status, last_seen, created_at, cpu, agent_ip, tenant_id, os_class)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, kernelVersion, agentVersion, "online", now, now, cpuModel, localIP, tenantID, osClass,
+				`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version, status, last_seen, created_at, cpu, memory, disk_size, agent_ip, tenant_id, os_class)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, kernelVersion, agentVersion, "online", now, now, cpuModel, int64(memoryBytes), int64(diskBytes), localIP, tenantID, osClass,
 			); err != nil {
 				db.DedupMu.Unlock()
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register device", "message": err.Error()})
@@ -286,8 +292,40 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 			slog.Warn("db query row scan failed", "error", err)
 		}
 
-		result, err := db.DB.Exec("UPDATE devices SET last_seen = ?, status = ? WHERE id = ?", now, status, deviceID)
+		// Pull memory / disk_size / kernel_version off the heartbeat
+		// so devices that registered before these fields were wired
+		// (or had a transient gopsutil failure on first register)
+		// self-heal on the next 30-second tick. Build the SET clause
+		// dynamically rather than using NULLIF in SQL — the Postgres
+		// driver infers the placeholder type from the SQL constant
+		// it's compared against (NULLIF($1, 0) → int4), and the
+		// 128 GB / 2 TB values are int8. Constructing the column
+		// list in Go keeps the placeholder type unambiguous.
+		hbMemory, _ := heartbeatData["memory"].(float64)
+		hbDisk, _ := heartbeatData["disk_size"].(float64)
+		hbKernel, _ := heartbeatData["kernel_version"].(string)
+
+		setParts := []string{"last_seen = ?", "status = ?"}
+		args := []interface{}{now, status}
+		if hbKernel != "" {
+			setParts = append(setParts, "kernel_version = ?")
+			args = append(args, hbKernel)
+		}
+		if hbMemory > 0 {
+			setParts = append(setParts, "memory = ?")
+			args = append(args, int64(hbMemory))
+		}
+		if hbDisk > 0 {
+			setParts = append(setParts, "disk_size = ?")
+			args = append(args, int64(hbDisk))
+		}
+		args = append(args, deviceID)
+		result, err := db.DB.Exec(
+			"UPDATE devices SET "+strings.Join(setParts, ", ")+" WHERE id = ?",
+			args...,
+		)
 		if err != nil {
+			slog.Warn("heartbeat update failed", "error", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update heartbeat"})
 		}
 

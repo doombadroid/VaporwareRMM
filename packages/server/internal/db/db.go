@@ -1207,6 +1207,27 @@ func RunMigrations(dialect string) error {
 			// rows. That's fine — there were no legacy agents to mark.
 			SQL: `UPDATE agent_tokens SET is_legacy_pre_codex_6 = 1 WHERE is_legacy_pre_codex_6 = 0;`,
 		},
+		{
+			Version: "051",
+			Name:    "devices_widen_memory_disk_to_bigint",
+			// devices.memory and devices.disk_size were declared as
+			// INTEGER (int4) in the original schema. Postgres int4
+			// caps at 2,147,483,647 — values above 2 GB / 2 GB
+			// truncate silently. Hosts with 130 GB RAM (1.4e11) or
+			// 2 TB disk (2e12) would land negative-or-zero garbage in
+			// the column.
+			//
+			// SQLite's INTEGER affinity already stores up to int64
+			// natively, so this is a Postgres-only fix. PostgresSQL
+			// runs ALTER TYPE BIGINT (non-destructive widening; the
+			// existing rows keep their values).
+			//
+			// The PostgresOnly=false default lets the migration record
+			// as applied on SQLite without executing anything — the
+			// empty SQL line below is a no-op there.
+			SQL:         `-- sqlite int affinity is already 64-bit; no-op`,
+			PostgresSQL: `ALTER TABLE devices ALTER COLUMN memory TYPE BIGINT, ALTER COLUMN disk_size TYPE BIGINT;`,
+		},
 	}
 
 	for _, m := range migrations {

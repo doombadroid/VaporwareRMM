@@ -188,6 +188,98 @@ func TestGenerateInstallScript_AmpersandIsSafe(t *testing.T) {
 	}
 }
 
+// TestDownloadAgent_LinuxAmd64Succeeds verifies the /download path
+// serves the bundled agent binary when the file is present. Skipped
+// locally because the path /opt/agents/linux-amd64 only exists
+// inside the built container; CI runs go test outside the image.
+// The test would catch a regression where the handler stops
+// serving the file even when staged correctly.
+func TestDownloadAgent_LinuxAmd64Succeeds(t *testing.T) {
+	app := brandingTestEnv(t)
+	const path = "/opt/agents/linux-amd64"
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("skipping: %s not present (expected outside the built container): %v", path, err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/download/agent-linux-amd64", nil)
+	resp, err := app.Test(req, -1)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, string(body))
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/octet-stream") {
+		t.Errorf("Content-Type: want application/octet-stream prefix, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) == 0 {
+		t.Errorf("download body is empty")
+	}
+}
+
+// TestDownloadAgent_UnknownPlatformReturns404 verifies the allowlist
+// rejects platforms that aren't in agentBinaryPaths. Critical for
+// the future Windows/macOS rollout — adding a route entry without
+// adding the file would otherwise silently serve a wrong file.
+func TestDownloadAgent_UnknownPlatformReturns404(t *testing.T) {
+	app := brandingTestEnv(t)
+	for _, target := range []string{
+		"/download/agent-darwin-arm64",
+		"/download/agent-windows-amd64",
+		"/download/agent-darwin-amd64",
+		"/download/agent-linux-arm64",
+	} {
+		t.Run(target, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			resp, err := app.Test(req, -1)
+			if err != nil {
+				t.Fatalf("app.Test: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNotFound {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("%s expected 404, got %d body=%s", target, resp.StatusCode, string(body))
+			}
+			body, _ := io.ReadAll(resp.Body)
+			if !strings.Contains(string(body), "agent binary not available") {
+				t.Errorf("%s body should mention the missing-platform error, got: %s", target, string(body))
+			}
+		})
+	}
+}
+
+// TestDownloadAgent_PathTraversalBlocked locks in that the allowlist
+// pattern is the security control. A request whose params concatenate
+// into "..-..-passwd" (or any other non-allowlisted key) MUST 404 at
+// the map lookup, never reach SendFile. If a future refactor reverts
+// to templating the params into a path, this test catches it.
+func TestDownloadAgent_PathTraversalBlocked(t *testing.T) {
+	app := brandingTestEnv(t)
+	traversals := []string{
+		"/download/agent-..-..",
+		"/download/agent-..%2Fetc-passwd",
+		"/download/agent-linux-amd64.bak",
+		"/download/agent-LINUX-AMD64",
+	}
+	for _, target := range traversals {
+		t.Run(target, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			resp, err := app.Test(req, -1)
+			if err != nil {
+				t.Fatalf("app.Test: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("%s unexpectedly served 200 body-len=%d", target, len(body))
+			}
+		})
+	}
+}
+
 // TestGenerateInstallScript_ShellInjectionAttemptIsSafe is the
 // adversarial regression: a malicious company_name that would, if
 // interpolated into a shell-significant context, break out and run

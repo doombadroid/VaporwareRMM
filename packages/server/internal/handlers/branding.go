@@ -20,6 +20,21 @@ var (
 	brandAppNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 	// PrimaryColor must be a CSS hex color so the dashboard CSS injection is bounded.
 	brandColorRe = regexp.MustCompile(`^#(?:[0-9a-fA-F]{3}){1,2}$`)
+
+	// agentBinaryPaths is the allowlist of supported (os-arch) →
+	// on-disk binary path served by GET /download/agent-:os-:arch.
+	// Templating the request params into a path would be a directory-
+	// traversal primitive; an allowlist makes the lookup explicit
+	// and lets a future Codex review trivially confirm the surface.
+	//
+	// Adding a new platform requires TWO changes:
+	//   1. Add an entry here keyed by "<os>-<arch>".
+	//   2. Add a matching build stage in packages/server/Dockerfile
+	//      that produces the file at the path used here.
+	// Forgetting (2) means the new entry serves a 500/404 to clients.
+	agentBinaryPaths = map[string]string{
+		"linux-amd64": "/opt/agents/linux-amd64",
+	}
 )
 
 func RegisterBrandingRoutes(app *fiber.App, api fiber.Router) {
@@ -54,18 +69,23 @@ func RegisterBrandingRoutes(app *fiber.App, api fiber.Router) {
 		return serveAgentInstall(c)
 	})
 
-	// Serve pre-built agent binary. The :os and :arch path params are
-	// captured for URL routing only — the file path passed to SendFile
-	// is hardcoded so a future refactor must NOT interpolate the params
-	// into the path without filepath.Clean + base-directory enforcement
-	// (otherwise a request like /download/agent-../../etc/passwd-x
-	// would traverse). When per-platform binaries land, build a strict
-	// allowlist map (linux-amd64 -> /opt/agents/linux-amd64) instead of
-	// templating the filename.
+	// Serve pre-built agent binary. The (os, arch) lookup goes through
+	// the agentBinaryPaths allowlist (declared above) so a request
+	// like /download/agent-..-..-passwd lands on a map miss and 404s.
+	// Adding new platforms means adding a map entry AND ensuring the
+	// Dockerfile produces the matching binary at that path — see the
+	// note on agentBinaryPaths.
 	app.Get("/download/agent-:os-:arch", func(c *fiber.Ctx) error {
+		key := c.Params("os") + "-" + c.Params("arch")
+		path, ok := agentBinaryPaths[key]
+		if !ok {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "agent binary not available for this platform",
+			})
+		}
 		c.Set("Content-Type", "application/octet-stream")
-		c.Set("Content-Disposition", "attachment; filename=vaporrmm-agent")
-		return c.SendFile("/tmp/vaporrmm-agent")
+		c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=vaporrmm-agent-%s", key))
+		return c.SendFile(path)
 	})
 
 	// Also register on v1 for consistency
@@ -343,54 +363,49 @@ esac
 BINARY_PATH="${INSTALL_DIR}/${APP_NAME,,}-agent"
 DOWNLOAD_URL="${SERVER_URL}/download/agent-${OS}-${ARCH}"
 
-# Helper: try to download binary from server
+# Helper: try to download binary from server. Captures the HTTP
+# status into DOWNLOAD_STATUS so the error path can surface it.
+DOWNLOAD_STATUS=""
 download_binary() {
   echo "Downloading pre-built agent binary..."
   if command -v curl &> /dev/null; then
-    curl -fsSL "$DOWNLOAD_URL" -o "$BINARY_PATH" 2>/dev/null && return 0
-  fi
-  if command -v wget &> /dev/null; then
-    wget -q "$DOWNLOAD_URL" -O "$BINARY_PATH" 2>/dev/null && return 0
-  fi
-  return 1
-}
-
-# Helper: try local dev build (only for localhost/127.0.0.1)
-build_local() {
-  if ! command -v go &> /dev/null; then
+    DOWNLOAD_STATUS=$(curl -fsSL -w "%%{http_code}" -o "$BINARY_PATH" "$DOWNLOAD_URL" 2>/dev/null) && return 0
     return 1
   fi
-  # Only attempt local build if server is localhost (dev environment)
-  case "$SERVER_URL" in
-    *localhost*|*127.0.0.1*)
-      # Search common local source paths
-      for SRC in "$HOME/Documents/vaporRMM/packages/agent" "$HOME/vaporRMM/packages/agent" "$HOME/workspace/vaporRMM/packages/agent" "$(pwd)/../vaporRMM/packages/agent"; do
-        if [ -d "$SRC" ] && [ -f "$SRC/main.go" ]; then
-          echo "Building agent from local source: $SRC"
-          cd "$SRC"
-          go build -o "$BINARY_PATH" .
-          return 0
-        fi
-      done
-      ;;
-  esac
+  if command -v wget &> /dev/null; then
+    # wget doesn't have an easy status-code capture. Probe with a HEAD-style
+    # request to learn the status, then fall through to the real fetch on 200.
+    DOWNLOAD_STATUS=$(wget --server-response --spider "$DOWNLOAD_URL" 2>&1 | awk '/HTTP\// {code=$2} END {print code}')
+    if [ "$DOWNLOAD_STATUS" = "200" ]; then
+      wget -q "$DOWNLOAD_URL" -O "$BINARY_PATH" 2>/dev/null && return 0
+    fi
+    return 1
+  fi
+  DOWNLOAD_STATUS="no_http_client"
   return 1
 }
 
-# Attempt install: download first, then local build, then fail
+# Attempt install: download from server. No local-build fallback in
+# production — the dev-only path that searched ~/Documents/vaporRMM
+# was confusing for end users hitting an install failure on a real
+# host. Operators who need a non-standard arch should add it to the
+# server's allowlist (see agentBinaryPaths in branding.go).
 if download_binary; then
   chmod +x "$BINARY_PATH"
   echo "Agent binary downloaded successfully."
-elif build_local; then
-  echo "Agent built from local source."
 else
   echo ""
-  echo "ERROR: Could not install agent automatically."
+  echo "ERROR: Could not download agent binary."
+  echo "  URL:    $DOWNLOAD_URL"
+  echo "  Status: HTTP ${DOWNLOAD_STATUS:-unknown}"
   echo ""
-  echo "Options:"
-  echo "  1. Ensure the server has a pre-built binary at: $DOWNLOAD_URL"
-  echo "  2. Install Go and place the vaporRMM source tree at ~/Documents/vaporRMM/"
-  echo "  3. Build the agent manually and copy to: $BINARY_PATH"
+  echo "Likely causes:"
+  echo "  - This OS/arch (${OS}/${ARCH}) is not built into the server image."
+  echo "    Confirm by listing the server's supported platforms with the"
+  echo "    operator; only platforms in agentBinaryPaths are served."
+  echo "  - The server is unreachable from this host. Verify connectivity:"
+  echo "      curl -fsSL ${SERVER_URL}/health"
+  echo "    Expect a JSON \"status\":\"ok\" response."
   echo ""
   exit 1
 fi

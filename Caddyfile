@@ -35,6 +35,10 @@
         reverse_proxy server:8080
     }
 
+    handle /download/* {
+        reverse_proxy server:8080
+    }
+
     # /caddy/ask is intentionally NOT proxied to the public.
     # Caddy reaches it directly via http://server:8080/caddy/ask on the
     # internal docker network (configured in the on_demand_tls block above).
@@ -84,6 +88,10 @@
     }
 
     handle /agent/* {
+        reverse_proxy server:8080
+    }
+
+    handle /download/* {
         reverse_proxy server:8080
     }
 

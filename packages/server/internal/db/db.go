@@ -1228,6 +1228,32 @@ func RunMigrations(dialect string) error {
 			SQL:         `-- sqlite int affinity is already 64-bit; no-op`,
 			PostgresSQL: `ALTER TABLE devices ALTER COLUMN memory TYPE BIGINT, ALTER COLUMN disk_size TYPE BIGINT;`,
 		},
+		{
+			Version: "052",
+			Name:    "tailscale_connection_singleton",
+			// Phase 1 of Tailscale integration (issue #18). One global
+			// credential per VaporwareRMM instance — super-admin only.
+			// The CHECK constraint on id='singleton' prevents a second
+			// row from ever appearing: any future per-tenant or BYO
+			// credential design (issues #19 / #20) will live in a
+			// separate table, not in this one.
+			//
+			// Credentials are encrypted via the SECRETS_ENCRYPTION_KEY
+			// pattern (crypto.Encrypt) BEFORE they hit the column.
+			// The column type stores the enc: prefixed ciphertext.
+			SQL: `CREATE TABLE IF NOT EXISTS tailscale_connection (
+				id TEXT PRIMARY KEY DEFAULT 'singleton' CHECK (id = 'singleton'),
+				oauth_client_id_encrypted TEXT NOT NULL,
+				oauth_client_secret_encrypted TEXT NOT NULL,
+				tailnet TEXT NOT NULL,
+				tailnet_display_name TEXT,
+				connected_at INTEGER NOT NULL,
+				connected_by_user_id TEXT,
+				last_validated_at INTEGER,
+				last_validation_error TEXT,
+				rotated_at INTEGER
+			);`,
+		},
 	}
 
 	for _, m := range migrations {

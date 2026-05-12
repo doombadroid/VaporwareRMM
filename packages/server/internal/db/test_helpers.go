@@ -68,6 +68,7 @@ var testTables = []string{
 	"alert_settings",
 	"tenant_policies",
 	"tenant_oidc_configs",
+	"tailscale_connection",
 	// Tenants is intentionally last because most other tables
 	// reference its id; defaulting to "default" should remain.
 	"tenants",

@@ -15,7 +15,6 @@
     on_demand_tls {
         ask http://server:8080/caddy/ask
         # Limit issuance rate to slow down accidental misconfigs.
-        burst 5
     }
 }
 

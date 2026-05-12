@@ -17,6 +17,7 @@ import { toast } from 'sonner'
 import { branding as brandingApi, type BrandingConfig } from '@/lib/api'
 import { useBranding } from '@/components/BrandingProvider'
 import { brandAppNameError, slugifyAppName } from '@/lib/utils'
+import NetworkStep from '@/components/dashboard/NetworkStep'
 
 interface SetupWizardProps {
   open: boolean
@@ -55,6 +56,7 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
   const steps = [
     { title: 'Welcome', icon: Sparkles },
     { title: 'Branding', icon: Palette },
+    { title: 'Network', icon: Server },
     { title: 'Install Agent', icon: Server },
     { title: 'AI (optional)', icon: Sparkles },
     { title: 'Complete', icon: CheckCircle },
@@ -288,6 +290,10 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
           )}
 
           {step === 2 && (
+            <NetworkStep />
+          )}
+
+          {step === 3 && (
             <div className="space-y-5">
               <p className="text-sm text-white/50">
                 Install your first agent by running this command on any Linux device:
@@ -325,7 +331,7 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
             </div>
           )}
 
-          {step === 3 && (
+          {step === 4 && (
             <div className="space-y-5">
               <div className="space-y-2">
                 <h3 className="text-lg font-semibold text-white">AI agent layer (optional)</h3>
@@ -350,7 +356,7 @@ export default function SetupWizard({ open, onClose }: SetupWizardProps) {
             </div>
           )}
 
-          {step === 4 && (
+          {step === 5 && (
             <div className="space-y-4 text-center">
               <div className="w-20 h-20 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto border border-emerald-500/20">
                 <CheckCircle className="w-10 h-10 text-emerald-400" />

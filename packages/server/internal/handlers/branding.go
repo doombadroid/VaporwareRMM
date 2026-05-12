@@ -514,6 +514,10 @@ INIT_SYSTEM=""
 if command -v systemctl &> /dev/null && [ -d /etc/systemd/system ]; then
   INIT_SYSTEM="systemd"
   echo "Installing systemd service..."
+  # ExecStart deliberately carries no --server-url flag — the agent
+  # reads VAPOR_SERVER_URL from the EnvironmentFile. One source of
+  # truth (the env file) avoids the mixed-mode bug where the flag
+  # disagreed with the env value.
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=$APP_NAME Agent
@@ -522,7 +526,7 @@ After=network.target
 [Service]
 Type=simple
 EnvironmentFile=${ENV_FILE}
-ExecStart=${BINARY_PATH} --server-url=${SERVER_URL}
+ExecStart=${BINARY_PATH}
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -541,25 +545,37 @@ EOF
 elif command -v rc-update &> /dev/null && [ -d /etc/init.d ]; then
   INIT_SYSTEM="openrc"
   echo "Installing OpenRC service..."
-  cat > "/etc/conf.d/${SERVICE_NAME}" <<EOF
-# Sourced by the OpenRC init script. Keep secrets in ${ENV_FILE} (mode 0600).
-. ${ENV_FILE}
-export VAPOR_SERVER_URL VAPOR_AGENT_TOKEN REGISTRATION_SECRET
-EOF
-  cat > "/etc/init.d/${SERVICE_NAME}" <<'EOF'
+  # Unquoted heredoc so install-time vars (BINARY_PATH, APP_NAME,
+  # ENV_FILE, SERVICE_NAME) expand here. \${RC_SVCNAME} is escaped
+  # to defer expansion until OpenRC reads the service file at
+  # runtime — that variable is owned by OpenRC, not this script.
+  #
+  # start_pre sources the env file inside set -a / set +a so every
+  # KEY=value line becomes an exported variable for the daemon
+  # process. This replaces the prior /etc/conf.d/<SERVICE>
+  # indirection that wasn't loading agent.env correctly.
+  cat > "/etc/init.d/${SERVICE_NAME}" <<EOF
 #!/sbin/openrc-run
-
-description="VaporRMM Agent"
-command="/usr/local/bin/vaporrmm-agent"
-command_args="--server-url=http://localhost:8080"
+description="${APP_NAME} Agent"
+command="${BINARY_PATH}"
+command_args=""
 command_background=true
-pidfile="/run/${RC_SVCNAME}.pid"
+pidfile="/run/\${RC_SVCNAME}.pid"
+output_log="/var/log/${SERVICE_NAME}.log"
+error_log="/var/log/${SERVICE_NAME}.log"
 
 depend() {
-  need net
+    need net
+}
+
+start_pre() {
+    if [ -f ${ENV_FILE} ]; then
+        set -a
+        . ${ENV_FILE}
+        set +a
+    fi
 }
 EOF
-  sed -i "s|command_args=.*|command_args=\"--server-url=${SERVER_URL}\"|" "/etc/init.d/${SERVICE_NAME}"
   chmod +x "/etc/init.d/${SERVICE_NAME}"
   rc-update add "$SERVICE_NAME" default 2>/dev/null || true
   rc-service "$SERVICE_NAME" restart 2>/dev/null || rc-service "$SERVICE_NAME" start 2>/dev/null || {

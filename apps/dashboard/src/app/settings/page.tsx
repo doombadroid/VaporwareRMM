@@ -163,22 +163,25 @@ export default function SettingsPage() {
 
           <div className="flex-1 max-w-2xl">
             {activeTab === 'general' && (
-              <Section title="Server identity" className="mb-0">
-                <div className="space-y-4">
-                  <div>
-                    <label className={labelCls}>Server URL</label>
-                    <input type="text" value={origin} readOnly className={`w-full ${inputCls} font-mono`} />
-                    <p className="text-[11.5px] text-white/35 mt-1.5">URL agents connect to.</p>
+              <>
+                <Section title="Server identity" className="mb-6">
+                  <div className="space-y-4">
+                    <div>
+                      <label className={labelCls}>Server URL</label>
+                      <input type="text" value={origin} readOnly className={`w-full ${inputCls} font-mono`} />
+                      <p className="text-[11.5px] text-white/35 mt-1.5">URL agents connect to.</p>
+                    </div>
+                    <div className="border border-white/[0.06] rounded-lg bg-white/[0.01] px-4 py-3">
+                      <p className="text-[12.5px] font-medium text-white/85 mb-1">Runtime timing</p>
+                      <p className="text-[11.5px] text-white/55 leading-relaxed">
+                        Heartbeat interval, offline threshold, and command timeout are set on the server via env vars
+                        (<Code>OFFLINE_THRESHOLD_SECONDS</Code>, agent build flags). Edit your deployment config and restart.
+                      </p>
+                    </div>
                   </div>
-                  <div className="border border-white/[0.06] rounded-lg bg-white/[0.01] px-4 py-3">
-                    <p className="text-[12.5px] font-medium text-white/85 mb-1">Runtime timing</p>
-                    <p className="text-[11.5px] text-white/55 leading-relaxed">
-                      Heartbeat interval, offline threshold, and command timeout are set on the server via env vars
-                      (<Code>OFFLINE_THRESHOLD_SECONDS</Code>, agent build flags). Edit your deployment config and restart.
-                    </p>
-                  </div>
-                </div>
-              </Section>
+                </Section>
+                <TailscaleIndicator />
+              </>
             )}
 
             {activeTab === 'branding' && (
@@ -522,5 +525,38 @@ export default function SettingsPage() {
         />
       </DashboardShell>
     </AuthGuard>
+  )
+}
+
+// TailscaleIndicator: read-only tenant-admin view of the
+// fleet-wide Tailscale connection. Tenant admins can't reach
+// Settings → Network (commit 5), so this small card on Settings →
+// General is the only surface they see. The server endpoint
+// returns just { connected, tailnet_display_name } for non-super-
+// admin roles (commit 3), so the operational metadata
+// (connected_at, who-connected, the raw tailnet name) is never
+// exposed to tenants.
+function TailscaleIndicator() {
+  const [conn, setConn] = useState<{ connected?: boolean; tailnet_display_name?: string }>({})
+  useEffect(() => {
+    api.get('/tailscale/connection').then(r => setConn(r.data)).catch(() => setConn({ connected: false }))
+  }, [])
+  return (
+    <Section title="Network" className="mb-0">
+      <div className="flex items-center gap-3">
+        <StatusDot tone={conn.connected ? 'online' : 'offline'} pulse={!!conn.connected} />
+        {conn.connected ? (
+          <span className="text-[12.5px] text-white/80">
+            Tailscale — connected to{' '}
+            <span className="font-mono text-white">{conn.tailnet_display_name || 'tailnet'}</span>
+          </span>
+        ) : (
+          <span className="text-[12.5px] text-white/55">Tailscale — not configured</span>
+        )}
+      </div>
+      <p className="text-[11.5px] text-white/35 mt-1.5">
+        Network configuration is managed by your administrator.
+      </p>
+    </Section>
   )
 }

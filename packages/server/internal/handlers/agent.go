@@ -96,6 +96,7 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 
 		osName, _ := regInfo["os"].(string)
 		osVersion, _ := regInfo["os_version"].(string)
+		kernelVersion, _ := regInfo["kernel_version"].(string)
 		localIP, _ := regInfo["local_ip"].(string)
 		macAddr, _ := regInfo["mac_address"].(string)
 		cpuModel, _ := regInfo["cpu"].(string)
@@ -190,8 +191,8 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 				// rotation. legacy_pop_bypass_used was already flipped
 				// to 1 atomically inside AcquireLegacyBypass.
 				if _, err := db.DB.Exec(
-					`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
-					localIP, osName, osVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
+					`UPDATE devices SET ip_address = ?, os_name = ?, os_version = ?, kernel_version = ?, agent_version = ?, status = 'online', last_seen = ?, cpu = ?, agent_ip = ?, os_class = ? WHERE id = ?`,
+					localIP, osName, osVersion, kernelVersion, agentVersion, now, cpuModel, localIP, osClass, deviceID,
 				); err != nil {
 					db.DedupMu.Unlock()
 					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to refresh device", "message": err.Error()})
@@ -236,9 +237,9 @@ func RegisterAgentRoutes(app *fiber.App, cfg Config) {
 		default:
 			deviceID = uuid.New().String()
 			if _, err := db.DB.Exec(
-				`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, agent_version, status, last_seen, created_at, cpu, agent_ip, tenant_id, os_class)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, agentVersion, "online", now, now, cpuModel, localIP, tenantID, osClass,
+				`INSERT INTO devices (id, name, hostname, ip_address, mac_address, os_name, os_version, kernel_version, agent_version, status, last_seen, created_at, cpu, agent_ip, tenant_id, os_class)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				deviceID, hostname, hostname, localIP, macAddr, osName, osVersion, kernelVersion, agentVersion, "online", now, now, cpuModel, localIP, tenantID, osClass,
 			); err != nil {
 				db.DedupMu.Unlock()
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register device", "message": err.Error()})

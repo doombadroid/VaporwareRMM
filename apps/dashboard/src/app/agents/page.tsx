@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { toast } from 'sonner'
 import { devices as devicesApi, type Device } from '@/lib/api'
+import { formatOSVersion } from '@/lib/utils'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
 import { PageHeader } from '@/components/ui/page'
@@ -90,7 +91,7 @@ export default function AgentsPage() {
         </span>
       ),
     },
-    { key: 'os', header: 'OS', render: (d) => <span className="text-white/55 text-[12px]">{d.os_name} {d.os_version}</span> },
+    { key: 'os', header: 'OS', render: (d) => <span className="text-white/55 text-[12px]">{formatOSVersion(d.os_name, d.os_version, d.kernel_version)}</span> },
     { key: 'ip', header: 'IP', render: (d) => <Code>{d.ip_address || '—'}</Code> },
     {
       key: 'last',

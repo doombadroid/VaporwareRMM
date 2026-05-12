@@ -1160,19 +1160,31 @@ func (a *Agent) getRegistrationInfo() map[string]interface{} {
 		firstLocalIP = localIPs[0]
 	}
 
+	// os_version keeps the distro/release string from gopsutil's
+	// PlatformVersion (useful on Windows for build numbers and on
+	// macOS for product version). On Linux that field is whatever
+	// /etc/os-release says — "2.18" on a Gentoo profile, "24.04"
+	// on Ubuntu — and not actually answering the question
+	// operators ask ("what kernel is running on this box?").
+	// kernel_version carries gopsutil's KernelVersion, which is
+	// consistent across all three OSes (Linux: uname -r,
+	// Windows: kernel build number, macOS: Darwin version).
+	// Dashboard prefers kernel_version for display, falls back to
+	// os_version when kernel_version is missing (older agents).
 	return map[string]interface{}{
-		"hostname":      a.hostname,
-		"os":            hostInfo.OS,
-		"os_version":    hostInfo.PlatformVersion,
-		"local_ip":      firstLocalIP,
-		"local_ips":     localIPs,
-		"mac_address":   macAddr,
-		"cpu":           getCPUName(cpuInfo),
-		"ram":           memInfo.Total,
-		"storage":       diskInfo.Total,
-		"uptime":        hostInfo.Uptime,
-		"agent_version": "1.0.0",
-		"agent_port":    a.port,
+		"hostname":       a.hostname,
+		"os":             hostInfo.OS,
+		"os_version":     hostInfo.PlatformVersion,
+		"kernel_version": hostInfo.KernelVersion,
+		"local_ip":       firstLocalIP,
+		"local_ips":      localIPs,
+		"mac_address":    macAddr,
+		"cpu":            getCPUName(cpuInfo),
+		"ram":            memInfo.Total,
+		"storage":        diskInfo.Total,
+		"uptime":         hostInfo.Uptime,
+		"agent_version":  "1.0.0",
+		"agent_port":     a.port,
 	}
 }
 

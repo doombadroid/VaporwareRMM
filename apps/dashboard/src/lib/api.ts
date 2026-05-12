@@ -64,6 +64,7 @@ export interface Device {
   mac_address: string;
   os_name: string;
   os_version: string;
+  kernel_version?: string;
   agent_version: string;
   status: string;
   last_seen: number;

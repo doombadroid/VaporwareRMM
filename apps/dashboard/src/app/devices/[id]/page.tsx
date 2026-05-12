@@ -14,6 +14,7 @@ import {
   type SoftwareEntry,
   type HardwareInfo,
 } from '@/lib/api'
+import { formatOSVersion } from '@/lib/utils'
 import AuthGuard from '@/components/AuthGuard'
 import DashboardShell from '@/components/layout/DashboardShell'
 import { PageHeader, Section, EmptyState } from '@/components/ui/page'
@@ -129,7 +130,7 @@ export default function DeviceDetailPage() {
             { href: '/agents', label: 'Devices' },
             { label: device.hostname },
           ]}
-          eyebrow={`${device.os_name} ${device.os_version}`}
+          eyebrow={formatOSVersion(device.os_name, device.os_version, device.kernel_version)}
           title={device.hostname}
           description={device.id}
           actions={

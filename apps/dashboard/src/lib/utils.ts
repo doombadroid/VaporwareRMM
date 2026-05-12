@@ -24,6 +24,29 @@ export function brandAppNameError(value: string): string {
   return ""
 }
 
+// formatOSVersion picks the most operationally useful version string
+// for display: kernel_version (uname -r on Linux, kernel build on
+// Windows, Darwin version on macOS) when present, otherwise
+// os_version (the distro/release string, which on Linux is the
+// near-useless /etc/os-release VERSION_ID like "2.18" on Gentoo).
+// Agents that pre-date the kernel-version reporting commit return
+// only os_version; the fallback keeps the display populated until
+// every host has re-registered.
+export function formatOSVersion(
+  osName: string | undefined,
+  osVersion: string | undefined,
+  kernelVersion: string | undefined,
+): string {
+  const name = osName?.trim() ?? ""
+  const kernel = kernelVersion?.trim() ?? ""
+  const version = osVersion?.trim() ?? ""
+  const v = kernel || version
+  if (!name && !v) return ""
+  if (!name) return v
+  if (!v) return name
+  return `${name} ${v}`
+}
+
 // slugifyAppName converts a human display name into a value that
 // satisfies BRAND_APP_NAME_REGEX. Returns "" if no safe characters
 // remain, so callers can refuse to overwrite a manually-edited

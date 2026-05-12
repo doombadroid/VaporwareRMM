@@ -11,6 +11,7 @@ import {
   branding as brandingApi,
 } from '@/lib/api'
 import api from '@/lib/api'
+import { formatOSVersion } from '@/lib/utils'
 import AuthGuard from '@/components/AuthGuard'
 import { useBranding } from '@/components/BrandingProvider'
 import DashboardShell from '@/components/layout/DashboardShell'
@@ -369,7 +370,7 @@ export default function DashboardPage() {
                               </span>
                             </td>
                             <td className="px-3 text-white/60 text-[12px]">
-                              {d.os_name} {d.os_version}
+                              {formatOSVersion(d.os_name, d.os_version, d.kernel_version)}
                             </td>
                             <td className="px-3">
                               <Code>{d.ip_address || '—'}</Code>

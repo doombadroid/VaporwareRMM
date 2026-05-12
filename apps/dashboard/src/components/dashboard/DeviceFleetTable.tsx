@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { formatTimeAgo } from '@/lib/dashboard-utils'
 import type { Device } from '@/lib/api'
+import { formatOSVersion } from '@/lib/utils'
 
 interface DeviceFleetTableProps {
   devices: Device[]
@@ -164,7 +165,7 @@ export default function DeviceFleetTable({
                       {device.hostname}
                     </p>
                     <p className="text-[10px] text-white/30">
-                      {device.os_name} {device.os_version}
+                      {formatOSVersion(device.os_name, device.os_version, device.kernel_version)}
                     </p>
                     {device.tags && device.tags.length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-1">

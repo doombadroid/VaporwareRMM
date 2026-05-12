@@ -538,9 +538,16 @@ EOF
   systemctl daemon-reload
   systemctl enable "$SERVICE_NAME" 2>/dev/null || true
   systemctl restart "$SERVICE_NAME" 2>/dev/null || systemctl start "$SERVICE_NAME" 2>/dev/null || {
-    echo "WARNING: Could not start systemd service. Starting manually..."
-    nohup "$BINARY_PATH" --server-url="$SERVER_URL" > /dev/null 2>&1 &
-    INIT_SYSTEM=""
+    echo ""
+    echo "ERROR: Service did not start successfully."
+    echo "Check the logs:"
+    echo "  Linux (OpenRC):  sudo tail -100 /var/log/${SERVICE_NAME}.log"
+    echo "  Linux (systemd): sudo journalctl -u ${SERVICE_NAME} -n 100 --no-pager"
+    echo ""
+    echo "Once you've diagnosed the issue, restart with:"
+    echo "  Linux (OpenRC):  sudo rc-service ${SERVICE_NAME} restart"
+    echo "  Linux (systemd): sudo systemctl restart ${SERVICE_NAME}"
+    exit 1
   }
 elif command -v rc-update &> /dev/null && [ -d /etc/init.d ]; then
   INIT_SYSTEM="openrc"
@@ -579,13 +586,26 @@ EOF
   chmod +x "/etc/init.d/${SERVICE_NAME}"
   rc-update add "$SERVICE_NAME" default 2>/dev/null || true
   rc-service "$SERVICE_NAME" restart 2>/dev/null || rc-service "$SERVICE_NAME" start 2>/dev/null || {
-    echo "WARNING: Could not start OpenRC service. Starting manually..."
-    nohup "$BINARY_PATH" --server-url="$SERVER_URL" > /dev/null 2>&1 &
-    INIT_SYSTEM=""
+    echo ""
+    echo "ERROR: Service did not start successfully."
+    echo "Check the logs:"
+    echo "  Linux (OpenRC):  sudo tail -100 /var/log/${SERVICE_NAME}.log"
+    echo "  Linux (systemd): sudo journalctl -u ${SERVICE_NAME} -n 100 --no-pager"
+    echo ""
+    echo "Once you've diagnosed the issue, restart with:"
+    echo "  Linux (OpenRC):  sudo rc-service ${SERVICE_NAME} restart"
+    echo "  Linux (systemd): sudo systemctl restart ${SERVICE_NAME}"
+    exit 1
   }
 else
-  echo "No systemd or OpenRC detected. Starting agent directly..."
-  nohup "$BINARY_PATH" --server-url="$SERVER_URL" > /dev/null 2>&1 &
+  echo ""
+  echo "ERROR: Neither systemd nor OpenRC detected on this host."
+  echo "The vaporRMM agent requires one of:"
+  echo "  - systemd (Ubuntu/Debian/RHEL/Fedora/Arch)"
+  echo "  - OpenRC  (Alpine/Gentoo)"
+  echo ""
+  echo "Install an init system, then re-run this install script."
+  exit 1
 fi
 
 echo ""
@@ -607,10 +627,7 @@ if [ "$INIT_SYSTEM" = "systemd" ]; then
   echo "View logs:     journalctl -u $SERVICE_NAME -f"
 elif [ "$INIT_SYSTEM" = "openrc" ]; then
   echo "Check status:  rc-service $SERVICE_NAME status"
-  echo "View logs:     tail -f /var/log/vaporrmm-agent.log  (or check syslog)"
-else
-  echo "Check status:  ps aux | grep vaporrmm-agent"
-  echo "View logs:     No centralized logging (running via nohup)"
+  echo "View logs:     tail -f /var/log/${SERVICE_NAME}.log"
 fi
 `, companyName, companyName, serverURL, serverURL, serverURL, serverURL, serverURL, appName, serverURL, iconURL)
 }

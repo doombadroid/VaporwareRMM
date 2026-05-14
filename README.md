@@ -1,10 +1,16 @@
-# Vaporware RMM
+# VaporwareRMM Edge
 
-[![CI/CD Pipeline](https://github.com/tabiznet/VaporwareRMM/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tabiznet/VaporwareRMM/actions/workflows/ci.yml)
+Self-hosted RMM for MSPs and home users. The on-site / single-server product in the VaporwareRMM family.
+
+[![CI/CD Pipeline](https://github.com/doombadroid/VaporwareRMM-Edge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/doombadroid/VaporwareRMM-Edge/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/tabiznet/VaporwareRMM?include_prereleases&sort=semver)](https://github.com/tabiznet/VaporwareRMM/releases)
+[![Release](https://img.shields.io/github/v/release/doombadroid/VaporwareRMM-Edge?include_prereleases&sort=semver)](https://github.com/doombadroid/VaporwareRMM-Edge/releases)
 
 Self-hosted Remote Monitoring & Management for MSPs and small ops teams. Multi-tenant by design. Sunshine + Moonlight for remote desktop. Tailscale for agent transport.
+
+## Related projects
+
+- **[VaporwareRMM Vantage](https://github.com/doombadroid/VaporwareRMM-Vantage)** — federation control server for multi-site MSP deployments. Optional; Edge runs fully standalone without it. Pre-implementation; see the federation design issue in this repo for current discussion.
 
 > ## ⚠️ ALPHA SOFTWARE — USE AT YOUR OWN RISK
 >
@@ -162,7 +168,7 @@ Prerequisites: Docker + Docker Compose, a domain with DNS control if you want re
 ### 1. Clone + secrets
 
 ```bash
-git clone https://github.com/tabiznet/VaporwareRMM /srv/vaporrmm
+git clone https://github.com/doombadroid/VaporwareRMM-Edge /srv/vaporrmm
 cd /srv/vaporrmm
 
 mkdir -p secrets
@@ -224,9 +230,9 @@ when configured. v1 puts every managed endpoint on a single tailnet with
 per-tenant device tagging — cross-tenant isolation is enforced via Tailscale
 ACLs you author (see `docs/tailscale-acl-recipe.md` for a paste-ready
 starting config). Future versions add hard per-tenant tailnets
-([#19](https://github.com/doombadroid/VaporwareRMM/issues/19)) and BYO
+([#19](https://github.com/doombadroid/VaporwareRMM-Edge/issues/19)) and BYO
 per-tenant credentials
-([#20](https://github.com/doombadroid/VaporwareRMM/issues/20)).
+([#20](https://github.com/doombadroid/VaporwareRMM-Edge/issues/20)).
 
 What the setup wizard does:
 
